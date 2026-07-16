@@ -1,0 +1,19 @@
+{
+  "groups": [
+    {
+      "id": 1,
+      "name": "Admin",
+      "permissions": ["read", "write", "delete"]
+    },
+    {
+      "id": 2,
+      "name": "HR",
+      "permissions": ["read", "write"]
+    },
+    {
+      "id": 3,
+      "name": "Employee",
+      "permissions": ["read"]
+    }
+  ]
+}
