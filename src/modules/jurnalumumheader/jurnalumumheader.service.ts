@@ -188,95 +188,91 @@ export class JurnalumumheaderService {
       }
 
       const newItem = insertedItems[0];
-      await this.statuspendukungService.create(
-        this.tableName,
-        newItem.id,
-        data.modifiedby,
-        trx,
-      );
 
-      const newItemFormatted = await this.findOne(newItem.id, trx);
-      const tempJurnalumumheader = `temp_jurnalumumheader${insertData.modifiedby}`;
+      // ── Posisi/pagination + status pasca-simpan (NON-FATAL) ──────────────
+      // Header + detail jurnal SUDAH ter-insert di atas. Blok di bawah hanya
+      // menghitung posisi baris di grid via findOne/findAll — yang memakai mesin
+      // PIVOT + JSON_VALUE warisan MSSQL (tempStatusPendukung) dan bisa gagal
+      // "query is empty" untuk record baru. Kegagalannya TIDAK boleh me-rollback
+      // simpan yang sudah berhasil (return blok ini diabaikan pemanggil dari alur
+      // pengeluaran). Default posisi bila gagal.
+      let newItemFormatted: any = { data: [newItem] };
+      let pageNumber = 1;
+      let itemIndex = 0;
+      try {
+        await this.statuspendukungService.create(
+          this.tableName,
+          newItem.id,
+          data.modifiedby,
+          trx,
+        );
 
-      // Cek apakah temp table sudah ada
-      const tempTableExists = await trx.schema.hasTable(tempJurnalumumheader);
+        newItemFormatted = await this.findOne(newItem.id, trx);
+        const tempJurnalumumheader = `temp_jurnalumumheader${insertData.modifiedby}`;
+        const tempTableExists = await trx.schema.hasTable(tempJurnalumumheader);
+        if (!tempTableExists) {
+          await trx.schema.createTable(tempJurnalumumheader, (t) => {
+            t.string('id').nullable();
+            t.string('nobukti').nullable();
+            t.string('tglbukti').nullable();
+            t.string('keterangan').nullable();
+            t.string('postingdari').nullable();
+            t.string('statusformat').nullable();
+            t.string('keteranganapproval').nullable();
+            t.string('tglapproval').nullable();
+            t.string('statusapproval').nullable();
+            t.string('keterangancetak').nullable();
+            t.string('tglcetak').nullable();
+            t.string('statuscetak').nullable();
+            t.string('statusapproval_id').nullable();
+            t.string('statuscetak_id').nullable();
+            t.string('info').nullable();
+            t.string('modifiedby').nullable();
+            t.string('updated_at').nullable();
+            t.string('created_at').nullable();
+          });
+          const payloadtemptable = {
+            namatabel: tempJurnalumumheader,
+            namamenu: this.tableName,
+            modifiedby: insertData.modifiedby,
+            created_at: this.utilsService.getTime(),
+            updated_at: this.utilsService.getTime(),
+          };
+          await trx('listtemporarytable').insert(
+            await withUuidV7(trx, payloadtemptable),
+          );
+        }
 
-      if (!tempTableExists) {
-        // Buat temp table jika belum ada
-        await trx.schema.createTable(tempJurnalumumheader, (t) => {
-          // id jurnalumumheader = varchar(200) UUID, bukan bigint (pasca migrasi
-          // id ke UUID). bigInteger -> insert UUID gagal "converting nvarchar to
-          // bigint".
-          t.string('id').nullable();
-          t.string('nobukti').nullable();
-          t.string('tglbukti').nullable();
-          t.string('keterangan').nullable();
-          t.string('postingdari').nullable();
-          t.string('statusformat').nullable();
-          t.string('keteranganapproval').nullable();
-          t.string('tglapproval').nullable();
-          t.string('statusapproval').nullable();
-          t.string('keterangancetak').nullable();
-          t.string('tglcetak').nullable();
-          t.string('statuscetak').nullable();
-          t.string('statusapproval_id').nullable();
-          t.string('statuscetak_id').nullable();
-          t.string('info').nullable();
-          t.string('modifiedby').nullable();
-          t.string('updated_at').nullable();
-          t.string('created_at').nullable();
-        });
-
-        // Register di listtemporarytable
-        const payloadtemptable = {
-          namatabel: tempJurnalumumheader,
-          namamenu: this.tableName,
-          modifiedby: insertData.modifiedby,
-          created_at: this.utilsService.getTime(),
-          updated_at: this.utilsService.getTime(),
-        };
-        await trx('listtemporarytable').insert(
-        await withUuidV7(trx, payloadtemptable),
-      );
+        await trx(tempJurnalumumheader).insert(newItemFormatted.data);
+        const { data: filteredItems } = await this.findAll(
+          {
+            search,
+            filters,
+            pagination: { page, limit: 0 },
+            sort: { sortBy, sortDirection },
+            isLookUp: false,
+          },
+          trx,
+          isreload,
+          insertData.modifiedby,
+        );
+        itemIndex = filteredItems.findIndex(
+          (item) => String(item.id) === String(newItem.id),
+        );
+        if (itemIndex === -1) itemIndex = 0;
+        pageNumber = limit > 0 ? Math.floor(itemIndex / limit) + 1 : 1;
+        const endIndex = limit > 0 ? pageNumber * limit : filteredItems.length;
+        const limitedItems = filteredItems.slice(0, endIndex);
+        await this.redisService.set(
+          `${this.tableName}-allItems`,
+          JSON.stringify(limitedItems),
+        );
+      } catch (posErr: any) {
+        console.warn(
+          'jurnalumumheader: komputasi posisi/status pasca-simpan gagal (non-fatal):',
+          posErr?.message,
+        );
       }
-      console.log('masuk2', newItemFormatted);
-
-      // Insert data baru ke temp table
-      await trx(tempJurnalumumheader).insert(newItemFormatted.data);
-      const { data: filteredItems } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
-        trx,
-        isreload,
-        insertData.modifiedby,
-      );
-
-      // 5. CARI INDEX ITEM BARU DALAM FILTERED ITEMS
-      let itemIndex = filteredItems.findIndex(
-        (item) => String(item.id) === String(newItem.id),
-      );
-
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
-
-      // 6. HITUNG PAGE NUMBER
-      const pageNumber = limit > 0 ? Math.floor(itemIndex / limit) + 1 : 1;
-      const endIndex = limit > 0 ? pageNumber * limit : filteredItems.length;
-
-      // 7. AMBIL DATA SAMPAI PAGE YANG DIPERLUKAN
-      const limitedItems = filteredItems.slice(0, endIndex);
-
-      // 8. SIMPAN KE REDIS
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
 
       // 9. CREATE STATUS PENDUKUNG
 

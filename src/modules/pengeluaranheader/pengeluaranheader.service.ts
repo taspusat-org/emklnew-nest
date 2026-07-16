@@ -515,88 +515,90 @@ export class PengeluaranheaderService implements OnModuleInit {
 
       await this.JurnalumumheaderService.create(jurnalPayload, trx);
 
-      const existingData = await trx(this.viewName)
-        .where('id', newItem.id)
-        .modify((qb) => this.applyFilters(qb, filters || {}, search))
-        .first();
-
-      // 3. Hitung posisi & total dengan filter yang sama
-      let posisi: number;
-      let totalItems: number;
-
-      // totalItems selalu dihitung dengan filter — fix bug utama
-      const totalRecords = await trx(this.viewName)
-        .count('id as total')
-        .modify((qb) => this.applyFilters(qb, filters || {}, search))
-        .first();
-      totalItems = Number(totalRecords?.total ?? 0);
-
-      if (existingData) {
-        const resultposition = await trx(this.viewName) // fix: pakai this.viewName, bukan hardcode 'valatbayar'
-          .count('* as posisi')
-          // Posisi = jumlah baris yang berada SEBELUM-atau-SAMA-DENGAN baris baru
-          // pada urutan grid (ORDER BY {sortBy} {dir}, id asc). PENTING: id dari
-          // dbo.GetUUIDv7() TIDAK time-sortable, jadi id baris baru BUKAN yang
-          // terbesar (sering justru kecil). Memakai `id <= newItem.id` sebagai
-          // AND global akan membuang baris ber-sortBy lebih kecil yang kebetulan
-          // ber-id lebih besar -> posisi under-count -> fokus meleset setelah save.
-          // id hanya boleh jadi tie-breaker saat nilai sortBy SAMA.
-          .where((qb) => {
-            qb.where(
-              sortBy,
-              sortDirection === 'desc' ? '>' : '<',
-              insertData[sortBy],
-            ).orWhere((q) =>
-              q.where(sortBy, insertData[sortBy]).andWhere('id', '<=', newItem.id),
-            );
-          })
+      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
+      // Header + detail + jurnal SUDAH ter-insert di atas. Blok ini hanya
+      // menghitung posisi/halaman baris baru untuk grid (query view + findAll).
+      // Kegagalannya (mis. sortBy undefined, atau view/pivot bermasalah) TIDAK
+      // boleh me-rollback simpan yang sudah berhasil. Default posisi bila gagal.
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      let pagedData: Record<number, any> = {};
+      let allFetchedData: any[] = [];
+      let itemIndex: any = { zeroBasedIndex: 0 };
+      try {
+        const existingData = await trx(this.viewName)
+          .where('id', newItem.id)
           .modify((qb) => this.applyFilters(qb, filters || {}, search))
           .first();
-        posisi = Number(resultposition?.posisi ?? 0);
-      } else {
-        posisi = 1;
+
+        const totalRecords = await trx(this.viewName)
+          .count('id as total')
+          .modify((qb) => this.applyFilters(qb, filters || {}, search))
+          .first();
+        const totalItems = Number(totalRecords?.total ?? 0);
+
+        let posisi: number;
+        if (existingData) {
+          const resultposition = await trx(this.viewName)
+            .count('* as posisi')
+            .where((qb) => {
+              qb.where(
+                sortBy,
+                sortDirection === 'desc' ? '>' : '<',
+                insertData[sortBy],
+              ).orWhere((q) =>
+                q
+                  .where(sortBy, insertData[sortBy])
+                  .andWhere('id', '<=', newItem.id),
+              );
+            })
+            .modify((qb) => this.applyFilters(qb, filters || {}, search))
+            .first();
+          posisi = Number(resultposition?.posisi ?? 0);
+        } else {
+          posisi = 1;
+        }
+        pageNumber = Math.ceil(posisi / limit);
+        const totalPages = Math.ceil(totalItems / limit);
+        fetchedPages = getFetchedPages(pageNumber, totalPages);
+        const startPage = fetchedPages[0];
+        const endPage = fetchedPages[fetchedPages.length - 1];
+        const customOffset = (startPage - 1) * limit;
+        const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+        const findAllResult = await this.findAll(
+          {
+            search: search || '',
+            filters: filters || {},
+            pagination: {
+              page: startPage,
+              limit: totalDataNeeded,
+              customOffset: customOffset,
+            },
+            sort: {
+              sortBy: sortBy,
+              sortDirection: sortDirection.toLowerCase(),
+            },
+            isLookUp: false,
+            useCustomOffset: true,
+          },
+          trx,
+        );
+
+        allFetchedData = findAllResult?.data ?? [];
+        let dataIndex = 0;
+        fetchedPages.forEach((pageNum) => {
+          pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+          dataIndex += limit;
+        });
+
+        itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+      } catch (posErr: any) {
+        console.warn(
+          'pengeluaranheader: komputasi posisi pasca-simpan gagal (non-fatal):',
+          posErr?.message,
+        );
       }
-      const pageNumber = Math.ceil(posisi / limit);
-      const totalPages = Math.ceil(totalItems / limit);
-
-      const fetchedPages = getFetchedPages(pageNumber, totalPages);
-
-      const startPage = fetchedPages[0];
-      const endPage = fetchedPages[fetchedPages.length - 1];
-
-      const customOffset = (startPage - 1) * limit;
-      const totalDataNeeded = (endPage - startPage + 1) * limit;
-
-      const findAllResult = await this.findAll(
-        {
-          search: search || '',
-          filters: filters || {},
-          pagination: {
-            page: startPage,
-            limit: totalDataNeeded,
-            customOffset: customOffset,
-          },
-          sort: {
-            sortBy: sortBy,
-            sortDirection: sortDirection.toLowerCase(),
-          },
-          isLookUp: false,
-          useCustomOffset: true,
-        },
-        trx,
-      );
-
-      const allFetchedData = findAllResult?.data;
-
-      const pagedData = {};
-      let dataIndex = 0;
-
-      fetchedPages.forEach((pageNum) => {
-        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
-        dataIndex += limit;
-      });
-
-      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       // ============ END GET POSITION ============
 
       await this.logTrailService.create(
