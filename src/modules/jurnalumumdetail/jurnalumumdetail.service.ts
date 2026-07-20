@@ -15,183 +15,108 @@ export class JurnalumumdetailService {
   ) {}
   private readonly logger = new Logger(JurnalumumdetailService.name);
   async create(details: any, id: any = 0, trx: any = null) {
-    let insertedData = null;
-    let data: any = null;
-    const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-
-    // Get the column info and create temporary table
-    const result = await trx(this.tableName).columnInfo();
-    const tableTemp = await this.utilsService.createTempTable(
-      this.tableName,
-      trx,
-      tempTableName,
-    );
-
+    // Rewrite Postgres: TANPA temp table + OPENJSON (OPENJSON = fungsi SQL
+    // Server, tak ada di PG; jsonExtract memakai jsonb_path_query yang
+    // mengembalikan jsonb ber-quote). Upsert langsung dari array JS: update
+    // per-baris, hapus yang tak dikirim, insert baru dgn withUuidV7.
     const time = this.utilsService.getTime();
     const logData: any[] = [];
-    const mainDataToInsert: any[] = [];
+
     if (details.length === 0) {
       await trx(this.tableName).delete().where('jurnalumum_id', id);
       return;
     }
-    for (data of details) {
-      let isDataChanged = false;
-      // Check if the data has an id (existing record)
-      if (data.id) {
+
+    const existingRows: any[] = []; // baris dgn id nyata (bukan '0'/kosong)
+    const newRows: any[] = [];
+
+    for (const data of details) {
+      const isNew = !data.id || String(data.id) === '0';
+      if (!isNew) {
         const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
-
         if (existingData) {
-          const createdAt = {
-            created_at: existingData.created_at,
-            updated_at: existingData.updated_at,
-          };
-          Object.assign(data, createdAt);
-
+          data.created_at = existingData.created_at;
+          data.updated_at = existingData.updated_at;
           if (this.utilsService.hasChanges(data, existingData)) {
             data.updated_at = time;
-            isDataChanged = true;
             data.aksi = 'UPDATE';
+          } else {
+            data.aksi = 'NO UPDATE';
           }
+        } else {
+          data.aksi = 'NO UPDATE';
         }
+        existingRows.push(data);
       } else {
-        // New record: Set timestamps
-        const newTimestamps = {
-          created_at: time,
-          updated_at: time,
-        };
-        Object.assign(data, newTimestamps);
-        isDataChanged = true;
+        data.created_at = time;
+        data.updated_at = time;
         data.aksi = 'CREATE';
+        newRows.push(data);
       }
-
-      if (!isDataChanged) {
-        data.aksi = 'NO UPDATE';
-      }
-
-      const { aksi, ...dataForInsert } = data;
-      mainDataToInsert.push(dataForInsert);
-      logData.push({
-        ...data,
-        created_at: time,
-      });
+      logData.push({ ...data, created_at: time });
     }
 
-    // Create temporary table to insert
-    await trx.raw(tableTemp);
-    // Ensure each item has an idheader
-    const processedData = mainDataToInsert.map((item: any) => ({
-      ...item,
-      jurnalumum_id: item.jurnalumum_id ?? id, // Ensure correct field mapping
-    }));
-    const jsonString = JSON.stringify(processedData);
+    // UPDATE baris existing. nobukti/tglbukti/coa sengaja TIDAK diubah agar sama
+    // dgn perilaku lama (UPDATE JOIN meng-set ketiganya ke nilai sendiri).
+    let updatedData: any = null;
+    for (const row of existingRows) {
+      const res = await trx(this.tableName)
+        .where('id', row.id)
+        .update({
+          keterangan: row.keterangan,
+          nominal: row.nominal,
+          info: row.info,
+          modifiedby: row.modifiedby,
+          jurnalumum_id: row.jurnalumum_id ?? id,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        })
+        .returning('*');
+      if (res && res[0]) updatedData = res[0];
+    }
 
-    const mappingData = Object.keys(processedData[0]).map((key) => [
-      'value',
-      `$.${key}`,
-      key,
-    ]);
-
-    const openJson = await trx
-      .from(trx.raw('OPENJSON(?)', [jsonString]))
-      .jsonExtract(mappingData)
-      .as('jsonData');
-
-    // Insert into temp table
-    await trx(tempTableName).insert(openJson);
-
-    // **Update or Insert into 'jurnalumumdetail' with correct idheader**
-    const updatedData = await trx('jurnalumumdetail')
-      .join(`${tempTableName}`, 'jurnalumumdetail.id', `${tempTableName}.id`)
-      .update({
-        nobukti: trx.raw(`jurnalumumdetail.nobukti`),
-        tglbukti: trx.raw(`jurnalumumdetail.tglbukti`),
-        coa: trx.raw(`jurnalumumdetail.coa`),
-        keterangan: trx.raw(`${tempTableName}.keterangan`),
-        nominal: trx.raw(`${tempTableName}.nominal`),
-        info: trx.raw(`${tempTableName}.info`),
-        modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-        jurnalumum_id: trx.raw(`${tempTableName}.jurnalumum_id`),
-        created_at: trx.raw(`${tempTableName}.created_at`),
-        updated_at: trx.raw(`${tempTableName}.updated_at`),
-      })
-      .returning('*')
-      .then((result: any) => result[0])
-      .catch((error: any) => {
-        console.error('Error inserting data:', error);
-        throw error;
-      });
-
-    // Handle insertion if no update occurs
-    const insertedDataQuery = await trx(tempTableName)
-      .select([
-        'nobukti',
-        'tglbukti',
-        'coa',
-        'keterangan',
-        'nominal',
-        'info',
-        'modifiedby',
-        trx.raw('? as jurnalumum_id', [id]),
-        'created_at',
-        'updated_at',
-      ])
-      .where(`${tempTableName}.id`, '0');
-
+    // Baris di DB (jurnalumum_id = id) yang tak dikirim lagi → log DELETE, hapus.
+    const incomingIds = existingRows.map((r) => r.id);
     const getDeleted = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'jurnalumumdetail.id',
-        `${tempTableName}.id`,
-      )
-      .select(
-        'jurnalumumdetail.id',
-        'jurnalumumdetail.nobukti',
-        'jurnalumumdetail.tglbukti',
-        'jurnalumumdetail.coa',
-        'jurnalumumdetail.keterangan',
-        'jurnalumumdetail.nominal',
-        'jurnalumumdetail.info',
-        'jurnalumumdetail.modifiedby',
-        'jurnalumumdetail.created_at',
-        'jurnalumumdetail.updated_at',
-        'jurnalumumdetail.jurnalumum_id',
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('jurnalumumdetail.jurnalumum_id', id);
-
-    let pushToLog: any[] = [];
-
-    if (getDeleted.length > 0) {
-      pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-    }
-
-    const pushToLogWithAction = pushToLog.map((entry) => ({
+      .where('jurnalumum_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
+      .select('*');
+    const pushToLogWithAction = getDeleted.map((entry: any) => ({
       ...entry,
       aksi: 'DELETE',
     }));
-
     const finalData = logData.concat(pushToLogWithAction);
 
-    const deletedData = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'jurnalumumdetail.id',
-        `${tempTableName}.id`,
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('jurnalumumdetail.jurnalumum_id', id)
+    await trx(this.tableName)
+      .where('jurnalumum_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
       .del();
-    if (insertedDataQuery.length > 0) {
-      insertedData = await trx('jurnalumumdetail')
-        .insert(await withUuidV7(trx, insertedDataQuery))
+
+    // INSERT baris baru dgn uuid v7.
+    let insertedData: any = null;
+    if (newRows.length > 0) {
+      const toInsert = newRows.map((r: any) => ({
+        nobukti: r.nobukti,
+        tglbukti: r.tglbukti,
+        coa: r.coa,
+        keterangan: r.keterangan,
+        nominal: r.nominal,
+        info: r.info,
+        modifiedby: r.modifiedby,
+        jurnalumum_id: id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }));
+      insertedData = await trx(this.tableName)
+        .insert(await withUuidV7(trx, toInsert))
         .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error('Error inserting data:', error);
-          throw error;
-        });
+        .then((result: any) => result[0]);
     }
 
     await this.logTrailService.create(

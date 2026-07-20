@@ -21,6 +21,30 @@ import {
 export class SupplierService {
   private readonly tableName = 'supplier';
 
+  // Uppercase HANYA kolom teks manusiawi. relasi_id/coa*/statusaktif dan id
+  // adalah identifier: mayoritas id master kini uuid v7 HURUF KECIL, jadi
+  // blanket uppercase menulis id yang tidak ada. Tanpa FK, Postgres
+  // menerimanya diam-diam sehingga lookup tampil kosong dan perubahan terlihat
+  // "tidak tersimpan" — lihat pengeluaranheader.service.ts.
+  private readonly uppercaseFields = [
+    'nama',
+    'keterangan',
+    'contactperson',
+    'ktp',
+    'alamat',
+    'kota',
+    'kodepos',
+    'telp',
+    'email',
+    'fax',
+    'web',
+    'npwp',
+    'alamatfakturpajak',
+    'namapajak',
+    'noskb',
+    'nosk',
+  ];
+
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilService: UtilsService,
@@ -58,7 +82,7 @@ export class SupplierService {
 
           if (dateRegex.test(value)) {
             insertData[key] = formatDateToSQL(value);
-          } else {
+          } else if (this.uppercaseFields.includes(key)) {
             insertData[key] = insertData[key].toUpperCase();
           }
         }

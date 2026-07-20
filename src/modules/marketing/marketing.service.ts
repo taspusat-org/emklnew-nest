@@ -26,6 +26,13 @@ import { Column, Workbook } from 'exceljs';
 export class MarketingService {
   private readonly tableName = 'marketing';
 
+  // Uppercase HANYA kolom teks manusiawi. karyawan_id/cabang_id/status*/
+  // marketing*_id dan id adalah identifier: mayoritas id master kini uuid v7
+  // HURUF KECIL, jadi blanket uppercase menulis id yang tidak ada. Tanpa FK,
+  // Postgres menerimanya diam-diam sehingga lookup tampil kosong dan perubahan
+  // terlihat "tidak tersimpan" — lihat pengeluaranheader.service.ts.
+  private readonly uppercaseFields = ['nama', 'keterangan', 'email', 'kode'];
+
   constructor(
     @Inject('REDIS_CLIENT')
     private readonly redisService: RedisService,
@@ -74,7 +81,7 @@ export class MarketingService {
 
           if (dateRegex.test(value)) {
             insertData[key] = formatDateToSQL(value);
-          } else {
+          } else if (this.uppercaseFields.includes(key)) {
             insertData[key] = insertData[key].toUpperCase();
           }
         }
@@ -610,7 +617,7 @@ export class MarketingService {
 
           if (dateRegex.test(value)) {
             insertData[key] = formatDateToSQL(value);
-          } else {
+          } else if (this.uppercaseFields.includes(key)) {
             insertData[key] = insertData[key].toUpperCase();
           }
         }

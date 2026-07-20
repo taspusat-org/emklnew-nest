@@ -14,216 +14,141 @@ export class PengeluarandetailService {
   ) {}
   private readonly logger = new Logger(PengeluarandetailService.name);
   async create(details: any, id: any = 0, trx: any = null) {
-    let insertedData = null;
-    let data: any = null;
-    const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-
-    // Get the column info and create temporary table
-    const result = await trx(this.tableName).columnInfo();
-    const tableTemp = await this.utilsService.createTempTable(
-      this.tableName,
-      trx,
-      tempTableName,
-    );
-
+    // Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
+    // Server (tak ada di PG), dan jsonExtract memakai jsonb_path_query yang
+    // mengembalikan jsonb ber-quote (korupsi nilai). Upsert langsung dari array
+    // JS: update per-baris existing, hapus baris yang tak dikirim (whereNotIn),
+    // insert baris baru dgn withUuidV7. Nilai diambil langsung dari objek JS.
     const time = this.utilsService.getTime();
     const logData: any[] = [];
-    const mainDataToInsert: any[] = [];
+
+    // nominal & dpp bertipe numeric. Grid mengirimnya lewat InputCurrency sebagai
+    // string ter-format ("100,000.00"); koma ribuan ditolak PG dengan 22P02
+    // invalid input syntax for type numeric. Kosong → null (kolom nullable).
+    const toNumeric = (value: any): number | null => {
+      if (value === null || value === undefined || value === '') return null;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+      return Number.isNaN(parsed) ? null : parsed;
+    };
+
     if (details.length === 0) {
       await trx(this.tableName).delete().where('pengeluaran_id', id);
       return;
     }
-    for (data of details) {
-      let isDataChanged = false;
-      // Check if the data has an id (existing record)
-      if (data.id) {
+
+    const existingRows: any[] = []; // baris dgn id nyata (bukan '0'/kosong)
+    const newRows: any[] = [];
+
+    for (const data of details) {
+      data.nominal = toNumeric(data.nominal);
+      data.dpp = toNumeric(data.dpp);
+      const isNew = !data.id || String(data.id) === '0';
+      if (!isNew) {
         const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
-
         if (existingData) {
-          const createdAt = {
-            created_at: existingData.created_at,
-            updated_at: existingData.updated_at,
-          };
-          Object.assign(data, createdAt);
-
+          data.created_at = existingData.created_at;
+          data.updated_at = existingData.updated_at;
           if (this.utilsService.hasChanges(data, existingData)) {
             data.updated_at = time;
-            isDataChanged = true;
             data.aksi = 'UPDATE';
+          } else {
+            data.aksi = 'NO UPDATE';
           }
+        } else {
+          data.aksi = 'NO UPDATE';
         }
+        existingRows.push(data);
       } else {
-        // New record: Set timestamps
-        const newTimestamps = {
-          created_at: time,
-          updated_at: time,
-        };
-        Object.assign(data, newTimestamps);
-        isDataChanged = true;
+        data.created_at = time;
+        data.updated_at = time;
         data.aksi = 'CREATE';
+        newRows.push(data);
       }
-
-      if (!isDataChanged) {
-        data.aksi = 'NO UPDATE';
-      }
-
-      const { aksi, ...dataForInsert } = data;
-      mainDataToInsert.push(dataForInsert);
-      logData.push({
-        ...data,
-        created_at: time,
-      });
+      logData.push({ ...data, created_at: time });
     }
 
-    // Create temporary table to insert
-    await trx.raw(tableTemp);
-    // Ensure each item has an idheader
-    const processedData = mainDataToInsert.map((item: any) => ({
-      ...item,
-      pengeluaran_id: item.pengeluaran_id ?? id, // Ensure correct field mapping
-    }));
-    const jsonString = JSON.stringify(processedData);
-    const mappingData = Object.keys(processedData[0]).map((key) => [
-      'value',
-      `$.${key}`,
-      key,
-    ]);
+    // UPDATE baris existing (per baris). coadebet & nobukti sengaja TIDAK diubah
+    // agar sama persis dgn perilaku lama (UPDATE JOIN meng-set coadebet ke nilai
+    // sendiri dan tidak menyertakan nobukti).
+    let updatedData: any = null;
+    for (const row of existingRows) {
+      const res = await trx(this.tableName)
+        .where('id', row.id)
+        .update({
+          keterangan: row.keterangan,
+          nominal: row.nominal,
+          dpp: row.dpp,
+          transaksibiaya_nobukti: row.transaksibiaya_nobukti,
+          transaksilain_nobukti: row.transaksilain_nobukti,
+          noinvoiceemkl: row.noinvoiceemkl,
+          tglinvoiceemkl: row.tglinvoiceemkl,
+          nofakturpajakemkl: row.nofakturpajakemkl,
+          perioderefund: row.perioderefund,
+          pengeluaranemklheader_nobukti: row.pengeluaranemklheader_nobukti,
+          penerimaanemklheader_nobukti: row.penerimaanemklheader_nobukti,
+          info: row.info,
+          modifiedby: row.modifiedby,
+          kasgantung_nobukti: row.kasgantung_nobukti,
+          pengeluaran_id: row.pengeluaran_id ?? id,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        })
+        .returning('*');
+      if (res && res[0]) updatedData = res[0];
+    }
 
-    const openJson = await trx
-      .from(trx.raw('OPENJSON(?)', [jsonString]))
-      .jsonExtract(mappingData)
-      .as('jsonData');
-
-    // Insert into temp table
-    await trx(tempTableName).insert(openJson);
-
-    // **Update or Insert into 'kasgantungdetail' with correct idheader**
-    const updatedData = await trx('pengeluarandetail')
-      .join(`${tempTableName}`, 'pengeluarandetail.id', `${tempTableName}.id`)
-      .update({
-        coadebet: trx.raw(`pengeluarandetail.coadebet`),
-        keterangan: trx.raw(`${tempTableName}.keterangan`),
-        nominal: trx.raw(`${tempTableName}.nominal`),
-        dpp: trx.raw(`${tempTableName}.dpp`),
-        transaksibiaya_nobukti: trx.raw(
-          `${tempTableName}.transaksibiaya_nobukti`,
-        ),
-        transaksilain_nobukti: trx.raw(
-          `${tempTableName}.transaksilain_nobukti`,
-        ),
-        noinvoiceemkl: trx.raw(`${tempTableName}.noinvoiceemkl`),
-        tglinvoiceemkl: trx.raw(`${tempTableName}.tglinvoiceemkl`),
-        nofakturpajakemkl: trx.raw(`${tempTableName}.nofakturpajakemkl`),
-        perioderefund: trx.raw(`${tempTableName}.perioderefund`),
-        pengeluaranemklheader_nobukti: trx.raw(
-          `${tempTableName}.pengeluaranemklheader_nobukti`,
-        ),
-        penerimaanemklheader_nobukti: trx.raw(
-          `${tempTableName}.penerimaanemklheader_nobukti`,
-        ),
-        info: trx.raw(`${tempTableName}.info`),
-        modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-        pengeluaran_id: trx.raw(`${tempTableName}.pengeluaran_id`),
-        created_at: trx.raw(`${tempTableName}.created_at`),
-        updated_at: trx.raw(`${tempTableName}.updated_at`),
-        kasgantung_nobukti: trx.raw(`${tempTableName}.kasgantung_nobukti`),
-      })
-      .returning('*')
-      .then((result: any) => result[0])
-      .catch((error: any) => {
-        console.error('Error inserting data:', error);
-        throw error;
-      });
-
-    // Handle insertion if no update occurs
-    const insertedDataQuery = await trx(tempTableName)
-      .select([
-        'coadebet',
-        'nobukti',
-        'keterangan',
-        'nominal',
-        'dpp',
-        'transaksibiaya_nobukti',
-        'transaksilain_nobukti',
-        'noinvoiceemkl',
-        'tglinvoiceemkl',
-        'nofakturpajakemkl',
-        'perioderefund',
-        'pengeluaranemklheader_nobukti',
-        'penerimaanemklheader_nobukti',
-        'info',
-        'modifiedby',
-        trx.raw('? as pengeluaran_id', [id]),
-        'created_at',
-        'updated_at',
-        'kasgantung_nobukti',
-      ])
-      .where(`${tempTableName}.id`, '0');
-
+    // Baris di DB (pengeluaran_id = id) yang tak dikirim lagi → log DELETE, hapus.
+    const incomingIds = existingRows.map((r) => r.id);
     const getDeleted = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'pengeluarandetail.id',
-        `${tempTableName}.id`,
-      )
-      .select(
-        'pengeluarandetail.id',
-        'pengeluarandetail.coadebet',
-        'pengeluarandetail.nobukti',
-        'pengeluarandetail.keterangan',
-        'pengeluarandetail.nominal',
-        'pengeluarandetail.dpp',
-        'pengeluarandetail.transaksibiaya_nobukti',
-        'pengeluarandetail.transaksilain_nobukti',
-        'pengeluarandetail.noinvoiceemkl',
-        'pengeluarandetail.tglinvoiceemkl',
-        'pengeluarandetail.nofakturpajakemkl',
-        'pengeluarandetail.perioderefund',
-        'pengeluarandetail.pengeluaranemklheader_nobukti',
-        'pengeluarandetail.penerimaanemklheader_nobukti',
-        'pengeluarandetail.info',
-        'pengeluarandetail.modifiedby',
-        'pengeluarandetail.created_at',
-        'pengeluarandetail.updated_at',
-        'pengeluarandetail.kasgantung_nobukti',
-        'pengeluarandetail.pengeluaran_id',
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('pengeluarandetail.pengeluaran_id', id);
-
-    let pushToLog: any[] = [];
-
-    if (getDeleted.length > 0) {
-      pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-    }
-
-    const pushToLogWithAction = pushToLog.map((entry) => ({
+      .where('pengeluaran_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
+      .select('*');
+    const pushToLogWithAction = getDeleted.map((entry: any) => ({
       ...entry,
       aksi: 'DELETE',
     }));
-
     const finalData = logData.concat(pushToLogWithAction);
 
-    const deletedData = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'pengeluarandetail.id',
-        `${tempTableName}.id`,
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('pengeluarandetail.pengeluaran_id', id)
+    await trx(this.tableName)
+      .where('pengeluaran_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
       .del();
-    if (insertedDataQuery.length > 0) {
-      insertedData = await trx('pengeluarandetail')
-        .insert(await withUuidV7(trx, insertedDataQuery))
+
+    // INSERT baris baru dgn uuid v7.
+    let insertedData: any = null;
+    if (newRows.length > 0) {
+      const toInsert = newRows.map((r: any) => ({
+        coadebet: r.coadebet,
+        nobukti: r.nobukti,
+        keterangan: r.keterangan,
+        nominal: r.nominal,
+        dpp: r.dpp,
+        transaksibiaya_nobukti: r.transaksibiaya_nobukti,
+        transaksilain_nobukti: r.transaksilain_nobukti,
+        noinvoiceemkl: r.noinvoiceemkl,
+        tglinvoiceemkl: r.tglinvoiceemkl,
+        nofakturpajakemkl: r.nofakturpajakemkl,
+        perioderefund: r.perioderefund,
+        pengeluaranemklheader_nobukti: r.pengeluaranemklheader_nobukti,
+        penerimaanemklheader_nobukti: r.penerimaanemklheader_nobukti,
+        info: r.info,
+        modifiedby: r.modifiedby,
+        kasgantung_nobukti: r.kasgantung_nobukti,
+        pengeluaran_id: id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }));
+      insertedData = await trx(this.tableName)
+        .insert(await withUuidV7(trx, toInsert))
         .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error('Error inserting data:', error);
-          throw error;
-        });
+        .then((result: any) => result[0]);
     }
 
     await this.logTrailService.create(
@@ -248,41 +173,9 @@ export class PengeluarandetailService {
         data: [],
       };
     }
-    const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
-
-    await trx.schema.createTable(tempUrl, (t) => {
-      // id pengeluarandetail = varchar(200) UUID. Pakai integer di sini bikin
-      // "Conversion failed converting varchar '02-...' to int" saat insert ->
-      // GET /pengeluarandetail 500.
-      t.string('id', 200).nullable();
-      t.string('nobukti').nullable();
-      t.text('link').nullable();
-    });
     const url = 'pengeluaran';
-    await trx(tempUrl).insert(
-      trx
-        .select(
-          'u.id',
-          'u.nobukti',
-          trx.raw(`
-                STRING_AGG(
-                  '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'nobukti=' + u.nobukti + '">' +
-                  '<HighlightWrapper value="' + u.nobukti + '" />' +
-                  '</a>', ','
-                ) AS link
-              `),
-        )
-        .from(this.tableName + ' as u')
-        .groupBy('u.id', 'u.nobukti'),
-    );
+
     try {
-      if (!filters?.nobukti) {
-        return {
-          status: true,
-          message: 'Jurnal umum Detail failed to fetch',
-          data: [],
-        };
-      }
       const query = trx
         .from(trx.raw(`${this.tableName} as p`))
         .select(
@@ -306,9 +199,20 @@ export class PengeluarandetailService {
           'p.modifiedby',
           trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
           trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'tempUrl.link',
+          // link dihitung inline. Versi lama membangunnya lewat temp table
+          // `##temp_url_x` + STRING_AGG — di Postgres itu rusak tiga kali:
+          // nama ber-`##` bikin "syntax error at or near ##" saat dipakai lewat
+          // trx.raw, `+` bukan operator concat teks ("operator does not exist:
+          // unknown + text"), dan schema.createTable membuat tabel PERMANEN yang
+          // bocor tiap request. Join-nya sendiri (p.id = temp.id, temp di-group
+          // by id yang unik) hanya mencocokkan baris dengan dirinya sendiri,
+          // sambil memindai seluruh tabel padahal cuma satu nobukti yang dipakai.
+          trx.raw(`
+            '<a target="_blank" className="link-color" href="/dashboard/${url}' || ${tandatanya} || 'nobukti=' || p.nobukti || '">' ||
+            '<HighlightWrapper value="' || p.nobukti || '" />' ||
+            '</a>' as link
+          `),
         )
-        .innerJoin(trx.raw(`${tempUrl} as tempUrl`), 'p.id', 'tempUrl.id')
         .leftJoin(
           trx.raw('akunpusat as q'),
           'p.coadebet',
@@ -329,19 +233,25 @@ export class PengeluarandetailService {
 
         query.where((qb) => {
           searchFields.forEach((field) => {
-            if (
-              ['created_at', 'updated_at', 'tglinvoiceemkl'].includes(field)
-            ) {
-              qb.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
+            if (['created_at', 'updated_at'].includes(field)) {
+              qb.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
                 field,
                 `%${sanitizedValue}%`,
               ]);
+            } else if (field === 'tglinvoiceemkl') {
+              // Bertipe date dan di select diformat 'DD-MM-YYYY'; pakai format
+              // yang sama supaya yang dicari = yang tampil di grid.
+              qb.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
+                `%${sanitizedValue}%`,
+              ]);
             } else if (field === 'coadebet_text') {
-              qb.orWhere('q.keterangancoa', 'like', `%${sanitizedValue}%`);
+              qb.orWhere('q.keterangancoa', 'ilike', `%${sanitizedValue}%`);
             } else if (field === 'nominal' || field === 'dpp') {
-              qb.orWhere(`p.${field}`, 'like', `%${Number(sanitizedValue)}%`);
+              // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
+              // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
+              qb.orWhereRaw('p.??::text like ?', [field, `%${sanitizedValue}%`]);
             } else {
-              qb.orWhere(`p.${field}`, 'like', `%${sanitizedValue}%`);
+              qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
             }
           });
         });
@@ -355,10 +265,14 @@ export class PengeluarandetailService {
           const sanitizedValue = String(value).replace(/\[/g, '[[]');
           if (value) {
             switch (key) {
+              case 'nobukti':
+                // Sudah difilter exact di atas; `like` di sini cuma duplikat dan
+                // justru bisa membuang baris karena sanitasi `[` -> `[[]`.
+                break;
               case 'coadebet_text':
                 query.andWhere(
                   'q.keterangancoa',
-                  'like',
+                  'ilike',
                   `%${sanitizedValue}%`,
                 );
                 break;
@@ -368,8 +282,28 @@ export class PengeluarandetailService {
               case 'tglinvoiceemkl_sampai':
                 query.andWhere('p.tglinvoiceemkl', '<=', sanitizedValue);
                 break;
+              case 'tglinvoiceemkl':
+                query.andWhereRaw(
+                  "TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?",
+                  [`%${sanitizedValue}%`],
+                );
+                break;
+              case 'created_at':
+              case 'updated_at':
+                query.andWhereRaw(
+                  "TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+                  [key, `%${sanitizedValue}%`],
+                );
+                break;
+              case 'nominal':
+              case 'dpp':
+                query.andWhereRaw('p.??::text like ?', [
+                  key,
+                  `%${sanitizedValue}%`,
+                ]);
+                break;
               default:
-                query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
+                query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }
