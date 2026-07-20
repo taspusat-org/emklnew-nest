@@ -43,11 +43,6 @@ export class MarketinggroupService {
       insertData.updated_at = this.utilsService.getTime();
       insertData.created_at = this.utilsService.getTime();
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
-        }
-      });
 
       const insertedItems = await trx(this.tableName)
         .insert(await withUuidV7(trx, insertData))
@@ -256,11 +251,6 @@ export class MarketinggroupService {
         id: skipId,
         ...insertData
       } = data;
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
-        }
-      });
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();

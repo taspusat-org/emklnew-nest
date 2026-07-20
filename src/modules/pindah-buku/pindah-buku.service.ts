@@ -22,6 +22,15 @@ import { JurnalumumheaderService } from '../jurnalumumheader/jurnalumumheader.se
 export class PindahBukuService {
   private readonly tableName: string = 'pindahbuku';
 
+  // Uppercase HANYA kolom teks manusiawi. bankdari_id/bankke_id/alatbayar_id/
+  // statusformat/id adalah UUID, dan coadebet/coakredit diisi dari bank.coa —
+  // semuanya nilai eksak yang tak boleh diubah casing-nya. statusformat di atas
+  // di-set dari getFormatPindahBuku.id, dan alatbayar_id menunjuk alatbayar
+  // yang mayoritas id-nya kini uuid v7 HURUF KECIL: blanket uppercase menulis
+  // id yang tidak ada dan (tanpa FK) diterima Postgres diam-diam sehingga
+  // lookup tampil kosong — lihat pengeluaranheader.service.ts.
+  private readonly uppercaseFields = ['nobukti', 'nowarkat', 'keterangan'];
+
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
@@ -96,7 +105,7 @@ export class PindahBukuService {
 
           if (dateRegex.test(value)) {
             insertData[key] = formatDateToSQL(value);
-          } else {
+          } else if (this.uppercaseFields.includes(key)) {
             insertData[key] = insertData[key].toUpperCase();
           }
         }

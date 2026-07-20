@@ -22,6 +22,16 @@ export class PengeluarandetailService {
     const time = this.utilsService.getTime();
     const logData: any[] = [];
 
+    // nominal & dpp bertipe numeric. Grid mengirimnya lewat InputCurrency sebagai
+    // string ter-format ("100,000.00"); koma ribuan ditolak PG dengan 22P02
+    // invalid input syntax for type numeric. Kosong → null (kolom nullable).
+    const toNumeric = (value: any): number | null => {
+      if (value === null || value === undefined || value === '') return null;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+      return Number.isNaN(parsed) ? null : parsed;
+    };
+
     if (details.length === 0) {
       await trx(this.tableName).delete().where('pengeluaran_id', id);
       return;
@@ -31,6 +41,8 @@ export class PengeluarandetailService {
     const newRows: any[] = [];
 
     for (const data of details) {
+      data.nominal = toNumeric(data.nominal);
+      data.dpp = toNumeric(data.dpp);
       const isNew = !data.id || String(data.id) === '0';
       if (!isNew) {
         const existingData = await trx(this.tableName)
@@ -161,41 +173,9 @@ export class PengeluarandetailService {
         data: [],
       };
     }
-    const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
-
-    await trx.schema.createTable(tempUrl, (t) => {
-      // id pengeluarandetail = varchar(200) UUID. Pakai integer di sini bikin
-      // "Conversion failed converting varchar '02-...' to int" saat insert ->
-      // GET /pengeluarandetail 500.
-      t.string('id', 200).nullable();
-      t.string('nobukti').nullable();
-      t.text('link').nullable();
-    });
     const url = 'pengeluaran';
-    await trx(tempUrl).insert(
-      trx
-        .select(
-          'u.id',
-          'u.nobukti',
-          trx.raw(`
-                STRING_AGG(
-                  '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'nobukti=' + u.nobukti + '">' +
-                  '<HighlightWrapper value="' + u.nobukti + '" />' +
-                  '</a>', ','
-                ) AS link
-              `),
-        )
-        .from(this.tableName + ' as u')
-        .groupBy('u.id', 'u.nobukti'),
-    );
+
     try {
-      if (!filters?.nobukti) {
-        return {
-          status: true,
-          message: 'Jurnal umum Detail failed to fetch',
-          data: [],
-        };
-      }
       const query = trx
         .from(trx.raw(`${this.tableName} as p`))
         .select(
@@ -219,9 +199,20 @@ export class PengeluarandetailService {
           'p.modifiedby',
           trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
           trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'tempUrl.link',
+          // link dihitung inline. Versi lama membangunnya lewat temp table
+          // `##temp_url_x` + STRING_AGG — di Postgres itu rusak tiga kali:
+          // nama ber-`##` bikin "syntax error at or near ##" saat dipakai lewat
+          // trx.raw, `+` bukan operator concat teks ("operator does not exist:
+          // unknown + text"), dan schema.createTable membuat tabel PERMANEN yang
+          // bocor tiap request. Join-nya sendiri (p.id = temp.id, temp di-group
+          // by id yang unik) hanya mencocokkan baris dengan dirinya sendiri,
+          // sambil memindai seluruh tabel padahal cuma satu nobukti yang dipakai.
+          trx.raw(`
+            '<a target="_blank" className="link-color" href="/dashboard/${url}' || ${tandatanya} || 'nobukti=' || p.nobukti || '">' ||
+            '<HighlightWrapper value="' || p.nobukti || '" />' ||
+            '</a>' as link
+          `),
         )
-        .innerJoin(trx.raw(`${tempUrl} as tempUrl`), 'p.id', 'tempUrl.id')
         .leftJoin(
           trx.raw('akunpusat as q'),
           'p.coadebet',
@@ -242,19 +233,25 @@ export class PengeluarandetailService {
 
         query.where((qb) => {
           searchFields.forEach((field) => {
-            if (
-              ['created_at', 'updated_at', 'tglinvoiceemkl'].includes(field)
-            ) {
-              qb.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
+            if (['created_at', 'updated_at'].includes(field)) {
+              qb.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
                 field,
                 `%${sanitizedValue}%`,
               ]);
+            } else if (field === 'tglinvoiceemkl') {
+              // Bertipe date dan di select diformat 'DD-MM-YYYY'; pakai format
+              // yang sama supaya yang dicari = yang tampil di grid.
+              qb.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
+                `%${sanitizedValue}%`,
+              ]);
             } else if (field === 'coadebet_text') {
-              qb.orWhere('q.keterangancoa', 'like', `%${sanitizedValue}%`);
+              qb.orWhere('q.keterangancoa', 'ilike', `%${sanitizedValue}%`);
             } else if (field === 'nominal' || field === 'dpp') {
-              qb.orWhere(`p.${field}`, 'like', `%${Number(sanitizedValue)}%`);
+              // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
+              // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
+              qb.orWhereRaw('p.??::text like ?', [field, `%${sanitizedValue}%`]);
             } else {
-              qb.orWhere(`p.${field}`, 'like', `%${sanitizedValue}%`);
+              qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
             }
           });
         });
@@ -268,10 +265,14 @@ export class PengeluarandetailService {
           const sanitizedValue = String(value).replace(/\[/g, '[[]');
           if (value) {
             switch (key) {
+              case 'nobukti':
+                // Sudah difilter exact di atas; `like` di sini cuma duplikat dan
+                // justru bisa membuang baris karena sanitasi `[` -> `[[]`.
+                break;
               case 'coadebet_text':
                 query.andWhere(
                   'q.keterangancoa',
-                  'like',
+                  'ilike',
                   `%${sanitizedValue}%`,
                 );
                 break;
@@ -281,8 +282,28 @@ export class PengeluarandetailService {
               case 'tglinvoiceemkl_sampai':
                 query.andWhere('p.tglinvoiceemkl', '<=', sanitizedValue);
                 break;
+              case 'tglinvoiceemkl':
+                query.andWhereRaw(
+                  "TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?",
+                  [`%${sanitizedValue}%`],
+                );
+                break;
+              case 'created_at':
+              case 'updated_at':
+                query.andWhereRaw(
+                  "TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+                  [key, `%${sanitizedValue}%`],
+                );
+                break;
+              case 'nominal':
+              case 'dpp':
+                query.andWhereRaw('p.??::text like ?', [
+                  key,
+                  `%${sanitizedValue}%`,
+                ]);
+                break;
               default:
-                query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
+                query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }

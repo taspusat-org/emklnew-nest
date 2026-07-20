@@ -38,6 +38,24 @@ export class PengeluaranheaderService implements OnModuleInit {
   private pengeluaranemklheaderService: PengeluaranemklheaderService;
   private penerimaanemklheaderService: PenerimaanemklheaderService;
 
+  // Kolom teks manusiawi — HANYA ini yang boleh di-uppercase. Sebelumnya
+  // create/update meng-uppercase SEMUA field string, termasuk relasi_id,
+  // bank_id, alatbayar_id, daftarbank_id, statusformat, dan id — semuanya UUID
+  // bertipe text alias case-sensitive. Mayoritas id di master sekarang uuid v7
+  // huruf kecil, jadi blanket uppercase menulis id yang tidak ada: memilih alat
+  // bayar '02-019f64f5-...' tersimpan sebagai '02-019F64F5-...' yang tak cocok
+  // dengan baris alatbayar mana pun. alatbayar_id tak punya FK, jadi Postgres
+  // menerimanya diam-diam; lookup lalu tampil kosong dan perubahan terlihat
+  // "tidak tersimpan" tanpa satu pun error. nobukti/coakredit sengaja tak ikut:
+  // keduanya identifier dan nilainya memang sudah uppercase dari sumbernya.
+  private readonly uppercaseFields = [
+    'keterangan',
+    'dibayarke',
+    'nowarkat',
+    'postingdari',
+    'info',
+  ];
+
   constructor(
     // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'). Token REDIS_CLIENT
     // memberi instance ioredis mentah dengan enableOfflineQueue:false → saat
@@ -186,9 +204,9 @@ export class PengeluaranheaderService implements OnModuleInit {
         updated_at: this.utilsService.getTime(),
       };
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      this.uppercaseFields.forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
 
@@ -828,9 +846,9 @@ export class PengeluaranheaderService implements OnModuleInit {
       } = data;
       await this.setDateRangeSessionContext(trx, filters || {});
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      this.uppercaseFields.forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
 

@@ -80,9 +80,22 @@ export class PenerimaanheaderService implements OnModuleInit {
         created_at: this.utilsService.getTime(),
         updated_at: this.utilsService.getTime(),
       };
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      [
+        'nobukti',
+        'keterangan',
+        'postingdari',
+        'diterimadari',
+        'nowarkat',
+        'noresi',
+      ].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)'; // penting: TEXT/NTEXT -> text
@@ -660,9 +673,22 @@ export class PenerimaanheaderService implements OnModuleInit {
         ...insertData
       } = data;
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      [
+        'nobukti',
+        'keterangan',
+        'postingdari',
+        'diterimadari',
+        'nowarkat',
+        'noresi',
+      ].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       const formatpenerimaan = await trx(`bank as b`)

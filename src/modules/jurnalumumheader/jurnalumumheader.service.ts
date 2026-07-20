@@ -52,9 +52,15 @@ export class JurnalumumheaderService {
       } = data;
       insertData.updated_at = this.utilsService.getTime();
       insertData.created_at = this.utilsService.getTime();
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      ['nobukti', 'keterangan', 'postingdari'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
 
@@ -576,6 +582,9 @@ export class JurnalumumheaderService {
 
         data = await query;
         await trx(tempJurnalumumheader).insert(data);
+
+        // tempHasil = tabel PERMANEN di PG; buang atau bocor tiap request.
+        await trx.schema.dropTableIfExists(dataTempStatusPendukung);
       }
 
       const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
@@ -720,6 +729,11 @@ export class JurnalumumheaderService {
       });
 
       if (!columns) {
+        // Scratch internal sudah tak terpakai. schema.createTable di PG membuat
+        // tabel PERMANEN (bukan TEMP), jadi wajib dibuang manual atau bocor tiap
+        // request. tempHasil dibuang pemanggil setelah selesai di-join.
+        await trx.schema.dropTableIfExists(tempStatusPendukung);
+        await trx.schema.dropTableIfExists(tempData);
         return tempHasil;
       }
       const pivotSubqueryRaw = `
@@ -766,6 +780,8 @@ export class JurnalumumheaderService {
           ])
           .from(trx.raw(pivotSubqueryRaw)),
       );
+      await trx.schema.dropTableIfExists(tempStatusPendukung);
+      await trx.schema.dropTableIfExists(tempData);
       return tempHasil;
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -806,6 +822,10 @@ export class JurnalumumheaderService {
 
       const data = await query;
 
+      // tempHasil = tabel PERMANEN di PG; buang setelah di-join atau bocor tiap
+      // request. Hasilnya sudah di-await di atas jadi aman untuk di-drop.
+      await trx.schema.dropTableIfExists(dataTempStatusPendukung);
+
       return {
         data: data,
       };
@@ -833,9 +853,15 @@ export class JurnalumumheaderService {
         ...insertData
       } = data;
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      ['nobukti', 'keterangan', 'postingdari'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       const existingData = await trx(this.tableName).where('id', id).first();
@@ -949,102 +975,123 @@ export class JurnalumumheaderService {
       }));
       await this.jurnalumumdetailService.create(detailsWithNobukti, id, trx);
 
-      // Query data yang baru saja diupdate menggunakan findOne
-      const { data: updatedItemData } = await this.findOne(String(id), trx);
-      const updatedItemFormatted = updatedItemData[0];
+      // ── Posisi/pagination + status pasca-simpan (NON-FATAL) ──────────────
+      // Header + detail jurnal SUDAH ter-update di atas. Blok di bawah hanya
+      // menghitung posisi baris di grid via findOne/findAll — yang memakai mesin
+      // PIVOT + JSON_VALUE warisan MSSQL (tempStatusPendukung). Untuk
+      // jurnalumumheader TIDAK ADA satu pun parameter subgrp='jurnalumumheader',
+      // jadi tempStatusPendukung selalu balik KOSONG, innerJoin di findOne
+      // memulangkan 0 baris, dan throw di bawah me-rollback SELURUH edit ->
+      // "INTERNAL SERVER ERROR" di layar padahal simpannya sudah benar. Sama
+      // seperti di create(), kegagalan blok ini tidak boleh menggagalkan simpan
+      // yang sudah berhasil (pemanggil dari alur pengeluaran mengabaikan
+      // return-nya). Default posisi bila gagal.
+      let pageNumber = 1;
+      let itemIndex = 0;
+      try {
+        // Query data yang baru saja diupdate menggunakan findOne
+        const { data: updatedItemData } = await this.findOne(String(id), trx);
+        const updatedItemFormatted = updatedItemData[0];
 
-      console.log('updatedItemFormatted result:', updatedItemFormatted);
+        if (!updatedItemFormatted) {
+          throw new Error(
+            `Failed to fetch formatted data for updated item with id: ${id}`,
+          );
+        }
 
-      if (!updatedItemFormatted) {
-        throw new Error(
-          `Failed to fetch formatted data for updated item with id: ${id}`,
+        // UPDATE TEMP TABLE
+        const tempJurnalumumheader = `temp_jurnalumumheader${insertData.modifiedby}`;
+
+        // Cek apakah temp table sudah ada
+        const tempTableExists = await trx.schema.hasTable(tempJurnalumumheader);
+
+        if (!tempTableExists) {
+          // Buat temp table jika belum ada
+          await trx.schema.createTable(tempJurnalumumheader, (t) => {
+            // id jurnalumumheader = varchar(200) UUID, bukan bigint (pasca
+            // migrasi id ke UUID). bigInteger -> insert UUID gagal "converting
+            // nvarchar to bigint".
+            t.string('id').nullable();
+            t.string('nobukti').nullable();
+            t.string('tglbukti').nullable();
+            t.string('keterangan').nullable();
+            t.string('postingdari').nullable();
+            t.string('statusformat').nullable();
+            t.string('keteranganapproval').nullable();
+            t.string('tglapproval').nullable();
+            t.string('statusapproval').nullable();
+            t.string('keterangancetak').nullable();
+            t.string('tglcetak').nullable();
+            t.string('statuscetak').nullable();
+            t.string('statusapproval_id').nullable();
+            t.string('statuscetak_id').nullable();
+            t.string('info').nullable();
+            t.string('modifiedby').nullable();
+            t.string('updated_at').nullable();
+            t.string('created_at').nullable();
+          });
+
+          // Register di listtemporarytable
+          const payloadtemptable = {
+            namatabel: tempJurnalumumheader,
+            namamenu: this.tableName,
+            modifiedby: insertData.modifiedby,
+            created_at: this.utilsService.getTime(),
+            updated_at: this.utilsService.getTime(),
+          };
+          await trx('listtemporarytable').insert(
+            await withUuidV7(trx, payloadtemptable),
+          );
+        }
+
+        // Hapus data lama dari temp table jika ada
+        await trx(tempJurnalumumheader).where('id', id).delete();
+
+        // Insert data yang sudah diupdate ke temp table
+        await trx(tempJurnalumumheader).insert(updatedItemFormatted);
+
+        // If there are details, call the service to handle create or update
+        const { data: filteredItems } = await this.findAll(
+          {
+            search,
+            filters,
+            pagination: { page, limit: 0 },
+            sort: { sortBy, sortDirection },
+            isLookUp: false,
+          },
+          trx,
+          isreload,
+          insertData.modifiedby,
+        );
+
+        // Cari index item di hasil yang sudah difilter. id = UUID string, jadi
+        // Number(item.id) selalu NaN dan tak pernah cocok -> posisi grid selalu
+        // jatuh ke baris 1. Bandingkan sebagai string.
+        itemIndex = filteredItems.findIndex(
+          (item) => String(item.id) === String(id),
+        );
+
+        if (itemIndex === -1) {
+          itemIndex = 0;
+        }
+
+        pageNumber = Math.floor(itemIndex / limit) + 1;
+        const endIndex = pageNumber * limit;
+
+        // Ambil data hingga halaman yang mencakup item
+        const limitedItems = filteredItems.slice(0, endIndex);
+
+        // Simpan ke Redis
+        await this.redisService.set(
+          `${this.tableName}-allItems`,
+          JSON.stringify(limitedItems),
+        );
+      } catch (error) {
+        console.warn(
+          `Update jurnalumumheader ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
+          error?.message,
         );
       }
-
-      // UPDATE TEMP TABLE
-      const tempJurnalumumheader = `temp_jurnalumumheader${insertData.modifiedby}`;
-
-      // Cek apakah temp table sudah ada
-      const tempTableExists = await trx.schema.hasTable(tempJurnalumumheader);
-
-      if (!tempTableExists) {
-        // Buat temp table jika belum ada
-        await trx.schema.createTable(tempJurnalumumheader, (t) => {
-          // id jurnalumumheader = varchar(200) UUID, bukan bigint (pasca migrasi
-          // id ke UUID). bigInteger -> insert UUID gagal "converting nvarchar to
-          // bigint".
-          t.string('id').nullable();
-          t.string('nobukti').nullable();
-          t.string('tglbukti').nullable();
-          t.string('keterangan').nullable();
-          t.string('postingdari').nullable();
-          t.string('statusformat').nullable();
-          t.string('keteranganapproval').nullable();
-          t.string('tglapproval').nullable();
-          t.string('statusapproval').nullable();
-          t.string('keterangancetak').nullable();
-          t.string('tglcetak').nullable();
-          t.string('statuscetak').nullable();
-          t.string('statusapproval_id').nullable();
-          t.string('statuscetak_id').nullable();
-          t.string('info').nullable();
-          t.string('modifiedby').nullable();
-          t.string('updated_at').nullable();
-          t.string('created_at').nullable();
-        });
-
-        // Register di listtemporarytable
-        const payloadtemptable = {
-          namatabel: tempJurnalumumheader,
-          namamenu: this.tableName,
-          modifiedby: insertData.modifiedby,
-          created_at: this.utilsService.getTime(),
-          updated_at: this.utilsService.getTime(),
-        };
-        await trx('listtemporarytable').insert(
-        await withUuidV7(trx, payloadtemptable),
-      );
-      }
-
-      // Hapus data lama dari temp table jika ada
-      await trx(tempJurnalumumheader).where('id', id).delete();
-
-      // Insert data yang sudah diupdate ke temp table
-      await trx(tempJurnalumumheader).insert(updatedItemFormatted);
-      console.log('Updated data inserted to temp table');
-
-      // If there are details, call the service to handle create or update
-      const { data: filteredItems } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
-        trx,
-        isreload,
-        insertData.modifiedby,
-      );
-
-      // Cari index item di hasil yang sudah difilter
-      let itemIndex = filteredItems.findIndex((item) => Number(item.id) === id);
-
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
-
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      const endIndex = pageNumber * limit;
-
-      // Ambil data hingga halaman yang mencakup item
-      const limitedItems = filteredItems.slice(0, endIndex);
-
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
 
       await this.logTrailService.create(
         {

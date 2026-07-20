@@ -58,9 +58,15 @@ export class HutangheaderService {
         ...insertData
       } = data;
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      ['nobukti', 'keterangan'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       insertData.tglbukti = formatDateToSQL(String(insertData?.tglbukti)); // Fungsi untuk format
@@ -562,9 +568,15 @@ export class HutangheaderService {
         ...insertData
       } = data;
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
+      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
+      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
+      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
+      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
+      // pengeluaranheader.service.ts.
+      ['nobukti', 'keterangan'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
 

@@ -34,9 +34,15 @@ export class ErrorService {
         limit,
         ...insertData
       } = data;
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi (lihat CreateErrorSchema: kode,
+      // ket, modifiedby, statusaktif). statusaktif adalah id parameter bertipe
+      // text (case-sensitive) — blanket uppercase menulis id yang tidak ada
+      // sehingga lookup tampil kosong; lihat pengeluaranheader.service.ts.
+      // Catatan: tabel `error` belum ada di DB tasemkl, jadi service ini memang
+      // belum bisa jalan; whitelist diturunkan dari DTO, bukan skema.
+      ['kode', 'ket'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       const insertedItems = await trx(this.tableName)
@@ -563,9 +569,15 @@ export class ErrorService {
         text,
         ...insertData
       } = data;
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          insertData[key] = insertData[key].toUpperCase();
+      // Uppercase HANYA kolom teks manusiawi (lihat CreateErrorSchema: kode,
+      // ket, modifiedby, statusaktif). statusaktif adalah id parameter bertipe
+      // text (case-sensitive) — blanket uppercase menulis id yang tidak ada
+      // sehingga lookup tampil kosong; lihat pengeluaranheader.service.ts.
+      // Catatan: tabel `error` belum ada di DB tasemkl, jadi service ini memang
+      // belum bisa jalan; whitelist diturunkan dari DTO, bukan skema.
+      ['kode', 'ket'].forEach((field) => {
+        if (typeof insertData[field] === 'string') {
+          insertData[field] = insertData[field].toUpperCase();
         }
       });
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
