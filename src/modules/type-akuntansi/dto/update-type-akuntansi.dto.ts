@@ -24,8 +24,7 @@ export const typeakuntansiSchema = (method: 'create' | 'update') => {
         .min(1, { message: 'Keterangan Wajib Diisi' })
         .max(100),
       akuntansi_id: z
-        .number()
-        .int({ message: 'akuntansi_id must be an integer' })
+        .string()
         .min(1, { message: 'Akuntansi Id Wajib Diisi ' }),
       statusaktif: z.string()
         .min(1, { message: 'Status Aktif Wajib Diisi' }),
@@ -35,7 +34,7 @@ export const typeakuntansiSchema = (method: 'create' | 'update') => {
   if (method === 'update') {
     return z
       .object({
-        id: z.number().optional(),
+        id: z.string().optional(),
         nama: z
           .string()
           .trim()
@@ -60,8 +59,7 @@ export const typeakuntansiSchema = (method: 'create' | 'update') => {
           .min(1, { message: 'Keterangan Wajib Diisi' })
           .max(100),
         akuntansi_id: z
-          .number()
-          .int({ message: 'akuntansi_id must be an integer' })
+          .string()
           .min(1, { message: 'Akuntansi Id Wajib Diisi ' }),
         statusaktif: z.string()
           .min(1, { message: 'Status Aktif Wajib Diisi' }),

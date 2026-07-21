@@ -12,14 +12,12 @@ const baseFields = {
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
   bankdari_id: z
-    .number()
-    .int({ message: 'BANK DARI' })
+    .string()
     .min(1, { message: 'BANK DARI' }),
   bankdari_nama: z.string().nullable().optional(),
 
   bankke_id: z
-    .number()
-    .int({ message: 'BANK KE WAJIB DISI' })
+    .string()
     .min(1, { message: 'BANK KE WAJIB DISI' }),
   bankke_nama: z.string().nullable().optional(),
 

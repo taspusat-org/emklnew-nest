@@ -6,13 +6,11 @@ export const UpdateAsalKapalSchema = z.object({
   statusaktif: z.string()
     .min(0, { message: 'statusaktif must be a non-negative integer' }),
   cabang_id: z
-    .number()
-    .int({ message: 'cabang_id must be an integer' })
-    .min(0, { message: 'cabang_id must be a non-negative integer' }),
+    .string()
+    .min(1, { message: 'cabang_id wajib diisi' }),
   container_id: z
-    .number()
-    .int({ message: 'container_id must be an integer' })
-    .min(0, { message: 'container_id must be a non-negative integer' }),
+    .string()
+    .min(1, { message: 'container_id wajib diisi' }),
   info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });

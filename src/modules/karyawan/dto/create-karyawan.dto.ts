@@ -8,9 +8,9 @@ const baseFields = {
     .min(1, { message: 'Nama Karyawan Wajib Diisi' })
     .max(255),
   kodeabsen: z.string().trim().nullable().optional(),
-  absen_id: z.number().int({ message: 'ID Absen Wajib Diisi' }),
-  karyawan_id: z.number().int({ message: 'Karyawan Wajib Diisi' }),
-  jabatan_id: z.number().int({ message: 'Jabatan Wajib Diisi' }),
+  absen_id: z.string().min(1, { message: 'ID Absen Wajib Diisi' }),
+  karyawan_id: z.string().min(1, { message: 'Karyawan Wajib Diisi' }),
+  jabatan_id: z.string().min(1, { message: 'Jabatan Wajib Diisi' }),
   keterangan: z.string().trim().nullable().optional(),
   statusaktif: z.string(), // Ensure non-negative
   modifiedby: z.string().nullable().optional(),
@@ -41,7 +41,7 @@ export type CreateKaryawanDto = z.infer<typeof createKaryawanSchema>;
 export const updateKaryawanSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string({ required_error: 'Id wajib diisi untuk update' }),
   })
   .superRefine(async (data, ctx) => {
     // Cek unik hanya untuk create (excludeId tidak ada)

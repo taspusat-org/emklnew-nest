@@ -9,8 +9,7 @@ const baseFields = {
   order: z.number().int({ message: 'Order harus bilangan bulat' }),
   keterangan: z.string().min(1, { message: 'Keterangan Wajib Diisi' }).max(100),
   akuntansi_id: z
-    .number()
-    .int({ message: 'akuntansi_id harus bil bulat' })
+    .string()
     .min(1, { message: 'Akuntansi Id Wajib Diisi' }),
   statusaktif: z.string()
     .min(1, { message: 'Status Aktif Wajib Diisi' }),
@@ -44,7 +43,7 @@ export type CreateTypeAkuntansiDto = z.infer<typeof CreateTypeAkuntansiSchema>;
 export const UpdateTypeAkuntansiSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string({ required_error: 'Id wajib diisi untuk update' }),
     // Field atau aturan khusus update bisa ditambah di sini
   })
   .superRefine(async (data, ctx) => {
@@ -80,7 +79,7 @@ export class CreateTypeAkuntansiSwaggerDto {
   keterangan: string;
 
   @ApiProperty()
-  akuntansi_id: number;
+  akuntansi_id: string;
 
   @ApiProperty()
   statusaktif: number;

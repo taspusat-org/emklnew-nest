@@ -1,15 +1,15 @@
 import { z } from 'zod';
 
 export const UpdateHargatruckingSchema = z.object({
-  tujuankapal_id: z.number().min(1, { message: 'TUJUAN KAPAL ID is required' }),
+  tujuankapal_id: z.string().min(1, { message: 'TUJUAN KAPAL ID is required' }),
   tujuankapal_text: z.string().nullable().optional(),
 
-  emkl_id: z.number().min(1, { message: 'emkl id is required' }),
+  emkl_id: z.string().min(1, { message: 'emkl id is required' }),
   emkl_text: z.string().nullable().optional(),
 
   keterangan: z.string().trim().min(1, { message: 'KETERANGAN is required' }),
 
-  container_id: z.number().min(1, { message: 'Container id is required' }),
+  container_id: z.string().min(1, { message: 'Container id is required' }),
   container_text: z.string().nullable().optional(),
 
   jenisorder_id: z.string().min(1, { message: 'Jenis Orderan is required' }),

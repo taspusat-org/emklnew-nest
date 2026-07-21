@@ -12,8 +12,7 @@ const baseFields = {
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
   jenisorder_id: z
-    .number()
-    .int({ message: 'JENIS ORDER WAJIB DIISI' })
+    .string()
     .min(1, { message: 'JENIS ORDER WAJIB DIISI' }),
   jenisorder_nama: z.string().nullable().optional(),
 

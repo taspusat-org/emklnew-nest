@@ -2,15 +2,14 @@ import { z } from 'zod';
 import { isRecordExistCI } from 'src/utils/utils.service';
 export const UpdateKapalSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     nama: z.string().trim().min(1, { message: 'Nama Wajib Diisi' }).max(100),
     keterangan: z.string(),
     statusaktif: z.string()
       .min(0, { message: 'statusaktif must be a non-negative integer' }),
     pelayaran_id: z
-      .number()
-      .int({ message: 'pelayaran_id must be an integer' })
-      .min(0, { message: 'pelayaran_id must be a non-negative integer' }),
+      .string()
+      .min(1, { message: 'Pelayaran wajib diisi' }),
     info: z.string().nullable().optional(),
     modifiedby: z.string().nullable().optional(),
   })

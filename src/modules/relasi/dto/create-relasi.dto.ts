@@ -10,9 +10,7 @@ export const CreateRelasiSchema = z.object({
     .nullable()
     .optional(),
   titipcabang_id: z
-    .number()
-    .int({ message: 'Status Relasi Wajib Angka' })
-    .nonnegative({ message: 'Status Relasi Tidak Boleh Angka Negatif' })
+    .string()
     .nullable()
     .optional(),
   alamat: z.string().nullable().optional(),

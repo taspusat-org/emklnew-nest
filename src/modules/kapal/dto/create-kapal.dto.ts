@@ -8,7 +8,7 @@ export const CreateKapalSchema = z.object({
     .max(100)
     .refine(
       async (value) => {
-        const exists = await isRecordExistCI('nama', value, 'Kapal');
+        const exists = await isRecordExistCI('nama', value, 'kapal');
         return !exists; // Validasi jika nama sudah ada
       },
       {
@@ -19,9 +19,8 @@ export const CreateKapalSchema = z.object({
   statusaktif: z.string()
     .min(0, { message: 'statusaktif must be a non-negative integer' }),
   pelayaran_id: z
-    .number()
-    .int({ message: 'pelayaran_id must be an integer' })
-    .min(0, { message: 'pelayaran_id must be a non-negative integer' }),
+    .string()
+    .min(1, { message: 'Pelayaran wajib diisi' }),
   info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });

@@ -138,7 +138,7 @@ export class PenerimaanEmklController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.penerimaanEmklService.update(
-        +dataId,
+        dataId,
         data,
         trx,
       );

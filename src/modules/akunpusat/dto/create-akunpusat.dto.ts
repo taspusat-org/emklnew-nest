@@ -4,14 +4,13 @@ import { isRecordExist } from 'src/utils/utils.service';
 // 1. BASE FIELDS
 // ------------------------
 const baseFields = {
-  type_id: z.number().min(1, { message: 'Type Id Wajib Diisi' }),
+  type_id: z.string().min(1, { message: 'Type Id Wajib Diisi' }),
   level: z.number().min(1, { message: 'Level harus Wajib Diisi' }),
   coa: z.string().min(1, { message: 'Keterangan Wajib Diisi' }),
   keterangancoa: z.string().min(1, { message: 'Keterangan Wajib Diisi' }),
   parent: z.string().min(1, { message: 'Keterangan Wajib Diisi' }),
   cabang_id: z
-    .number()
-    .int({ message: 'cabang_id harus bil bulat' })
+    .string()
     .min(1, { message: 'Cabang Id Wajib Diisi' }),
   statusaktif: z.string()
     .min(1, { message: 'Status Aktif Wajib Diisi' }),
@@ -45,7 +44,7 @@ export type CreateAkunpusatDto = z.infer<typeof CreateAkunpusatSchema>;
 export const updateAkunPusatSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string({ required_error: 'Id wajib diisi untuk update' }),
     // Field atau aturan khusus update bisa ditambah di sini
   })
   .superRefine(async (data, ctx) => {

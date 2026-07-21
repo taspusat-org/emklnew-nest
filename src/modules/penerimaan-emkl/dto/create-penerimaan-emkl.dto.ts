@@ -31,21 +31,20 @@ const baseFields = {
   coaproses: z.string().nullable().optional(),
   coaproses_nama: z.string().nullable().optional(),
 
-  nilaiprosespenerimaan: z.number().nullable().optional(),
+  nilaiprosespenerimaan: z.string().nullable().optional(),
   nilaiprosespenerimaan_nama: z.string().nullable().optional(),
 
-  nilaiprosespengeluaran: z.number().nullable().optional(),
+  nilaiprosespengeluaran: z.string().nullable().optional(),
   nilaiprosespengeluaran_nama: z.string().nullable().optional(),
 
-  nilaiproseshutang: z.number().nullable().optional(),
+  nilaiproseshutang: z.string().nullable().optional(),
   nilaiproseshutang_nama: z.string().nullable().optional(),
 
   statuspenarikan: z.string().nullable().optional(),
   statuspenarikan_nama: z.string().nullable().optional(),
 
   format: z
-    .number()
-    .int({ message: 'format Wajib Diisi' })
+    .string()
     .min(1, { message: 'format Wajib Diisi' }),
   format_nama: z.string().nullable().optional(),
 
@@ -132,7 +131,7 @@ export type CreatePenerimaanEmklDto = z.infer<
 export const UpdatePenerimaanEmklSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string({ required_error: 'Id wajib diisi untuk update' }),
     // Field atau aturan khusus update bisa ditambah di sini
   })
   .superRefine(async (data, ctx) => {

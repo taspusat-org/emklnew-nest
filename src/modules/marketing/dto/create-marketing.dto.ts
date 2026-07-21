@@ -59,7 +59,7 @@ const baseFields = {
     .string()
     .nonempty({ message: 'Email wajib diisi' })
     .email({ message: 'email must be a valid email address' }),
-  karyawan_id: z.number().min(1, { message: 'Karyawan Wajib Diisi' }),
+  karyawan_id: z.string().min(1, { message: 'Karyawan Wajib Diisi' }),
   tglmasuk: z
     .string({
       required_error: 'Tgl Masuk Wajib Diisi',
@@ -69,7 +69,7 @@ const baseFields = {
   statustarget: z.string().nullable(),
   statusbagifee: z.string().nullable(),
   statusfeemanager: z.string().nullable(),
-  marketinggroup_id: z.number().nullable(),
+  marketinggroup_id: z.string().nullable(),
   statusprafee: z.string().nullable(),
   // modifiedby diisi di backend, optional di request body
   modifiedby: z.string().max(200).optional(),

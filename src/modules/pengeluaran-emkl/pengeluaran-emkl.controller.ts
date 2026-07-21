@@ -142,7 +142,7 @@ export class PengeluaranEmklController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.pengeluaranEmklService.update(
-        +dataId,
+        dataId,
         data,
         trx,
       );

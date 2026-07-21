@@ -19,9 +19,8 @@ export const CreateJabatanSchema = z.object({
   statusaktif: z.string()
     .min(0, { message: 'statusaktif must be a non-negative integer' }),
   divisi_id: z
-    .number()
-    .int({ message: 'divisi_id must be an integer' })
-    .min(0, { message: 'divisi_id must be a non-negative integer' }),
+    .string()
+    .min(1, { message: 'Divisi wajib diisi' }),
   info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });
