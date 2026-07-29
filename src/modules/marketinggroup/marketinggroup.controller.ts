@@ -126,7 +126,7 @@ export class MarketinggroupController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.marketinggroupService.update(
-        +dataId,
+        dataId,
         data,
         trx,
       );

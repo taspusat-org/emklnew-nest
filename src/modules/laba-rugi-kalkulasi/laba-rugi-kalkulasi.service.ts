@@ -250,7 +250,7 @@ export class LabaRugiKalkulasiService {
     }
   }
 
-  async update(dataId: number, data: any, trx: any) {
+  async update(dataId: string, data: any, trx: any) {
     try {
       const existingData = await trx(this.tableName)
         .where('id', dataId)

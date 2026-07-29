@@ -143,7 +143,7 @@ export class LabaRugiKalkulasiController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.labaRugiKalkulasiService.update(
-        +dataId,
+        dataId,
         data,
         trx,
       );

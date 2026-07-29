@@ -17,8 +17,8 @@ import {
 } from '@nestjs/common';
 
 @Injectable()
-export class JenisprosesfeeService {
-  private readonly tableName = 'jenisprosesfee';
+export class GroupInvoiceService {
+  private readonly tableName = 'groupinvoice';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -50,7 +50,7 @@ export class JenisprosesfeeService {
       // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
       // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
       // pengeluaranheader.service.ts.
-      ['nama', 'keterangan'].forEach((field) => {
+      ['kode', 'keterangan'].forEach((field) => {
         if (typeof insertData[field] === 'string') {
           insertData[field] = insertData[field].toUpperCase();
         }
@@ -108,7 +108,7 @@ export class JenisprosesfeeService {
       };
     } catch (error) {
       throw new Error(
-        `Error creating jenis proses fee in service: ${error.message}`,
+        `Error creating group invoice in service: ${error.message}`,
       );
     }
   }
@@ -123,11 +123,11 @@ export class JenisprosesfeeService {
       limit = limit ?? 0;
 
       if (isLookUp) {
-        const jenisProsesFeeResult = await trx(this.tableName)
+        const groupInvoiceResult = await trx(this.tableName)
           .count('id as total')
           .first();
 
-        const totalData = jenisProsesFeeResult?.total || 0;
+        const totalData = groupInvoiceResult?.total || 0;
         if (Number(totalData) > 500) {
           return { data: { type: 'json' } };
         } else {
@@ -138,7 +138,7 @@ export class JenisprosesfeeService {
       const query = trx(`${this.tableName} as p`)
         .select([
           'p.id',
-          'p.nama',
+          'p.kode',
           'p.keterangan',
           'p.statusaktif',
           'p.modifiedby',
@@ -157,7 +157,7 @@ export class JenisprosesfeeService {
         const sanitizedValue = String(search);
         query.where((builder) => {
           builder
-            .orWhere('p.nama', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('p.kode', 'ilike', `%${sanitizedValue}%`)
             .orWhere('p.keterangan', 'ilike', `%${sanitizedValue}%`)
             .orWhere('p.modifiedby', 'ilike', `%${sanitizedValue}%`)
             // .orWhereRaw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
@@ -201,6 +201,11 @@ export class JenisprosesfeeService {
           query.orderBy(sort.sortBy, sort.sortDirection);
         }
       }
+      // Tiebreaker WAJIB: tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, dan ORDER BY yang nilainya seri (mis. sort STATUS AKTIF yang
+      // cuma punya 2 nilai) tak dijamin stabil antar query → satu baris bisa
+      // muncul di dua halaman ("two children with the same key" di grid).
+      query.orderBy('p.id', 'asc');
 
       const result = await trx(this.tableName).count('id as total').first();
       const total = result?.total as number;
@@ -220,7 +225,7 @@ export class JenisprosesfeeService {
         },
       };
     } catch (error) {
-      console.error('Error fetching data jenis proses fee in service:', error);
+      console.error('Error fetching data group invoice in service:', error);
       throw new Error(error);
     }
   }
@@ -299,7 +304,7 @@ export class JenisprosesfeeService {
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
-          postingdari: 'EDIT JENIS PROSES FEE',
+          postingdari: 'EDIT GROUP INVOICE',
           idtrans: id,
           nobuktitrans: id,
           aksi: 'EDIT',
@@ -322,8 +327,8 @@ export class JenisprosesfeeService {
         throw error; // If it's already a HttpException, rethrow it
       }
 
-      console.error('Error updating jenis proses fee in service:', error);
-      throw new Error('Failed to update jenis proses fee in service');
+      console.error('Error updating group invoice in service:', error);
+      throw new Error('Failed to update group invoice in service');
     }
   }
 
@@ -339,7 +344,7 @@ export class JenisprosesfeeService {
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
-          postingdari: 'DELETE JENIS PROSES FEE',
+          postingdari: 'DELETE GROUP INVOICE',
           idtrans: id,
           nobuktitrans: id,
           aksi: 'DELETE',
@@ -355,12 +360,12 @@ export class JenisprosesfeeService {
         deletedData,
       };
     } catch (error) {
-      console.error('Error deleting data jenis proses fee in service: ', error);
+      console.error('Error deleting data group invoice in service: ', error);
       if (error instanceof NotFoundException) {
         throw error;
       }
       throw new InternalServerErrorException(
-        'Failed to delete data jenis proses fee ini service',
+        'Failed to delete data group invoice ini service',
       );
     }
   }
@@ -377,14 +382,24 @@ export class JenisprosesfeeService {
 
         return forceEdit;
       } else if (aksi === 'DELETE') {
-        const validasi = await this.globalService.checkUsed(
-          'marketingprosesfee',
-          'jenisprosesfee_id',
+        // Template memeriksa `marketingprosesfee.jenisprosesfee_id` — kolom
+        // milik modul jenis-proses-fee. Setelah rename jadi `groupinvoice_id`
+        // kolomnya tak pernah ada, query melempar error → 500 → dialog
+        // "ERROR!" tanpa keterangan. Saat ini TIDAK ADA tabel yang
+        // mereferensikan groupinvoice, jadi pakai katalog FK Postgres supaya
+        // otomatis ikut kalau nanti ada tabel anak.
+        const usedBy = await this.utilService.findFirstReference(
+          this.tableName,
           value,
           trx,
         );
 
-        return validasi;
+        return usedBy
+          ? {
+              status: 'failed',
+              message: `Data ini tidak diizinkan untuk dihapus karena masih dipakai di tabel ${usedBy.ref_table}.`,
+            }
+          : { status: 'success', message: 'Data aman untuk dihapus.' };
       }
     } catch (error) {
       console.error('Error di checkValidasi:', error);
@@ -400,7 +415,7 @@ export class JenisprosesfeeService {
     worksheet.mergeCells('A2:D2');
     worksheet.mergeCells('A3:D3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
-    worksheet.getCell('A2').value = 'LAPORAN JENIS PROSES FEE';
+    worksheet.getCell('A2').value = 'LAPORAN GROUP INVOICE';
     worksheet.getCell('A3').value = 'Data Export';
     ['A1', 'A2', 'A3'].forEach((cellKey, i) => {
       worksheet.getCell(cellKey).alignment = {
@@ -415,7 +430,7 @@ export class JenisprosesfeeService {
     });
 
     // Mendefinisikan header kolom
-    const headers = ['NO.', 'NAMA', 'KETERANGAN', 'STATUS AKTIF'];
+    const headers = ['NO.', 'KODE', 'KETERANGAN', 'STATUS AKTIF'];
 
     headers.forEach((header, index) => {
       const cell = worksheet.getCell(5, index + 1);
@@ -443,7 +458,7 @@ export class JenisprosesfeeService {
       const currentRow = rowIndex + 6;
       const rowValues = [
         rowIndex + 1,
-        row.nama,
+        row.kode,
         row.keterangan,
         row.statusaktif_nama,
       ];
@@ -486,7 +501,7 @@ export class JenisprosesfeeService {
 
     const tempFilePath = path.resolve(
       tempDir,
-      `laporan_jenis_proses_fee_${Date.now()}.xlsx`,
+      `laporan_group_invoice_${Date.now()}.xlsx`,
     );
     await workbook.xlsx.writeFile(tempFilePath);
 
@@ -494,6 +509,6 @@ export class JenisprosesfeeService {
   }
 
   findOne(id: string) {
-    return `This action returns a #${id} jenisprosesfee`;
+    return `This action returns a #${id} groupinvoice`;
   }
 }

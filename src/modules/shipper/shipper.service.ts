@@ -116,6 +116,18 @@ export class ShipperService {
         }
       });
 
+      // InputCurrency mengirim string ber-koma ("1,000.00") ke kolom NUMERIC →
+      // PG menolak ("invalid input syntax for type numeric") → 500. Buang
+      // pemisah ribuan; string kosong → null (numeric juga menolak '').
+      ['creditlimit', 'ppn', 'ppnbatalmuat', 'saldopiutang', 'isdpp10psn'].forEach(
+        (field) => {
+          if (typeof insertData[field] === 'string') {
+            const cleaned = insertData[field].replace(/[^0-9.-]/g, '');
+            insertData[field] = cleaned === '' ? null : cleaned;
+          }
+        },
+      );
+
       // id kini varchar UUID (bukan auto-increment): orderBy('id','desc')
       // .first() TIDAK mengembalikan baris yang baru diinsert — UUID tidak
       // terurut kronologis sehingga malah menunjuk baris lain (mengakibatkan
@@ -168,7 +180,7 @@ export class ShipperService {
       // baris terakhir kronologis, jadi klausa itu hanya no-op (selalu true)
       // sekaligus berisiko menyaring baris acak. Posisi cukup dihitung dari
       // jumlah baris pada/sebelum nilai sort baris baru, sesuai urutan grid.
-      const resultposition = await trx('vtemp')
+      const resultposition = await trx(this.tableName)
         .count('* as posisi')
         .where(
           sortBy,
@@ -374,7 +386,7 @@ export class ShipperService {
       const countResult = await countQuery.count('s.id as total').first();
       const total = Number(countResult?.total || 0);
 
-      const query = trx('vshippertest as s').select([
+      const query = trx('shipper as s').select([
         's.id',
         's.statusrelasi',
         's.relasi_id',
@@ -442,6 +454,31 @@ export class ShipperService {
         's.created_at',
         's.updated_at',
       ]);
+
+      // `vshippertest` (view yang hilang) dulu menyediakan kolom *_text lewat join
+      // ke akunpusat/marketing/shipper. Setelah query diarahkan ke tabel `shipper`
+      // mentah, join itu hilang → grid & form EDIT tak menampilkan nama LookUp.
+      // Rekonstruksi di sini (semua kunci text↔text; idshipperasal bigint vs id
+      // UUID mismatch → shipperasal_text sengaja dilewati).
+      query
+        .leftJoin('akunpusat as coa_lu', 's.coa', 'coa_lu.coa')
+        .leftJoin('akunpusat as coapiutang_lu', 's.coapiutang', 'coapiutang_lu.coa')
+        .leftJoin('akunpusat as coahutang_lu', 's.coahutang', 'coahutang_lu.coa')
+        .leftJoin('akunpusat as coagiro_lu', 's.coagiro', 'coagiro_lu.coa')
+        .leftJoin('marketing as marketing_lu', 's.marketing_id', 'marketing_lu.id')
+        .leftJoin(
+          'shipper as parentshipper_lu',
+          's.parentshipper_id',
+          'parentshipper_lu.id',
+        )
+        .select([
+          'coa_lu.keterangancoa as coa_text',
+          'coapiutang_lu.keterangancoa as coapiutang_text',
+          'coahutang_lu.keterangancoa as coahutang_text',
+          'coagiro_lu.keterangancoa as coagiro_text',
+          'marketing_lu.nama as marketing_text',
+          'parentshipper_lu.nama as parentshipper_text',
+        ]);
 
       applyFilters(query);
       query.orderBy(`s.${sortBy}`, sortDirection);
@@ -1213,6 +1250,18 @@ export class ShipperService {
         }
       });
 
+      // InputCurrency mengirim string ber-koma ("1,000.00") ke kolom NUMERIC →
+      // PG menolak ("invalid input syntax for type numeric") → 500. Buang
+      // pemisah ribuan; string kosong → null (numeric juga menolak '').
+      ['creditlimit', 'ppn', 'ppnbatalmuat', 'saldopiutang', 'isdpp10psn'].forEach(
+        (field) => {
+          if (typeof insertData[field] === 'string') {
+            const cleaned = insertData[field].replace(/[^0-9.-]/g, '');
+            insertData[field] = cleaned === '' ? null : cleaned;
+          }
+        },
+      );
+
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
@@ -1250,7 +1299,7 @@ export class ShipperService {
       // baris terakhir kronologis, jadi klausa itu hanya no-op (selalu true)
       // sekaligus berisiko menyaring baris acak. Posisi cukup dihitung dari
       // jumlah baris pada/sebelum nilai sort baris baru, sesuai urutan grid.
-      const resultposition = await trx('vtemp')
+      const resultposition = await trx(this.tableName)
         .count('* as posisi')
         .where(
           sortBy,

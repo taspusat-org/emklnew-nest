@@ -59,7 +59,9 @@ const baseFields = {
     .string()
     .nonempty({ message: 'Email wajib diisi' })
     .email({ message: 'email must be a valid email address' }),
-  karyawan_id: z.string().min(1, { message: 'Karyawan Wajib Diisi' }),
+  // boleh kosong; service menormalkan '' → null agar tidak melanggar
+  // FK_marketing_karyawan_id_karyawan
+  karyawan_id: z.string().nullable().optional(),
   tglmasuk: z
     .string({
       required_error: 'Tgl Masuk Wajib Diisi',
@@ -69,7 +71,10 @@ const baseFields = {
   statustarget: z.string().nullable(),
   statusbagifee: z.string().nullable(),
   statusfeemanager: z.string().nullable(),
-  marketinggroup_id: z.string().nullable(),
+  // `.optional()` WAJIB, bukan cuma `.nullable()`: field ini boleh kosong dan
+  // form TIDAK menyertakan key-nya sama sekali kalau tak pernah dipilih —
+  // z.string().nullable() menolak `undefined` dengan "Required" → 400.
+  marketinggroup_id: z.string().nullable().optional(),
   statusprafee: z.string().nullable(),
   // modifiedby diisi di backend, optional di request body
   modifiedby: z.string().max(200).optional(),

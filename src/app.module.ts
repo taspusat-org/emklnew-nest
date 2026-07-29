@@ -75,6 +75,7 @@ import { MarketingbiayaModule } from './modules/marketingbiaya/marketingbiaya.mo
 import { MarketingmanagerModule } from './modules/marketingmanager/marketingmanager.module';
 import { MarketingprosesfeeModule } from './modules/marketingprosesfee/marketingprosesfee.module';
 import { MarketingdetailModule } from './modules/marketingdetail/marketingdetail.module';
+import { GroupInvoiceModule } from './modules/groupinvoice/groupinvoice.module';
 import { JenisprosesfeeModule } from './modules/jenisprosesfee/jenisprosesfee.module';
 import { DivisiModule } from './modules/divisi/divisi.module';
 import { JabatanModule } from './modules/jabatan/jabatan.module';
@@ -218,6 +219,7 @@ import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-mua
     MarketingprosesfeeModule,
     MarketingdetailModule,
     JenisprosesfeeModule,
+    GroupInvoiceModule,
     DivisiModule,
     JabatanModule,
     ShipperModule,

@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -14,6 +16,28 @@ import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { Workbook } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
+
+/**
+ * Kolom `karyawan.karyawan_id` punya FK self-reference ke `karyawan(id)` yang
+ * sebenarnya artefak migrasi — maksud aslinya menunjuk tabel karyawan di server
+ * HR terpisah. Seluruh baris lama memakai sentinel '0' yang tak pernah ada di
+ * tabel; constraint-nya NOT VALID sehingga baris lama lolos, TAPI setiap
+ * insert/update baru diperiksa → "violates foreign key constraint" (500).
+ * Sentinel dan string kosong diperlakukan sebagai "tak ada tautan HR" = NULL,
+ * satu-satunya nilai yang lolos FK. Baris lama ikut bersih saat diedit.
+ */
+async function resolveKaryawanId(trx: any, value: any): Promise<string | null> {
+  const normalized = typeof value === 'string' ? value.trim() : value;
+  if (!normalized || normalized === '0') {
+    return null;
+  }
+  // Nilai apa pun yang tidak benar-benar ada di karyawan(id) akan ditolak FK
+  // dan menggagalkan seluruh simpan. Karena kolom ini tak punya sumber data
+  // yang bisa dipilih user (server HR tak tersedia), nilai asing dibuang
+  // menjadi NULL alih-alih meledak jadi 500.
+  const existing = await trx('karyawan').where('id', normalized).first();
+  return existing ? normalized : null;
+}
 
 @Injectable()
 export class KaryawanService {
@@ -54,6 +78,8 @@ export class KaryawanService {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
+
+      insertData.karyawan_id = await resolveKaryawanId(trx, insertData.karyawan_id);
 
       const insertedItems = await trx(this.tableName)
         .insert(await withUuidV7(trx, insertData))
@@ -139,7 +165,7 @@ export class KaryawanService {
           'kar.absen_id',
           'kar.jabatan_id',
           'kar.karyawan_id',
-          trx.raw('karyawan.namakaryawan as karyawan_nama'),
+          'hrk.nama as karyawan_nama',
           trx.raw(
             "TO_CHAR(kar.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
           ),
@@ -151,11 +177,10 @@ export class KaryawanService {
           'jabatan.nama as jabatan_nama',
         ])
         .leftJoin('jabatan', 'kar.jabatan_id', 'jabatan.id')
-        .leftJoin(
-          `hr.dbo.karyawan as karyawan`,
-          'kar.karyawan_id',
-          'karyawan.id',
-        )
+        // karyawan = tabel LOKAL (emkl), sama seperti marketing.service.ts.
+        // Join lintas DB `hr.dbo.karyawan` melempar "cross-database references
+        // are not implemented" di PG (server HR terpisah, DB `hr` tak ada) → 500.
+        .leftJoin(`${this.tableName} as hrk`, 'kar.karyawan_id', 'hrk.id')
         .leftJoin('parameter as par', 'kar.statusaktif', 'par.id');
 
       if (limit > 0) {
@@ -167,11 +192,13 @@ export class KaryawanService {
         const sanitizedValue = String(search).replace(/\[/g, '[[]');
         query.where((builder) => {
           builder
-            .orWhere('kar.nama', 'like', `%${sanitizedValue}%`)
-            .orWhere('kar.keterangan', 'like', `%${sanitizedValue}%`)
-            .orWhere('kar.kodeabsen', 'like', `%${sanitizedValue}%`)
-            .orWhere('kar.modifiedby', 'like', `%${sanitizedValue}%`)
-            .orWhere('jabatan.nama', 'like', `%${sanitizedValue}%`);
+            // ilike, bukan like: di PG `like` case-sensitive sedangkan seluruh
+            // data tersimpan huruf besar → ketikan huruf kecil tak pernah cocok
+            .orWhere('kar.nama', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('kar.keterangan', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('kar.kodeabsen', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('kar.modifiedby', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('jabatan.nama', 'ilike', `%${sanitizedValue}%`);
         });
       }
 
@@ -187,9 +214,9 @@ export class KaryawanService {
             } else if (key === 'text' || key === 'memo') {
               query.andWhere(`par.${key}`, '=', sanitizedValue);
             } else if (key === 'jabatan_nama') {
-              query.andWhere(`jabatan.nama`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`jabatan.nama`, 'ilike', `%${sanitizedValue}%`);
             } else {
-              query.andWhere(`kar.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`kar.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }
@@ -238,7 +265,7 @@ export class KaryawanService {
     }
   }
 
-  async update(dataId: number, data: any, trx: any) {
+  async update(dataId: string, data: any, trx: any) {
     try {
       const existingData = await trx(this.tableName)
         .where('id', dataId)
@@ -272,6 +299,9 @@ export class KaryawanService {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
+
+      insertData.karyawan_id = await resolveKaryawanId(trx, insertData.karyawan_id);
+
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
@@ -290,8 +320,10 @@ export class KaryawanService {
       );
 
       // Cari index item yang baru saja diupdate
+      // id karyawan uuid string: Number(uuid) = NaN dan NaN !== NaN, jadi
+      // perbandingan numerik selalu -1 → "Updated item not found" → 500
       const itemIndex = filteredData.findIndex(
-        (item) => Number(item.id) === dataId,
+        (item) => String(item.id) === String(dataId),
       );
       if (itemIndex === -1) {
         throw new Error('Updated item not found in all items');
@@ -336,6 +368,21 @@ export class KaryawanService {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
+      // Karyawan direferensikan marketing, pengeluaranemklheader,
+      // pengeluaranemklgantungheader, dll. Tanpa pra-cek ini, menghapus data
+      // yang masih dipakai hanya memunculkan 500 "Failed to delete karyawan"
+      // dari pelanggaran FK, tanpa petunjuk tabel mana yang menahannya.
+      const usedBy = await this.utilsService.findFirstReference(
+        this.tableName,
+        id,
+        trx,
+      );
+      if (usedBy) {
+        throw new BadRequestException(
+          `Karyawan tidak bisa dihapus karena masih dipakai di tabel ${usedBy.ref_table} (kolom ${usedBy.ref_column}).`,
+        );
+      }
+
       const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
@@ -359,7 +406,9 @@ export class KaryawanService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      // HttpException (mis. BadRequestException "masih dipakai") harus lolos
+      // apa adanya, kalau tidak pesannya tertelan jadi 500 generik
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

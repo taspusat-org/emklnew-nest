@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const UpdateDivisiSchema = z
   .object({
     nama: z.string().trim(),
-    id: z.number().optional(),
+    id: z.string().optional(),
     keterangan: z.string(),
     statusaktif: z.string()
       .min(0, { message: 'statusaktif must be a non-negative integer' }),

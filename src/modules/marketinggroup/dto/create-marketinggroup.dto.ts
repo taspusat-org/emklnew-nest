@@ -3,7 +3,7 @@ import { isRecordExist } from 'src/utils/utils.service';
 import { z } from 'zod';
 
 const baseFields = {
-  marketing_id: z.number().int({ message: 'Marketing Wajib Diisi' }),
+  marketing_id: z.string().min(1, { message: 'Marketing Wajib Diisi' }),
   statusaktif: z.string(), // Ensure non-negative
   modifiedby: z.string().nullable().optional(),
 };
@@ -34,7 +34,7 @@ export type CreateMarketinggroupDto = z.infer<
 export const UpdateMarketinggroupSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string().optional(),
     // Field atau aturan khusus update bisa ditambah di sini
   })
   .superRefine(async (data, ctx) => {

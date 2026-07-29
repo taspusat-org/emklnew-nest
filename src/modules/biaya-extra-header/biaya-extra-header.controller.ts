@@ -242,7 +242,7 @@ export class BiayaExtraHeaderController {
 
   @UseGuards(AuthGuard)
   @Get('findOneDetail/:id')
-  async findOneDetail(@Param('id') id: number, @Query() query: any) {
+  async findOneDetail(@Param('id') id: string, @Query() query: any) {
     const trx = await dbMssql.transaction();
     try {
       const { jenisOrderan } = query;

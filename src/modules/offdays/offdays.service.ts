@@ -35,6 +35,10 @@ export class OffdaysService {
         search,
         page,
         limit,
+        // teks tampilan LookUp, BUKAN kolom tabel. Service ini pass-through
+        // (`...insertData` langsung di-insert) jadi field asing apa pun akan
+        // jadi kolom → "column cabang_nama does not exist".
+        cabang_nama,
         ...insertData
       } = data;
       const formatDate = (date: string) => {
@@ -159,12 +163,16 @@ export class OffdaysService {
           'u.statusaktif',
           'u.modifiedby',
           'u.cabang_id',
+          // dibutuhkan form: tanpa ini LookUp CABANG tak punya teks untuk
+          // ditampilkan saat edit, cuma menyimpan id-nya saja
+          'c.nama as cabang_nama',
           trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at"),
           trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at"),
           'p.memo',
           'p.text',
         ])
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id');
+        .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
+        .leftJoin('cabang as c', 'u.cabang_id', 'c.id');
       if (limit > 0) {
         query.limit(limit).offset(offset);
       }
@@ -1120,6 +1128,8 @@ export class OffdaysService {
         page,
         limit,
         text,
+        // sama seperti create: teks tampilan LookUp, bukan kolom tabel
+        cabang_nama,
         ...insertData
       } = data;
 
@@ -1180,7 +1190,11 @@ export class OffdaysService {
       }
 
       const filteredItems = await query;
-      let itemIndex = filteredItems.findIndex((item) => Number(item.id) === id);
+      // id harilibur uuid string: Number(uuid) = NaN sehingga perbandingan
+      // numerik tak pernah cocok → grid selalu fokus ke baris 0 setelah edit
+      let itemIndex = filteredItems.findIndex(
+        (item) => String(item.id) === String(id),
+      );
       if (itemIndex === -1) {
         itemIndex = 0;
       }

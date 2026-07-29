@@ -3,7 +3,7 @@ import { isRecordExistCI } from 'src/utils/utils.service';
 
 export const UpdateAkuntansiSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     nama: z.string().trim(),
     keterangan: z.string(),
     statusaktif: z.string()

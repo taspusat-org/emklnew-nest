@@ -21,6 +21,8 @@ import { KaryawanService } from './karyawan.service';
 import {
   CreateKaryawanDto,
   createKaryawanSchema,
+  UpdateKaryawanDto,
+  updateKaryawanSchema,
 } from './dto/create-karyawan.dto';
 import { AuthGuard } from '../auth/auth.guard';
 import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
@@ -31,10 +33,6 @@ import {
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
-import {
-  UpdatePelayaranDto,
-  UpdatePelayaranSchema,
-} from '../pelayaran/dto/create-pelayaran.dto';
 import { Response } from 'express';
 import * as fs from 'fs';
 
@@ -116,15 +114,17 @@ export class KaryawanController {
   //@KARYAWAN
   async update(
     @Param('id') dataId: string,
-    @Body(new ZodValidationPipe(UpdatePelayaranSchema))
-    data: UpdatePelayaranDto,
+    @Body(new ZodValidationPipe(updateKaryawanSchema))
+    data: UpdateKaryawanDto,
     @Req() req,
   ) {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
-      const result = await this.karyawanService.update(+dataId, data, trx);
+      // JANGAN `+dataId`: id karyawan itu uuid string, unary + membuatnya NaN
+      // sehingga `.where('id', NaN)` tak menemukan baris → "not found" → 500
+      const result = await this.karyawanService.update(dataId, data, trx);
 
       await trx.commit();
       return result;
@@ -169,7 +169,9 @@ export class KaryawanController {
       await trx.rollback();
       console.error('Error deleting karyawan in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      // termasuk BadRequestException "karyawan masih dipakai" dari service —
+      // tanpa ini pesannya tertelan jadi 500 generik
+      if (error instanceof HttpException) {
         throw error;
       }
 

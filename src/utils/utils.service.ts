@@ -73,17 +73,22 @@ export class UtilsService {
     const startTime = Date.now();
 
     try {
-      // Generate unique temp table name
-      const tempTableName = `##temp_${customPrefix || 'data'}_${Math.random().toString(36).substring(2, 15)}`;
+      // Postgres tidak mengenal prefix `##` (itu global temp table SQL Server)
+      // maupun IDENTITY(1,1) — pakai CREATE TEMP TABLE + GENERATED AS IDENTITY.
+      const tempTableName = `temp_${customPrefix || 'data'}_${Math.random().toString(36).substring(2, 15)}`;
+
+      // ON COMMIT DROP: helper ini selalu dipanggil di dalam transaksi knex,
+      // jadi tabelnya ikut hilang saat commit/rollback. Tanpa itu temp table PG
+      // hidup selama SESSION (bukan query) dan menumpuk di koneksi pool.
+      const createTempTable = async (defs: string[]) => {
+        await trx.raw(
+          `CREATE TEMP TABLE "${tempTableName}" (\n  ${defs.join(',\n  ')}\n) ON COMMIT DROP`,
+        );
+      };
 
       // Handle empty data - create empty table with position field only
       if (!data || data.length === 0) {
-        const createTableSQL = `
-          CREATE TABLE ${tempTableName} (
-            position BIGINT IDENTITY(1,1) NOT NULL
-          )
-        `;
-        await trx.raw(createTableSQL);
+        await createTempTable(['position BIGINT GENERATED ALWAYS AS IDENTITY']);
 
         return {
           tempTableName,
@@ -99,91 +104,37 @@ export class UtilsService {
       const firstRow = data[0];
       const columns = Object.keys(firstRow);
 
-      // Build column definitions for raw SQL
-      const columnDefs: string[] = [];
+      // Semua kolom data dibuat `text`. Tabel ini cuma dipakai untuk mencari
+      // `position` sebuah baris (lihat akunpusat.service), nilainya tak pernah
+      // dihitung secara numerik — menebak tipe dari baris pertama justru bikin
+      // insert gagal begitu baris lain bertipe lain atau baris pertama null.
+      await createTempTable([
+        'position BIGINT GENERATED ALWAYS AS IDENTITY',
+        ...columns.map((columnName) => `"${columnName}" text NULL`),
+      ]);
 
-      columnDefs.push('position BIGINT IDENTITY(1,1) NOT NULL');
-      columns.forEach((columnName) => {
-        const value = firstRow[columnName];
-        const valueType = typeof value;
-
-        let columnDef = '';
-
-        if (valueType === 'number') {
-          if (Number.isInteger(value)) {
-            columnDef = `[${columnName}] BIGINT NULL`;
-          } else {
-            columnDef = `[${columnName}] DECIMAL(18,2) NULL`;
-          }
-        } else if (valueType === 'boolean') {
-          columnDef = `[${columnName}] BIT NULL`;
-        } else if (value instanceof Date) {
-          columnDef = `[${columnName}] DATETIME2 NULL`;
-        } else if (valueType === 'string') {
-          const strLength = String(value).length;
-          if (strLength > 500) {
-            columnDef = `[${columnName}] text NULL`;
-          } else {
-            columnDef = `[${columnName}] NVARCHAR(255) NULL`;
-          }
-        } else {
-          columnDef = `[${columnName}] NVARCHAR(255) NULL`;
-        }
-
-        columnDefs.push(columnDef);
-      });
-
-      // Create table using raw SQL (faster than schema builder)
-      const createTableSQL = `
-        CREATE TABLE ${tempTableName} (
-          ${columnDefs.join(',\n          ')}
-        )
-      `;
-      await trx.raw(createTableSQL);
-
-      // Bulk insert using raw SQL (much faster for big data)
+      // Bulk insert lewat query builder knex: bindings otomatis ter-escape dan
+      // dikutip sesuai dialek. Versi lama merangkai sendiri literal `N'...'`
+      // ala T-SQL, yang selain salah dialek juga rawan saat data berisi kutip.
       let insertedCount = 0;
-      const totalChunks = Math.ceil(data.length / chunkSize);
+
+      const toText = (value: any): string | null => {
+        if (value === null || value === undefined) return null;
+        if (value instanceof Date) return value.toISOString();
+        if (typeof value === 'object') return JSON.stringify(value);
+        return String(value);
+      };
 
       for (let i = 0; i < data.length; i += chunkSize) {
-        const chunk = data.slice(i, i + chunkSize);
+        const chunk = data.slice(i, i + chunkSize).map((row) => {
+          const normalized: Record<string, string | null> = {};
+          columns.forEach((col) => {
+            normalized[col] = toText(row[col]);
+          });
+          return normalized;
+        });
 
-        // Build VALUES clause for bulk insert
-        const values = chunk
-          .map((row) => {
-            const rowValues = columns.map((col) => {
-              const value = row[col];
-
-              // Handle NULL
-              if (value === null || value === undefined) {
-                return 'NULL';
-              }
-
-              // Handle different types
-              if (typeof value === 'number') {
-                return value;
-              } else if (typeof value === 'boolean') {
-                return value ? '1' : '0';
-              } else if (value instanceof Date) {
-                return `'${value.toISOString().slice(0, 23)}'`;
-              } else {
-                // Escape single quotes in strings
-                const escaped = String(value).replace(/'/g, "''");
-                return `N'${escaped}'`;
-              }
-            });
-
-            return `(${rowValues.join(',')})`;
-          })
-          .join(',\n');
-
-        // Execute bulk insert
-        const insertSQL = `
-          INSERT INTO ${tempTableName} (${columns.map((c) => `[${c}]`).join(',')})
-          VALUES ${values}
-        `;
-
-        await trx.raw(insertSQL);
+        await trx(tempTableName).insert(chunk);
         insertedCount += chunk.length;
       }
 

@@ -95,7 +95,11 @@ export class SupplierService {
       const statusRelasi = await trx('parameter')
         .select('*')
         .where('grp', 'STATUS RELASI')
-        .where('text', this.tableName)
+        // parameter.text tersimpan HURUF BESAR ('SUPPLIER') sedangkan
+        // this.tableName huruf kecil. `=` di Postgres case-sensitive, jadi
+        // perbandingan langsung tak pernah cocok → statusRelasi undefined →
+        // "Cannot read properties of undefined (reading 'id')".
+        .whereRaw('upper(trim(text)) = ?', [this.tableName.toUpperCase()])
         .first();
 
       const relasi = {
@@ -116,7 +120,9 @@ export class SupplierService {
       const newItem = insertedData[0];
       await trx(this.tableName)
         .update({
-          relasi_id: Number(insertRelasi.id),
+          // relasi_id varchar(200) berisi UUID — Number(uuid) = NaN, pg
+          // menyimpannya sebagai string "NaN" dan melanggar FK ke relasi(id)
+          relasi_id: insertRelasi.id,
         })
         .where('id', newItem.id)
         .returning('*');
@@ -366,7 +372,7 @@ export class SupplierService {
     }
   }
 
-  async update(dataId: number, data: any, trx: any) {
+  async update(dataId: string, data: any, trx: any) {
     try {
       const existingData = await trx(this.tableName)
         .where('id', dataId)
@@ -421,7 +427,11 @@ export class SupplierService {
       const statusRelasi = await trx('parameter')
         .select('*')
         .where('grp', 'STATUS RELASI')
-        .where('text', this.tableName)
+        // parameter.text tersimpan HURUF BESAR ('SUPPLIER') sedangkan
+        // this.tableName huruf kecil. `=` di Postgres case-sensitive, jadi
+        // perbandingan langsung tak pernah cocok → statusRelasi undefined →
+        // "Cannot read properties of undefined (reading 'id')".
+        .whereRaw('upper(trim(text)) = ?', [this.tableName.toUpperCase()])
         .first();
 
       const relasi = {

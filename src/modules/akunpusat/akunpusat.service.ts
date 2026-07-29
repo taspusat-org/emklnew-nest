@@ -316,6 +316,13 @@ export class AkunpusatService {
       if (sort?.sortBy && sort?.sortDirection) {
         dataQuery.orderBy(sort.sortBy, sort.sortDirection);
       }
+      // Tiebreaker WAJIB: kolom sort default `type_nama` cuma punya 16 nilai
+      // unik untuk 314 baris, dan ORDER BY yang ambigu tidak dijamin stabil
+      // antar query. Karena tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, baris yang nilainya seri bisa muncul di dua halaman sekaligus
+      // (frontend lalu melempar "two children with the same key") sementara
+      // baris lain tak pernah tampil. `u.id` unik sehingga urutannya pasti.
+      dataQuery.orderBy('u.id', 'asc');
 
       // Apply pagination
       if (limit > 0) {
