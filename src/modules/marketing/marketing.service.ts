@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -87,7 +89,24 @@ export class MarketingService {
         }
       });
 
-      if (data.karyawan_id != null) {
+      // KARYAWAN & MARKETING GROUP boleh kosong. LookUp yang dikosongkan
+      // mengirim '' (bukan null): '' melanggar FK_marketing_karyawan_id_karyawan
+      // dan juga membuat guard di bawah ikut jalan — padahal blok itu menembak
+      // database HR yang tak tersedia di deployment ini.
+      if (
+        typeof insertData.karyawan_id === 'string' &&
+        insertData.karyawan_id.trim() === ''
+      ) {
+        insertData.karyawan_id = null;
+      }
+      if (
+        typeof insertData.marketinggroup_id === 'string' &&
+        insertData.marketinggroup_id.trim() === ''
+      ) {
+        insertData.marketinggroup_id = null;
+      }
+
+      if (insertData.karyawan_id != null) {
         const cekIdCabang = await dbHr('karyawan')
           .select('id', 'namakaryawan', 'cabang_id')
           .where('id', insertData.karyawan_id)
@@ -254,44 +273,14 @@ export class MarketingService {
         }
       }
 
-      const tempTableMarketingGroup = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-      const tempMarketingGroup = await this.utilService.createTempTable(
-        'marketinggroup',
-        trx,
-        tempTableMarketingGroup,
-      );
-      await trx.raw(tempMarketingGroup);
-      await trx.raw(
-        `ALTER TABLE ${tempTableMarketingGroup} ADD marketinggroup_nama nvarchar(200) NULL`,
-      );
-
-      const getMarketingGroup = await trx('marketinggroup as a')
-        .select([
-          'a.id',
-          'a.marketing_id',
-          'a.statusaktif',
-          'a.info',
-          'a.modifiedby',
-          'a.created_at',
-          'a.updated_at',
-          'marketing.nama as marketinggroup_nama',
-        ])
-        .leftJoin('marketing', 'a.marketing_id', 'marketing.id');
-
-      const jsonString = JSON.stringify(getMarketingGroup);
-      const mappingData = Object.keys(getMarketingGroup[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
-
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      await trx(tempTableMarketingGroup).insert(openJson);
-
+      // Dulu: temp table `##temp_x` + OPENJSON (sintaks MSSQL) dipakai untuk
+      // menyiapkan marketinggroup beserta marketinggroup_nama lalu di-join.
+      // Di PG semuanya gagal → 500: `##` bukan identifier valid (createTempTable
+      // membuang '#' sehingga nama tabel tak pernah cocok), `nvarchar` dan
+      // `OPENJSON` tidak ada, dan `Object.keys(rows[0])` ikut crash saat tabel
+      // marketinggroup kosong. Diganti subquery join di bawah (alias `tmg`)
+      // yang menyediakan kolom yang sama dipakai (tmg.id, tmg.marketinggroup_nama)
+      // tanpa temp table sama sekali.
       const query = trx(`${this.tableName} as u`)
         .select([
           'u.id',
@@ -344,7 +333,11 @@ export class MarketingService {
           'statusfeemanager.id',
         )
         .leftJoin(
-          `${tempTableMarketingGroup} as tmg`,
+          trx.raw(
+            `(select a.id, m.nama as marketinggroup_nama
+                from marketinggroup a
+                left join marketing m on m.id = a.marketing_id) as tmg`,
+          ),
           'u.marketinggroup_id',
           `tmg.id`,
         )
@@ -623,7 +616,24 @@ export class MarketingService {
         }
       });
 
-      if (data.karyawan_id != null) {
+      // KARYAWAN & MARKETING GROUP boleh kosong. LookUp yang dikosongkan
+      // mengirim '' (bukan null): '' melanggar FK_marketing_karyawan_id_karyawan
+      // dan juga membuat guard di bawah ikut jalan — padahal blok itu menembak
+      // database HR yang tak tersedia di deployment ini.
+      if (
+        typeof insertData.karyawan_id === 'string' &&
+        insertData.karyawan_id.trim() === ''
+      ) {
+        insertData.karyawan_id = null;
+      }
+      if (
+        typeof insertData.marketinggroup_id === 'string' &&
+        insertData.marketinggroup_id.trim() === ''
+      ) {
+        insertData.marketinggroup_id = null;
+      }
+
+      if (insertData.karyawan_id != null) {
         const cekIdCabang = await dbHr('karyawan')
           .select('id', 'namakaryawan', 'cabang_id')
           .where('id', insertData.karyawan_id)
@@ -721,7 +731,9 @@ export class MarketingService {
         trx,
       );
 
-      let dataIndex = filteredItems.findIndex((item) => Number(item.id) === id);
+      let dataIndex = filteredItems.findIndex(
+        (item) => String(item.id) === String(id),
+      );
 
       if (dataIndex === -1) {
         dataIndex = 0;
@@ -763,12 +775,29 @@ export class MarketingService {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilService.lockAndDestroy(
-        id,
+      // 11 tabel mereferensikan marketing(id). Lima di antaranya milik form ini
+      // sendiri (tab detail) dan ikut dihapus di bawah; sisanya — shipper,
+      // orderanmuatan, bookingorderanmuatan, dsb — adalah transaksi berdiri
+      // sendiri yang HARUS menahan penghapusan. Tanpa pra-cek ini, penolakan FK
+      // muncul sebagai 500 "Internal Server Error" tanpa keterangan.
+      const anakTabDetail = [
+        'marketingorderan',
+        'marketingbiaya',
+        'marketingmanager',
+        'marketingprosesfee',
+        'marketingdetail',
+      ];
+      const usedBy = await this.utilService.findFirstReference(
         this.tableName,
-        'id',
+        id,
         trx,
+        anakTabDetail,
       );
+      if (usedBy) {
+        throw new BadRequestException(
+          `Marketing tidak bisa dihapus karena masih dipakai di tabel ${usedBy.ref_table} (kolom ${usedBy.ref_column}).`,
+        );
+      }
 
       const deletedMarketingOrderan = await this.utilService.lockAndDestroy(
         id,
@@ -820,6 +849,16 @@ export class MarketingService {
           trx,
         );
       }
+
+      // Parent dihapus TERAKHIR. Sebelumnya baris ini berada paling atas
+      // sehingga DELETE marketing dijalankan selagi baris anak masih ada →
+      // "violates foreign key constraint fk_marketingbiaya_marketing_id_marketing".
+      const deletedData = await this.utilService.lockAndDestroy(
+        id,
+        this.tableName,
+        'id',
+        trx,
+      );
 
       await this.logTrailService.create(
         {
@@ -887,7 +926,9 @@ export class MarketingService {
       );
     } catch (error) {
       console.error('Error deleting data marketing in service:', error);
-      if (error instanceof NotFoundException) {
+      // termasuk BadRequestException "masih dipakai" — tanpa ini pesannya
+      // tertelan jadi 500 generik
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

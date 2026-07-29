@@ -9,7 +9,25 @@ import {
 import { CreateManagermarketingHeaderDto } from './dto/create-managermarketingheader.dto';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+  parseNumberWithSeparators,
+} from 'src/utils/utils.service';
+
+/**
+ * InputCurrency di form mengirim string berformat ribuan ("10,000"), sedangkan
+ * `managermarketing.minimalprofit` bertipe numeric → Postgres menolak dengan
+ * `invalid input syntax for type numeric: "10,000"` (500 saat SAVE).
+ * Kosong/tak terbaca dijadikan null (kolomnya nullable).
+ */
+function normalizeMinimalProfit(value: any): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isNaN(value) ? null : value;
+  const parsed = parseNumberWithSeparators(String(value));
+  return Number.isNaN(parsed) ? null : parsed;
+}
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { ManagermarketingdetailService } from '../managermarketingdetail/managermarketingdetail.service';
 import { KasgantungdetailService } from '../kasgantungdetail/kasgantungdetail.service';
@@ -59,6 +77,10 @@ export class ManagermarketingheaderService {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
+
+      insertData.minimalprofit = normalizeMinimalProfit(
+        insertData.minimalprofit,
+      );
 
       const insertedItems = await trx(this.tableName)
         .insert(await withUuidV7(trx, insertData))
@@ -316,6 +338,11 @@ export class ManagermarketingheaderService {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
+
+      insertData.minimalprofit = normalizeMinimalProfit(
+        insertData.minimalprofit,
+      );
+
       const existingData = await trx(this.tableName).where('id', id).first();
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
 

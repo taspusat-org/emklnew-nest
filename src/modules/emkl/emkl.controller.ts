@@ -119,7 +119,7 @@ export class EmklController {
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
-      const result = await this.emklService.update(+dataId, data, trx);
+      const result = await this.emklService.update(dataId, data, trx);
 
       await trx.commit();
       return result;

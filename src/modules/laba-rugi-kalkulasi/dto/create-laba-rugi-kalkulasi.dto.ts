@@ -65,7 +65,7 @@ export type CreateLabaRugiKalkulasiDto = z.infer<
 export const UpdateLabaRugiKalkulasiSchema = z
   .object({
     ...baseFields,
-    id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+    id: z.string().optional(),
     // Field atau aturan khusus update bisa ditambah di sini
   })
   .superRefine(async (data, ctx) => {

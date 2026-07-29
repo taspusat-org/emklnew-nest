@@ -15,7 +15,7 @@ export type UpdateManagermarketingDetailDto = z.infer<
 
 export const UpdateManagermarketingHeaderSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     nama: z.string().trim().min(1, { message: 'Nama Wajib Diisi' }).max(100),
     keterangan: z.string().trim().min(1, { message: 'Keterangan wajib diisi' }),
     minimalprofit: z

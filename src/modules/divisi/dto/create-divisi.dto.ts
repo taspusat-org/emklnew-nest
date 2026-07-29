@@ -8,7 +8,7 @@ export const CreateDivisiSchema = z.object({
     .max(100)
     .refine(
       async (value) => {
-        const exists = await isRecordExistCI('nama', value, 'Divisi');
+        const exists = await isRecordExistCI('nama', value, 'divisi');
         return !exists; // Validasi jika nama sudah ada
       },
       {

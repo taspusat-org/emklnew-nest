@@ -3,7 +3,7 @@ import { dbMssql } from 'src/common/utils/db';
 
 export const UpdateBiayaSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     nama: z.string().trim().min(1, { message: 'NAMA is required' }),
 
     keterangan: z.string().trim().min(1, { message: 'KETERANGAN is required' }),

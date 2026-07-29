@@ -136,7 +136,7 @@ export class JenisprosesfeeController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.jenisprosesfeeService.update(
-        +dataId,
+        dataId,
         data,
         trx,
       );

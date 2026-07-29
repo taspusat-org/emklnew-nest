@@ -110,10 +110,15 @@ export const CreatePengeluaranEmklSchema = z
         const first = coaValues[i];
         const second = coaValues[j];
 
+        const firstValue = first.value?.trim() ?? '';
+        const secondValue = second.value?.trim() ?? '';
+
+        // Hanya cek "tidak boleh sama" bila KEDUA field terisi.
+        // Bila salah satu (atau keduanya) kosong, lewati agar tetap bisa disimpan.
         if (
-          first.value != null &&
-          second.value != null &&
-          first.value === second.value
+          firstValue !== '' &&
+          secondValue !== '' &&
+          firstValue === secondValue
         ) {
           ctx.addIssue({
             path: [second.field as keyof typeof data],
@@ -185,10 +190,15 @@ export const UpdatePengeluaranEmklSchema = z
         const first = coaValues[i];
         const second = coaValues[j];
 
+        const firstValue = first.value?.trim() ?? '';
+        const secondValue = second.value?.trim() ?? '';
+
+        // Hanya cek "tidak boleh sama" bila KEDUA field terisi.
+        // Bila salah satu (atau keduanya) kosong, lewati agar tetap bisa disimpan.
         if (
-          first.value != null &&
-          second.value != null &&
-          first.value === second.value
+          firstValue !== '' &&
+          secondValue !== '' &&
+          firstValue === secondValue
         ) {
           ctx.addIssue({
             path: [second.field as keyof typeof data],

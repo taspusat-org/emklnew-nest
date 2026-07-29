@@ -13,182 +13,127 @@ export class ManagermarketingdetailService {
   ) {}
   private readonly logger = new Logger(ManagermarketingdetailService.name);
   async create(details: any, id: any = 0, trx: any = null) {
-    let insertedData = null;
-    let data: any = null;
-    const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-
-    // Get the column info and create temporary table
-    const result = await trx(this.tableName).columnInfo();
-    const tableTemp = await this.utilsService.createTempTable(
-      this.tableName,
-      trx,
-      tempTableName,
-    );
-
+    // Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
+    // Server (tak ada di PG), dan nama temp `##temp_...` juga tak pernah cocok
+    // dengan tabel yang dibuat createTempTable (helper itu membuang prefiks '#').
+    // Upsert langsung dari array JS: update per-baris existing, hapus baris yang
+    // tak dikirim lagi, insert baris baru dgn withUuidV7. Pola sama dengan
+    // pengeluarandetail.service.ts.
     const time = this.utilsService.getTime();
     const logData: any[] = [];
-    const mainDataToInsert: any[] = [];
+
+    // nominalawal/nominalakhir/persentase bertipe numeric. Grid mengirimnya
+    // lewat InputCurrency sebagai string ter-format ("10,000"); koma ribuan
+    // ditolak PG (22P02 invalid input syntax for type numeric). Kosong → null
+    // (ketiga kolom nullable).
+    const toNumeric = (value: any): number | null => {
+      if (value === null || value === undefined || value === '') return null;
+      if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+      }
+      const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+      return Number.isNaN(parsed) ? null : parsed;
+    };
+
     if (details.length === 0) {
       await trx(this.tableName).delete().where('managermarketing_id', id);
       return;
     }
-    for (data of details) {
-      let isDataChanged = false;
-      // Check if the data has an id (existing record)
-      if (data.id) {
+
+    const existingRows: any[] = []; // baris dgn id nyata (bukan '0'/kosong)
+    const newRows: any[] = [];
+
+    for (const data of details) {
+      data.nominalawal = toNumeric(data.nominalawal);
+      data.nominalakhir = toNumeric(data.nominalakhir);
+      data.persentase = toNumeric(data.persentase);
+
+      const isNew = !data.id || String(data.id) === '0';
+      if (!isNew) {
         const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
-
         if (existingData) {
-          const createdAt = {
-            created_at: existingData.created_at,
-            updated_at: existingData.updated_at,
-          };
-          Object.assign(data, createdAt);
-
+          data.created_at = existingData.created_at;
+          data.updated_at = existingData.updated_at;
           if (this.utilsService.hasChanges(data, existingData)) {
             data.updated_at = time;
-            isDataChanged = true;
             data.aksi = 'UPDATE';
+          } else {
+            data.aksi = 'NO UPDATE';
           }
+        } else {
+          data.aksi = 'NO UPDATE';
         }
+        existingRows.push(data);
       } else {
-        // New record: Set timestamps
-        const newTimestamps = {
-          created_at: time,
-          updated_at: time,
-        };
-        Object.assign(data, newTimestamps);
-        isDataChanged = true;
+        data.created_at = time;
+        data.updated_at = time;
         data.aksi = 'CREATE';
+        newRows.push(data);
       }
-
-      if (!isDataChanged) {
-        data.aksi = 'NO UPDATE';
-      }
-
-      const { aksi, ...dataForInsert } = data;
-      mainDataToInsert.push(dataForInsert);
-      logData.push({
-        ...data,
-        created_at: time,
-      });
+      logData.push({ ...data, created_at: time });
     }
 
-    // Create temporary table to insert
-    await trx.raw(tableTemp);
-    // Ensure each item has an idheader
-    const processedData = mainDataToInsert.map((item: any) => ({
-      ...item,
-      managermarketing_id: item.managermarketing_id ?? id, // Ensure correct field mapping
-    }));
-    const jsonString = JSON.stringify(processedData);
+    // UPDATE baris existing (per baris)
+    let updatedData: any = null;
+    for (const row of existingRows) {
+      const res = await trx(this.tableName)
+        .where('id', row.id)
+        .update({
+          nominalawal: row.nominalawal,
+          nominalakhir: row.nominalakhir,
+          persentase: row.persentase,
+          statusaktif: row.statusaktif,
+          info: row.info,
+          modifiedby: row.modifiedby,
+          managermarketing_id: row.managermarketing_id ?? id,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        })
+        .returning('*');
+      if (res && res[0]) updatedData = res[0];
+    }
 
-    const mappingData = Object.keys(processedData[0]).map((key) => [
-      'value',
-      `$.${key}`,
-      key,
-    ]);
-
-    const openJson = await trx
-      .from(trx.raw('OPENJSON(?)', [jsonString]))
-      .jsonExtract(mappingData)
-      .as('jsonData');
-
-    // Insert into temp table
-    await trx(tempTableName).insert(openJson);
-
-    const updatedData = await trx('managermarketingdetail')
-      .join(
-        `${tempTableName}`,
-        'managermarketingdetail.id',
-        `${tempTableName}.id`,
-      )
-      .update({
-        nominalawal: trx.raw(`${tempTableName}.nominalawal`),
-        nominalakhir: trx.raw(`${tempTableName}.nominalakhir`),
-        persentase: trx.raw(`${tempTableName}.persentase`),
-        statusaktif: trx.raw(`${tempTableName}.statusaktif`),
-        info: trx.raw(`${tempTableName}.info`),
-        modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-        created_at: trx.raw(`${tempTableName}.created_at`),
-        updated_at: trx.raw(`${tempTableName}.updated_at`),
-      })
-      .returning('*')
-      .then((result: any) => result[0])
-      .catch((error: any) => {
-        console.error('Error inserting data:', error);
-        throw error;
-      });
-
-    // Handle insertion if no update occurs
-    const insertedDataQuery = await trx(tempTableName)
-      .select([
-        'nominalawal',
-        'nominalakhir',
-        'persentase',
-        'statusaktif',
-        'info',
-        'modifiedby',
-        trx.raw('? as managermarketing_id', [id]),
-        'created_at',
-        'updated_at',
-      ])
-      .where(`${tempTableName}.id`, '0');
-
+    // Baris di DB (managermarketing_id = id) yang tak dikirim lagi → log DELETE, hapus.
+    const incomingIds = existingRows.map((r) => r.id);
     const getDeleted = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'managermarketingdetail.id',
-        `${tempTableName}.id`,
-      )
-      .select(
-        'managermarketingdetail.id',
-        'managermarketingdetail.nominalawal',
-        'managermarketingdetail.nominalakhir',
-        'managermarketingdetail.persentase',
-        'managermarketingdetail.statusaktif',
-        'managermarketingdetail.info',
-        'managermarketingdetail.modifiedby',
-        'managermarketingdetail.created_at',
-        'managermarketingdetail.updated_at',
-        'managermarketingdetail.managermarketing_id',
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('managermarketingdetail.managermarketing_id', id);
-
-    let pushToLog: any[] = [];
-
-    if (getDeleted.length > 0) {
-      pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-    }
-
-    const pushToLogWithAction = pushToLog.map((entry) => ({
+      .where('managermarketing_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
+      .select('*');
+    const pushToLogWithAction = getDeleted.map((entry: any) => ({
       ...entry,
       aksi: 'DELETE',
     }));
-
     const finalData = logData.concat(pushToLogWithAction);
 
-    const deletedData = await trx(this.tableName)
-      .leftJoin(
-        `${tempTableName}`,
-        'managermarketingdetail.id',
-        `${tempTableName}.id`,
-      )
-      .whereNull(`${tempTableName}.id`)
-      .where('managermarketingdetail.managermarketing_id', id)
+    await trx(this.tableName)
+      .where('managermarketing_id', id)
+      .modify((qb: any) => {
+        if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+      })
       .del();
-    if (insertedDataQuery.length > 0) {
-      insertedData = await trx('managermarketingdetail')
-        .insert(await withUuidV7(trx, insertedDataQuery))
+
+    // INSERT baris baru dgn uuid v7.
+    let insertedData: any = null;
+    if (newRows.length > 0) {
+      const toInsert = newRows.map((r: any) => ({
+        nominalawal: r.nominalawal,
+        nominalakhir: r.nominalakhir,
+        persentase: r.persentase,
+        statusaktif: r.statusaktif,
+        info: r.info,
+        modifiedby: r.modifiedby,
+        managermarketing_id: id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }));
+      insertedData = await trx(this.tableName)
+        .insert(await withUuidV7(trx, toInsert))
         .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error('Error inserting data:', error);
-          throw error;
-        });
+        .then((result: any) => result[0]);
     }
 
     await this.logTrailService.create(
@@ -230,7 +175,12 @@ export class ManagermarketingdetailService {
         'g.id',
       )
       .where('p.managermarketing_id', id) // Updated field name
-      .orderBy('p.created_at', 'desc'); // Optional: Order by creation date
+      // Urutkan SESUAI URUTAN ENTRY: created_at menaik (dulu 'desc' sehingga
+      // baris terbaru tampil di atas dan urutan terbalik saat edit/view/delete).
+      // `id` sebagai tiebreaker — satu kali simpan menulis created_at yang sama
+      // persis untuk semua baris baru, dan uuid v7 urut waktu pembuatan.
+      .orderBy('p.created_at', 'asc')
+      .orderBy('p.id', 'asc');
 
     if (!result.length) {
       this.logger.warn(`No Data found for ID: ${id}`);

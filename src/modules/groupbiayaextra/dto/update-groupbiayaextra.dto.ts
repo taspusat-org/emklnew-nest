@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 export const UpdateGroupbiayaextraSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     keterangan: z.string().trim().min(1, { message: 'Keterangan is required' }),
     statusaktif: z.string()
       .min(0, { message: 'statusaktif must be a non-negative integer' }),

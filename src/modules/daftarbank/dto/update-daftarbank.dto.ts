@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 export const UpdateDaftarBankSchema = z
   .object({
-    id: z.number().optional(),
+    id: z.string().optional(),
     nama: z
       .string()
       .trim()

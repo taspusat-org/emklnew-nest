@@ -7,14 +7,14 @@ const baseFields = {
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
   jenisorder_id: z
-    .number({
+    .string({
       required_error: 'JENIS ORDER WAJIB DIISI',
     })
     .min(1, { message: 'JENIS ORDER WAJIB DIISI' }),
   jenisorder_nama: z.string().nullable().optional(),
 
   biayaemkl_id: z
-    .number({
+    .string({
       required_error: 'BIAYA EMKL WAJIB DIISI',
     })
     .min(1, { message: 'BIAYA EMKL WAJIB DIISI' }),
@@ -28,11 +28,11 @@ const baseFields = {
 };
 
 const baseDetailsFields = z.object({
-  id: z.number().optional(),
+  id: z.string().optional(),
   nobukti: z.string().nullable().optional(),
-  biayaextra_id: z.number().nullable().optional(),
+  biayaextra_id: z.string().nullable().optional(),
 
-  orderanmuatan_id: z.number().nullable().optional(),
+  orderanmuatan_id: z.string().nullable().optional(),
   orderanmuatan_nobukti: z
     .string({ message: 'ORDERAN MUATAN WAJIB DIISI' })
     .nonempty({ message: 'ORDERAN MUATAN WAJIB DIISI' }),
@@ -56,7 +56,7 @@ const baseDetailsFields = z.object({
   keterangan: z.string().nullable().optional(),
 
   groupbiayaextra_id: z
-    .number({
+    .string({
       required_error: 'BIAYA EMKL WAJIB DIISI',
     })
     .min(1, { message: 'BIAYA EMKL WAJIB DIISI' }),
@@ -76,7 +76,7 @@ export type CreateBiayaExtraHeaderDto = z.infer<
 export const UpdateBiayaExtraHeaderSchema = z.object({
   ...baseFields,
   details: z.array(baseDetailsFields).min(1),
-  id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+  id: z.string({ required_error: 'Id wajib diisi untuk update' }),
   // Field atau aturan khusus update bisa ditambah di sini
 });
 export type UpdateBiayaExtraHeaderDto = z.infer<

@@ -229,7 +229,7 @@ export class MarketinggroupService {
     }
   }
 
-  async update(dataId: number, data: any, trx: any) {
+  async update(dataId: string, data: any, trx: any) {
     try {
       const existingData = await trx(this.tableName)
         .where('id', dataId)
@@ -270,7 +270,7 @@ export class MarketinggroupService {
 
       // Cari index item yang baru saja diupdate
       let itemIndex = filteredData.findIndex(
-        (item) => Number(item.id) === dataId,
+        (item) => String(item.id) === String(dataId),
       );
       if (itemIndex === -1) {
         itemIndex = 0;

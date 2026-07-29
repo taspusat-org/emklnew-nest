@@ -159,7 +159,12 @@ export class MarketingController {
     } catch (error) {
       trx.rollback();
       console.error('Error deleting marketing in controller:', error);
-      throw new Error(
+      // HttpException (mis. BadRequestException "masih dipakai") diteruskan apa
+      // adanya; `throw new Error(...)` membuat semuanya jadi 500 tanpa pesan.
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(
         `Error deleting marketing in controller: ${error.message}`,
       );
     }
