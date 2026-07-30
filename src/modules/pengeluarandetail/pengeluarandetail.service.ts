@@ -1,13 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { CreatePengeluarandetailDto } from './dto/create-pengeluarandetail.dto';
 import { UpdatePengeluarandetailDto } from './dto/update-pengeluarandetail.dto';
-import { withUuidV7, UtilsService, tandatanya  } from 'src/utils/utils.service';
+// `tandatanya` tidak lagi dipakai: kolom `link` sekarang dibangun di dalam
+// view vpengeluarandetail, bukan di query knex.
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 
 @Injectable()
 export class PengeluarandetailService {
   private readonly tableName = 'pengeluarandetail';
+  // Baca lewat view (lihat create-vpengeluarandetail-pg.sql), tulis lewat tabel
+  // base — pola yang sama dengan alatbayar (valatbayar) dan pengeluaranheader
+  // (vpengeluaranheader). View sudah memuat coadebet_text & link sehingga
+  // findAll tidak perlu JOIN + membangun link di tiap request; itu syarat agar
+  // windowed pagination (grid menarik 5 halaman sekaligus) tetap murah.
+  private readonly viewName = 'vpengeluarandetail';
   constructor(
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
@@ -167,21 +175,144 @@ export class PengeluarandetailService {
     return updatedData || insertedData;
   }
 
-  async findAll({ search, filters, sort }: FindAllParams, trx: any) {
+  /**
+   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
+   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
+   * menunjuk ke view (coadebet_text sudah jadi kolom view, bukan hasil JOIN
+   * ad-hoc lagi).
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    // nobukti sengaja diurus terpisah (exact match) oleh pemanggil.
+    const excludeSearchKeys = ['pengeluaran_id', 'coadebet', 'nobukti'];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search) {
+      const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
+
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          if (['created_at', 'updated_at'].includes(field)) {
+            query.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (field === 'tglinvoiceemkl') {
+            // Bertipe date dan di select diformat 'DD-MM-YYYY'; pakai format
+            // yang sama supaya yang dicari = yang tampil di grid.
+            query.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (field === 'nominal' || field === 'dpp') {
+            // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
+            // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
+            query.orWhereRaw('p.??::text like ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    for (const [key, value] of Object.entries(filters || {})) {
+      if (key === 'pengeluaran_nobukti' || excludeSearchKeys.includes(key)) {
+        continue;
+      }
+      if (value === null || value === undefined || value === '') continue;
+
+      const sanitizedValue = String(value).replace(/\[/g, '[[]');
+      switch (key) {
+        case 'tglinvoiceemkl_dari':
+          qb.andWhere('p.tglinvoiceemkl', '>=', sanitizedValue);
+          break;
+        case 'tglinvoiceemkl_sampai':
+          qb.andWhere('p.tglinvoiceemkl', '<=', sanitizedValue);
+          break;
+        case 'tglinvoiceemkl':
+          qb.andWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
+            `%${sanitizedValue}%`,
+          ]);
+          break;
+        case 'created_at':
+        case 'updated_at':
+          qb.andWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+            key,
+            `%${sanitizedValue}%`,
+          ]);
+          break;
+        case 'nominal':
+        case 'dpp':
+          qb.andWhereRaw('p.??::text like ?', [key, `%${sanitizedValue}%`]);
+          break;
+        default:
+          qb.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    }
+  }
+
+  async findAll(
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: any,
+  ) {
+    const { page = 1, limit = 0, customOffset } = pagination ?? {};
+
     if (!filters?.nobukti) {
+      // Bentuk balikan tetap lengkap (bukan cuma `{ data: [] }`) supaya grid
+      // yang membaca pagination.totalItems saat header belum dipilih tidak
+      // menemukan undefined lalu menghitung totalPages = NaN.
       return {
+        status: false,
+        message: 'No data found',
         data: [],
+        type: 'local',
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
       };
     }
-    const url = 'pengeluaran';
 
     try {
-      const query = trx
-        .from(trx.raw(`${this.tableName} as p`))
+      const safeFilters = filters || {};
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+      // COUNT dari view, bukan tabel base. Beda dgn alatbayar (yang bisa count
+      // dari base karena filternya cuma menyentuh kolom base), di sini filter
+      // grid boleh menyentuh coadebet_text — kolom turunan yang hanya ada di
+      // view — sehingga count dari base akan meleset saat filter itu aktif.
+      const countResult = await trx(`${this.viewName} as p`)
+        .count('p.id as total')
+        .where('p.nobukti', safeFilters.nobukti)
+        .modify((qb: any) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      const query = trx(`${this.viewName} as p`)
         .select(
           'p.id',
           'p.pengeluaran_id',
           'p.coadebet',
+          'p.coadebet_text',
           'p.nobukti',
           'p.keterangan',
           'p.nominal',
@@ -194,139 +325,73 @@ export class PengeluarandetailService {
           'p.perioderefund',
           'p.pengeluaranemklheader_nobukti',
           'p.penerimaanemklheader_nobukti',
-          'q.keterangancoa as coadebet_text',
           'p.info',
           'p.modifiedby',
           trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
           trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          // link dihitung inline. Versi lama membangunnya lewat temp table
-          // `##temp_url_x` + STRING_AGG — di Postgres itu rusak tiga kali:
-          // nama ber-`##` bikin "syntax error at or near ##" saat dipakai lewat
-          // trx.raw, `+` bukan operator concat teks ("operator does not exist:
-          // unknown + text"), dan schema.createTable membuat tabel PERMANEN yang
-          // bocor tiap request. Join-nya sendiri (p.id = temp.id, temp di-group
-          // by id yang unik) hanya mencocokkan baris dengan dirinya sendiri,
-          // sambil memindai seluruh tabel padahal cuma satu nobukti yang dipakai.
-          trx.raw(`
-            '<a target="_blank" className="link-color" href="/dashboard/${url}' || ${tandatanya} || 'nobukti=' || p.nobukti || '">' ||
-            '<HighlightWrapper value="' || p.nobukti || '" />' ||
-            '</a>' as link
-          `),
+          'p.link',
         )
-        .leftJoin(
-          trx.raw('akunpusat as q'),
-          'p.coadebet',
-          'q.coa',
-        )
-        .orderBy('p.created_at', 'desc');
-      if (filters?.nobukti) {
-        query.where('p.nobukti', filters?.nobukti);
+        .where('p.nobukti', safeFilters.nobukti);
+
+      query.modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda (atau melewatkan baris) saat
+      // grid menggeser window.
+      //
+      // Dulu primary order-nya `created_at desc` dan sort dari grid cuma jadi
+      // secondary — artinya klik header kolom praktis tidak berpengaruh. Lebih
+      // buruk: seluruh detail satu bukti di-insert dalam satu batch sehingga
+      // created_at-nya identik, jadi urutan akhirnya ditentukan urutan heap
+      // Postgres yang berubah setiap kali ada UPDATE.
+      //
+      // Sekarang: sortBy dari grid jadi primary, lalu created_at (urutan input
+      // antar batch), lalu id (PK, unik) sebagai tiebreaker terakhir supaya
+      // urutan dijamin total dan stabil antar request.
+      query.orderBy(`p.${sortBy}`, sortDirection);
+      if (sortBy !== 'created_at') {
+        query.orderBy('p.created_at', 'asc');
       }
-      const excludeSearchKeys = ['pengeluaran_id', 'coadebet'];
-
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-
-      if (search) {
-        const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-                field,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (field === 'tglinvoiceemkl') {
-              // Bertipe date dan di select diformat 'DD-MM-YYYY'; pakai format
-              // yang sama supaya yang dicari = yang tampil di grid.
-              qb.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (field === 'coadebet_text') {
-              qb.orWhere('q.keterangancoa', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'nominal' || field === 'dpp') {
-              // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
-              // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
-              qb.orWhereRaw('p.??::text like ?', [field, `%${sanitizedValue}%`]);
-            } else {
-              qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          });
-        });
+      if (sortBy !== 'id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (key === 'pengeluaran_nobukti') {
-            continue;
-          }
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            switch (key) {
-              case 'nobukti':
-                // Sudah difilter exact di atas; `like` di sini cuma duplikat dan
-                // justru bisa membuang baris karena sanitasi `[` -> `[[]`.
-                break;
-              case 'coadebet_text':
-                query.andWhere(
-                  'q.keterangancoa',
-                  'ilike',
-                  `%${sanitizedValue}%`,
-                );
-                break;
-              case 'tglinvoiceemkl_dari':
-                query.andWhere('p.tglinvoiceemkl', '>=', sanitizedValue);
-                break;
-              case 'tglinvoiceemkl_sampai':
-                query.andWhere('p.tglinvoiceemkl', '<=', sanitizedValue);
-                break;
-              case 'tglinvoiceemkl':
-                query.andWhereRaw(
-                  "TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?",
-                  [`%${sanitizedValue}%`],
-                );
-                break;
-              case 'created_at':
-              case 'updated_at':
-                query.andWhereRaw(
-                  "TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
-                  [key, `%${sanitizedValue}%`],
-                );
-                break;
-              case 'nominal':
-              case 'dpp':
-                query.andWhereRaw('p.??::text like ?', [
-                  key,
-                  `%${sanitizedValue}%`,
-                ]);
-                break;
-              default:
-                query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (Number(page) - 1) * Number(limit);
+
+      // limit 0/undefined = ambil semua. Dipakai pemanggil non-grid yang butuh
+      // seluruh detail satu bukti sekaligus (FormPengeluaran, total nominal di
+      // laporan, exportToExcel di PengeluaranheaderService).
+      if (Number(limit) > 0) {
+        query.offset(offset).limit(Number(limit));
       }
 
-      const result = await query;
+      const data = await query;
 
-      if (!result.length) {
+      const totalPages = Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
+
+      if (!data.length) {
         this.logger.warn(`No Data found`);
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-        };
       }
 
       return {
-        status: true,
-        message: 'Pengeluaran Detail data fetched successfully',
-        data: result,
+        status: data.length > 0,
+        message:
+          data.length > 0
+            ? 'Pengeluaran Detail data fetched successfully'
+            : 'No data found',
+        data,
+        type: responseType,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error('Error in findAll Pengeluaran Detail', error);
