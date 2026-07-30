@@ -160,11 +160,11 @@ export class MenuService {
         query.where((builder) => {
           builder
 
-            .orWhere('u.title', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.parentId', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.icon', 'like', `%${sanitizedValue}%`)
-            .orWhere('p.memo', 'like', `%${sanitizedValue}%`)
-            .orWhere('p.text', 'like', `%${sanitizedValue}%`);
+            .orWhere('u.title', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('u.parentId', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('u.icon', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('p.memo', 'ilike', `%${sanitizedValue}%`)
+            .orWhere('p.text', 'ilike', `%${sanitizedValue}%`);
         });
       }
 
@@ -173,14 +173,14 @@ export class MenuService {
           const sanitizedValue = String(value).replace(/\[/g, '[[]');
           if (value) {
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
+              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
                 key,
                 `%${sanitizedValue}%`,
               ]);
             } else if (key === 'text' || key === 'memo') {
               query.andWhere(`p.${key}`, '=', sanitizedValue);
             } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }
@@ -576,7 +576,8 @@ export class MenuService {
         .orderBy('order');
 
       if (search) {
-        query = query.andWhere('title', 'like', `%${search}%`);
+        const sanitizedValue = String(search).replace(/\[/g, '[[]');
+        query = query.andWhere('title', 'ilike', `%${sanitizedValue}%`);
       }
 
       const menus = await query;
