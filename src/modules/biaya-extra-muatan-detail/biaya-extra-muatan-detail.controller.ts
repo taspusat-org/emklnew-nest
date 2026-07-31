@@ -60,16 +60,17 @@ export class BiayaExtraMuatanDetailController {
         trx,
         params,
       );
-      if (result.data.length === 0) {
-        await trx.commit();
+      await trx.commit();
 
+      if (result.data.length === 0) {
         return {
           status: false,
           message: 'No data found',
           data: [],
+          total: result.total,
+          pagination: result.pagination,
         };
       }
-      await trx.commit();
 
       return result;
     } catch (error) {

@@ -52,6 +52,7 @@ export class BiayaExtraHeaderController {
     data: any,
     @Req() req,
   ) {
+    console.log('data', data);
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';

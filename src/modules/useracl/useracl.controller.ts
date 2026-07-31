@@ -42,7 +42,7 @@ export class UseraclController {
   @Put(':id')
   async update(
     @Param('id') id: string, // Role ID
-    @Body() body: { data: number[] }, // Expecting { data: [1, 2, 3, 4] }
+    @Body() body: { data: string[] }, // Expecting { data: ["uuid1", "uuid2"] } — aco ids are uuid v7 strings
     @Req() req: any, // Request object to get user info (from JWT, session, etc.)
   ) {
     const modifiedBy = req.user?.user?.username || 'unknown'; // Get the username from request or set default

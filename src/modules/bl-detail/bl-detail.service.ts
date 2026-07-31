@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { CreateBlDetailDto } from './dto/create-bl-detail.dto';
 import { UpdateBlDetailDto } from './dto/update-bl-detail.dto';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { BlDetailRincianService } from '../bl-detail-rincian/bl-detail-rincian.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -292,7 +292,7 @@ export class BlDetailService {
           'si.shippinginstructiondetail_nobukti',
         )
         .leftJoin('parameter', 'si.statuspisahbl', 'parameter.id')
-        .leftJoin('emkl', 'si.emkllain_id', 'emkl.id')
+        .leftJoin('emkl', 'si.emkl_id', 'emkl.id')
         .leftJoin('pelayaran as pel', 'si.containerpelayaran_id', 'pel.id')
         .where('bl_id', id);
 

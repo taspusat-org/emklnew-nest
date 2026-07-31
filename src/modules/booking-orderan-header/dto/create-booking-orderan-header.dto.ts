@@ -11,9 +11,7 @@ const baseFields = {
     .string({ message: 'TGL BUKTI WAJIB DIISI' })
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
-  jenisorder_id: z
-    .string()
-    .min(1, { message: 'JENIS ORDER WAJIB DIISI' }),
+  jenisorder_id: z.string().min(1, { message: 'JENIS ORDER WAJIB DIISI' }),
   jenisorder_nama: z.string().nullable().optional(),
 
   container_id: z
@@ -81,7 +79,7 @@ const baseFields = {
 
   nominalstuffing: z.string().nullable().optional(),
 
-  emkllain_id: z.number().nullable().optional(),
+  emkl_id: z.number().nullable().optional(),
   emkllain_nama: z.string().nullable().optional(),
 
   asalmuatan: z.string().nullable().optional(),

@@ -7,7 +7,11 @@ import { RedisService } from 'src/common/redis/redis.service';
 import { BlDetailService } from '../bl-detail/bl-detail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+} from 'src/utils/utils.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { BlDetailRincianService } from '../bl-detail-rincian/bl-detail-rincian.service';
 import {
@@ -224,8 +228,12 @@ export class BlHeaderService {
           trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
           'u.shippinginstruction_nobukti',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'p.voyberangkat',
           'p.pelayaran_id',
           'pel.nama as pelayaran_nama',
@@ -296,19 +304,20 @@ export class BlHeaderService {
 
           if (value) {
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'tglbukti') {
               query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
                 key,
                 `%${sanitizedValue}%`,
               ]);
             } else if (key === 'tglberangkat') {
-              query.andWhereRaw("TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?", [
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?",
+                [`%${sanitizedValue}%`],
+              );
             } else if (key === 'voyberangkat') {
               query.andWhere(`p.voyberangkat`, 'like', `%${sanitizedValue}%`);
             } else if (key === 'pelayaran_text') {
@@ -659,7 +668,7 @@ export class BlHeaderService {
           'u.id',
           'p.shippinginstruction_id',
         )
-        .leftJoin('emkl', 'p.emkllain_id', 'emkl.id')
+        .leftJoin('emkl', 'p.emkl_id', 'emkl.id')
         .leftJoin('pelayaran as pel', 'p.containerpelayaran_id', 'pel.id')
         .where('u.schedule_id', schedule_id);
 

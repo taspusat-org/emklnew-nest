@@ -15,7 +15,7 @@ import {
   formatDateToSQL,
   tandatanya,
   UtilsService,
- } from 'src/utils/utils.service';
+} from 'src/utils/utils.service';
 import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -257,14 +257,21 @@ export class BookingOrderanMuatanService {
           'u.noseal',
           'u.lokasistuffing',
           'u.nominalstuffing',
-          'u.emkllain_id',
+          // Kolom fisiknya bernama emkl_id (lihat migration
+          // bookingorderanmuatan), tapi FE/DTO memakai nama emkl_id ->
+          // alias, jangan diubah nama outputnya.
+          'u.emkl_id',
           'u.asalmuatan',
           'u.daftarbl_id',
           'u.comodity',
           'u.gandengan',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
 
           'header.id as header_id',
           'header.nobukti as header_nobukti',
@@ -328,7 +335,11 @@ export class BookingOrderanMuatanService {
           'header.orderan_nobukti',
           'tempUrl.orderan_nobukti',
         )
-        .leftJoin('jenisorder as jenisorderan', 'header.jenisorder_id', 'jenisorderan.id')
+        .leftJoin(
+          'jenisorder as jenisorderan',
+          'header.jenisorder_id',
+          'jenisorderan.id',
+        )
         .leftJoin('container', 'u.container_id', 'container.id')
         .leftJoin('shipper', 'u.shipper_id', 'shipper.id')
         .leftJoin('tujuankapal', 'u.tujuankapal_id', 'tujuankapal.id')
@@ -338,8 +349,17 @@ export class BookingOrderanMuatanService {
 
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        .leftJoin('hargatrucking', 'u.lokasistuffing', 'hargatrucking.id')
-        .leftJoin('emkl', 'u.emkllain_id', 'emkl.id')
+        // u.lokasistuffing bertipe bigint, hargatrucking.id bertipe varchar —
+        // cast eksplisit ke text supaya join tidak error "operator does not
+        // exist: bigint = text". Ini bug lama yang selama ini tersamar
+        // karena query ini selalu gagal duluan di step PIVOT (MSSQL) sebelum
+        // pernah sampai mengeksekusi join ini.
+        .leftJoin(
+          'hargatrucking',
+          trx.raw('u.lokasistuffing::text'),
+          'hargatrucking.id',
+        )
+        .leftJoin('emkl', 'u.emkl_id', 'emkl.id')
         .leftJoin('daftarbl', 'u.daftarbl_id', 'daftarbl.id')
         .leftJoin(
           `${dataTempStatusPendukung} as pivot`,
@@ -372,12 +392,14 @@ export class BookingOrderanMuatanService {
             .orWhere('u.comodity', 'like', `%${sanitizedValue}%`)
             .orWhere('u.gandengan', 'like', `%${sanitizedValue}%`)
             .orWhere('u.modifiedby', 'like', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhereRaw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
+            .orWhereRaw(
+              "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+              [`%${sanitizedValue}%`],
+            )
+            .orWhereRaw(
+              "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+              [`%${sanitizedValue}%`],
+            )
             .orWhereRaw("TO_CHAR(header.tglbukti, 'DD-MM-YYYY') LIKE ?", [
               `%${sanitizedValue}%`,
             ])
@@ -415,10 +437,10 @@ export class BookingOrderanMuatanService {
 
           if (value) {
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'tglbukti') {
               query.andWhereRaw("TO_CHAR(header.??, 'DD-MM-YYYY') LIKE ?", [
                 key,
@@ -1040,14 +1062,21 @@ export class BookingOrderanMuatanService {
           'u.noseal',
           'u.lokasistuffing',
           'u.nominalstuffing',
-          'u.emkllain_id',
+          // Kolom fisiknya bernama emkl_id (lihat migration
+          // bookingorderanmuatan), tapi FE/DTO memakai nama emkl_id ->
+          // alias, jangan diubah nama outputnya.
+          'u.emkl_id as emkl_id',
           'u.asalmuatan',
           'u.daftarbl_id',
           'u.comodity',
           'u.gandengan',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
 
           'header.id as header_id',
           'header.nobukti as header_nobukti',
@@ -1073,7 +1102,11 @@ export class BookingOrderanMuatanService {
           'u.nobukti',
           'header.nobukti',
         )
-        .leftJoin('jenisorder as jenisorderan', 'header.jenisorder_id', 'jenisorderan.id')
+        .leftJoin(
+          'jenisorder as jenisorderan',
+          'header.jenisorder_id',
+          'jenisorderan.id',
+        )
         .leftJoin('container', 'u.container_id', 'container.id')
         .leftJoin('shipper', 'u.shipper_id', 'shipper.id')
         .leftJoin('tujuankapal', 'u.tujuankapal_id', 'tujuankapal.id')
@@ -1082,8 +1115,17 @@ export class BookingOrderanMuatanService {
         .leftJoin('pelayaran', 'u.pelayarancontainer_id', 'pelayaran.id')
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        .leftJoin('hargatrucking', 'u.lokasistuffing', 'hargatrucking.id')
-        .leftJoin('emkl', 'u.emkllain_id', 'emkl.id')
+        // u.lokasistuffing bertipe bigint, hargatrucking.id bertipe varchar —
+        // cast eksplisit ke text supaya join tidak error "operator does not
+        // exist: bigint = text". Ini bug lama yang selama ini tersamar
+        // karena query ini selalu gagal duluan di step PIVOT (MSSQL) sebelum
+        // pernah sampai mengeksekusi join ini.
+        .leftJoin(
+          'hargatrucking',
+          trx.raw('u.lokasistuffing::text'),
+          'hargatrucking.id',
+        )
+        .leftJoin('emkl', 'u.emkl_id', 'emkl.id')
         .leftJoin('daftarbl', 'u.daftarbl_id', 'daftarbl.id')
         .where('u.id', id);
 

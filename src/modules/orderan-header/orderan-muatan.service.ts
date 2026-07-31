@@ -6,7 +6,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { UpdateOrderanHeaderDto } from './dto/update-orderan-header.dto';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+} from 'src/utils/utils.service';
 import { LocksService } from '../locks/locks.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -47,7 +51,10 @@ export class OrderanMuatanService {
           'noseal',
           'lokasistuffing',
           'nominalstuffing',
-          'emkllain_id',
+          // bookingorderanmuatan.emkl_id -> orderanmuatan.emkl_id (hasil
+          // select ini di-spread langsung ke insert), jadi TIDAK boleh
+          // di-alias ke emkl_id di sini.
+          'emkl_id',
           'asalmuatan',
           'daftarbl_id',
           'comodity',
@@ -222,14 +229,21 @@ export class OrderanMuatanService {
           'u.noseal',
           'u.lokasistuffing',
           'u.nominalstuffing',
-          'u.emkllain_id',
+          // Kolom fisiknya bernama emkl_id (lihat migration orderanmuatan),
+          // tapi FE/DTO memakai nama emkl_id -> alias, jangan diubah
+          // nama outputnya.
+          'u.emkl_id as emkl_id',
           'u.asalmuatan',
           'u.daftarbl_id',
           'u.comodity',
           'u.gandengan',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
 
           'header.id as header_id',
           'header.nobukti as header_nobukti',
@@ -282,7 +296,11 @@ export class OrderanMuatanService {
           'pivot.approval_memo as approval_memo',
         ])
         .leftJoin('orderanheader as header', 'u.nobukti', 'header.nobukti')
-        .leftJoin('jenisorder as jenisorderan', 'header.jenisorder_id', 'jenisorderan.id')
+        .leftJoin(
+          'jenisorder as jenisorderan',
+          'header.jenisorder_id',
+          'jenisorderan.id',
+        )
         .leftJoin('container', 'u.container_id', 'container.id')
         .leftJoin('shipper', 'u.shipper_id', 'shipper.id')
         .leftJoin('tujuankapal', 'u.tujuankapal_id', 'tujuankapal.id')
@@ -292,8 +310,17 @@ export class OrderanMuatanService {
 
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        .leftJoin('hargatrucking', 'u.lokasistuffing', 'hargatrucking.id')
-        .leftJoin('emkl', 'u.emkllain_id', 'emkl.id')
+        // u.lokasistuffing bertipe bigint, hargatrucking.id bertipe varchar —
+        // cast eksplisit ke text supaya join tidak error "operator does not
+        // exist: bigint = text". Ini bug lama yang selama ini tersamar
+        // karena query ini selalu gagal duluan di step PIVOT (MSSQL) sebelum
+        // pernah sampai mengeksekusi join ini.
+        .leftJoin(
+          'hargatrucking',
+          trx.raw('u.lokasistuffing::text'),
+          'hargatrucking.id',
+        )
+        .leftJoin('emkl', 'u.emkl_id', 'emkl.id')
         .leftJoin('daftarbl', 'u.daftarbl_id', 'daftarbl.id')
         .leftJoin(
           `${dataTempStatusPendukung} as pivot`,
@@ -360,10 +387,10 @@ export class OrderanMuatanService {
             console.log('MASUK SINI4');
 
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'tglbukti') {
               query.andWhereRaw("TO_CHAR(header.??, 'DD-MM-YYYY') LIKE ?", [
                 key,
@@ -1026,7 +1053,7 @@ export class OrderanMuatanService {
         .from(trx.raw(`${this.tableName} as u`))
         .select([
           'u.daftarbl_id',
-          trx.raw('MAX(u.emkllain_id) AS emkllain_id'),
+          trx.raw('MAX(u.emkl_id) AS emkl_id'),
           trx.raw('MAX(u.pelayarancontainer_id) AS pelayarancontainer_id'),
           trx.raw('MAX(u.tujuankapal_id) AS tujuankapal_id'),
           trx.raw('MAX(u.id) AS orderan_id'),
