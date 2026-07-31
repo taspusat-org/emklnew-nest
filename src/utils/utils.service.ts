@@ -386,204 +386,104 @@ export class UtilsService {
     }
   }
 
+  // Versi PostgreSQL: dulu ditulis untuk MSSQL (PIVOT + tabel ##temp_*
+  // "global temp table"). Di Postgres itu tidak jalan sama sekali — PIVOT/[col]
+  // bukan sintaks valid, dan '##temp_*' bukan konvensi apa pun di Postgres
+  // (knex akan membuat TABEL PERMANEN literal bernama itu, yang lalu tidak
+  // pernah di-DROP di mana pun -> menumpuk setiap kali fungsi ini dipanggil,
+  // sebelum akhirnya tetap gagal di step PIVOT-nya).
+  //
+  // Kategori (mis. 'tradoluar', 'pisahbl', ...) diambil dari `fieldTempHasil`
+  // yang caller sendiri deklarasikan (bukan hasil discovery dinamis dari data
+  // seperti versi lama) — supaya baris tetap dihasilkan (kolom kategori NULL)
+  // walau sebuah transaksi belum punya satupun baris statuspendukung. Versi
+  // lama melempar "No columns generated for PIVOT" pada kasus itu dan
+  // mematahkan seluruh query header yang men-join hasil fungsi ini.
+  //
+  // "Rows -> columns" dikerjakan lewat conditional aggregation
+  // (`FILTER (WHERE ...)`), bukan crosstab() dari extension tablefunc:
+  // FILTER mencocokkan tiap kolom secara eksplisit by kategori, jadi tidak
+  // berisiko kolom "tergeser" seperti crosstab() bila suatu kategori
+  // kebetulan tidak punya baris untuk transaksi tertentu (crosstab
+  // mencocokkan positional terhadap urutan kategori).
+  //
+  // Hasilnya DIMATERIALISASI ke satu TEMP TABLE Postgres asli (bukan tabel
+  // ##temp_* permanen ala versi lama, dan bukan pula string subquery mentah —
+  // knex meng-quote string pertama .leftJoin() sebagai SATU identifier, jadi
+  // titik-titik di dalam SQL subquery mentah pecah jadi "improper qualified
+  // name"). ON COMMIT DROP: otomatis lenyap saat transaksi commit/rollback,
+  // tidak perlu DROP manual dan tidak menumpuk. Nama tabel dikembalikan apa
+  // adanya (identifier biasa) sehingga kedua caller (orderan-muatan &
+  // bookingorderanmuatan.service.ts) tetap memakainya persis seperti sebelum
+  // — `` `${dataTempStatusPendukung} as pivot` `` di .leftJoin() — tanpa
+  // perubahan apa pun di sana.
   async tempPivotStatusPendukung(
     trx: any,
     tablename: string,
     fieldTempHasil: any,
   ) {
     try {
-      const tempStatusPendukung = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-      const tempData = `##temp_data${Math.random().toString(36).substring(2, 15)}`;
-      const tempHasil = `##temp_hasil${Math.random().toString(36).substring(2, 15)}`;
-
-      // Create tempStatusPendukung table
-      await trx.schema.createTable(tempStatusPendukung, (t) => {
-        t.bigInteger('id').nullable();
-        t.bigInteger('statusdatapendukung').nullable();
-        t.bigInteger('transaksi_id').nullable();
-        t.string('statuspendukung').nullable();
-        t.text('keterangan').nullable();
-        t.string('modifiedby').nullable();
-        t.string('updated_at').nullable();
-        t.string('created_at').nullable();
-      });
-
-      // Create tempData table
-      await trx.schema.createTable(tempData, (t) => {
-        t.bigInteger('id').nullable();
-        t.string('nobukti').nullable();
-        t.text('keterangan').nullable();
-        t.string('judul').nullable();
-      });
-
-      // Create tempHasil table
-      await trx.schema.createTable(tempHasil, (t) => {
-        t.bigInteger('id').nullable();
-        t.string('nobukti').nullable();
-        fieldTempHasil.forEach((col) => {
-          t.text(col).nullable();
-        });
-      });
-
-      // Insert into tempStatusPendukung
-      await trx(tempStatusPendukung).insert(
-        trx
-          .select(
-            'a.id',
-            'a.statusdatapendukung',
-            'a.transaksi_id',
-            'a.statuspendukung',
-            'a.keterangan',
-            'a.modifiedby',
-            'a.updated_at',
-            'a.created_at',
-          )
-          .from('statuspendukung as a')
-          .innerJoin('parameter as b', 'a.statusdatapendukung', 'b.id')
-          .where('b.subgrp', tablename),
+      const categories: string[] = (fieldTempHasil as string[]).filter(
+        (f) => !f.endsWith('_nama') && !f.endsWith('_memo'),
       );
 
-      const hasNobukti = await trx.schema.hasColumn(tablename, 'nobukti');
-      await trx(tempData).insert(
-        trx
-          .select(
-            'a.id',
-            // 'a.nobukti',
-            trx.raw(
-              hasNobukti
-                ? "COALESCE(a.nobukti, '') as nobukti"
-                : "'' as nobukti",
-            ),
-            trx.raw(
-              `CONCAT(
-                '{"statusdatapendukung":"',
-                CASE 
-                  WHEN (CAST(c.memo AS text) IS JSON) 
-                    THEN JSON_VALUE(CAST(c.memo AS text), '$.MEMO') 
-                  ELSE '' 
-                END,
-                '","transaksi_id":',
-                TRIM((COALESCE(b.transaksi_id, 0))::text),
-                ',"statuspendukung":"',
-                CASE 
-                  WHEN (CAST(d.memo AS text) IS JSON) 
-                    THEN JSON_VALUE(CAST(d.memo AS text), '$.MEMO') 
-                  ELSE '' 
-                END,
-                '","keterangan":"',
-                TRIM(COALESCE(b.keterangan, '')),
-                '","updated_at":"',
-                TO_CHAR(CAST(b.updated_at AS timestamp), 'YYYY-MM-DD HH24:MI:SS'),
-                '","statuspendukung_id":"',
-                TRIM((COALESCE(d.id, 0))::text),
-                '","statuspendukung_memo":',
-               TRIM(CAST(d.memo AS text)),
-                '}'
-              ) AS keterangan`,
-            ),
-            trx.raw(
-              // `CASE
-              //   WHEN (CAST(c.memo AS text) IS JSON)
-              //     THEN JSON_VALUE(CAST(c.memo AS text), '$.MEMO')
-              //   ELSE ''
-              // END AS judul`,
-              `CASE 
-                WHEN (CAST(c.memo AS text) IS JSON) 
-                  THEN 
-                    CASE 
-                      WHEN JSON_VALUE(CAST(c.memo AS text), '$.MEMO') = 'TOP' 
-                        THEN CONCAT(JSON_VALUE(CAST(c.memo AS text), '$.MEMO'), '_FIELD')
-                      WHEN JSON_VALUE(CAST(c.memo AS text), '$.MEMO') = 'OPEN' 
-                        THEN CONCAT(JSON_VALUE(CAST(c.memo AS text), '$.MEMO'), '_FIELD')
-                      ELSE JSON_VALUE(CAST(c.memo AS text), '$.MEMO') 
-                    END 
-                ELSE '' 
-              END AS judul`,
-            ),
-          )
-          .from(`${tablename} as a`)
-          .innerJoin(`${tempStatusPendukung} as b`, 'a.id', 'b.transaksi_id')
-          .innerJoin('parameter as c', 'b.statusdatapendukung', 'c.id')
-          .innerJoin('parameter as d', 'b.statuspendukung', 'd.id'),
-      );
-
-      const getTempData = await trx(tempData).select('*');
-      const uniqueJudul = [...new Set(getTempData.map((d: any) => d.judul))];
-
-      // Generate dynamic columns for PIVOT
-      const columnsResult = await trx
-        .select('judul')
-        .from(tempData)
-        .groupBy('judul');
-
-      let columns = '';
-      columnsResult.forEach((row, index) => {
-        if (index === 0) {
-          if (row.judul === 'TOP' || row.judul === 'OPEN') {
-            columns = `[${row.judul}_FIELD]`;
-          } else {
-            columns = `[${row.judul}]`;
-          }
-        } else {
-          if (row.judul === 'TOP' || row.judul === 'OPEN') {
-            columns += `, [${row.judul}_FIELD]`;
-          } else {
-            columns += `, [${row.judul}]`;
-          }
-        }
-      });
-
-      if (!columns) {
-        throw new Error('No columns generated for PIVOT');
+      if (categories.length === 0) {
+        throw new Error(
+          `tempPivotStatusPendukung: fieldTempHasil untuk '${tablename}' tidak berisi kategori valid`,
+        );
       }
-      const pivotSubqueryRaw = `
-        (
-          SELECT id, nobukti, ${columns}
-          FROM (
-            SELECT id, nobukti, judul, keterangan 
-            FROM ${tempData}
-          ) AS SourceTable
-          PIVOT (
-            MAX(keterangan)
-            FOR judul IN (${columns})
-          ) AS PivotTable
-        ) AS A
-      `;
 
-      const jsonColumns = uniqueJudul.flatMap((judul: any) => {
-        const alias =
-          judul === 'TOP' || judul === 'OPEN'
-            ? `${judul.toLowerCase().replace(/\s+/g, '')}_FIELD`
-            : judul.toLowerCase().replace(/\s+/g, '');
-        const fixJudul =
-          judul === 'TOP' || judul === 'OPEN' ? `${judul}_FIELD` : judul;
+      // Pola yang sama dengan statuspendukung.service.ts: parse memo sebagai
+      // JSON hanya bila memang JSON valid.
+      const memoJson = (col: string) =>
+        `(CASE WHEN ${col} IS JSON THEN ${col}::jsonb END)`;
 
-        return [
-          trx.raw(
-            `JSON_VALUE(A.[${fixJudul}], '$.statuspendukung_id') as ${alias}`,
-          ),
-          trx.raw(
-            `JSON_VALUE(A.[${fixJudul}], '$.statuspendukung') as ${alias}_nama`,
-          ),
-          trx.raw(
-            `JSON_QUERY(A.[${fixJudul}], '$.statuspendukung_memo') as ${alias}_memo`,
-          ),
-          // trx.raw(`JSON_VALUE(A.[${judul}], '$.statuspendukung') as ${alias}_nama`),
-          // trx.raw(`JSON_QUERY(A.[${judul}], '$.statuspendukung_memo') as ${alias}_memo`)
-        ];
-      });
+      // "judul" = label kategori yang dikonfigurasi lewat
+      // parameter.memo->>'MEMO' pada baris statusdatapendukung. TOP/OPEN
+      // historis diberi suffix _field (lihat versi MSSQL lama) — belum
+      // dipakai oleh kedua caller saat ini, tapi dipertahankan untuk
+      // caller lain yang mungkin memakai kategori tsb.
+      const judulKeyExpr = `LOWER(REPLACE(
+        CASE
+          WHEN (${memoJson('c.memo')}->>'MEMO') IN ('TOP', 'OPEN')
+            THEN (${memoJson('c.memo')}->>'MEMO') || '_FIELD'
+          ELSE COALESCE(${memoJson('c.memo')}->>'MEMO', '')
+        END,
+        ' ', ''
+      ))`;
 
-      await trx(tempHasil).insert(
-        trx
-          .select(['A.id', 'A.nobukti', ...jsonColumns])
-          .from(trx.raw(pivotSubqueryRaw)),
-      );
-      // console.log('hasil', await trx(tempHasil).select('*'));
+      const categoryColumns = categories
+        .map((category) => {
+          const cat = String(category).toLowerCase().replace(/\s+/g, '');
+          return `
+            MAX(d.id::text) FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category},
+            MAX(${memoJson('d.memo')}->>'MEMO') FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category}_nama,
+            MAX(d.memo::text) FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category}_memo`;
+        })
+        .join(',\n');
+
+      const tempHasil = `temp_pivot_statuspendukung_${Math.random().toString(36).substring(2, 15)}`;
+
+      await trx.raw(`
+        CREATE TEMP TABLE "${tempHasil}"
+        ON COMMIT DROP
+        AS
+        SELECT
+          a.id,
+          a.nobukti,
+          ${categoryColumns}
+        FROM ${tablename} a
+        INNER JOIN statuspendukung b ON a.id = b.transaksi_id
+        INNER JOIN parameter c ON b.statusdatapendukung = c.id
+        INNER JOIN parameter d ON b.statuspendukung = d.id
+        WHERE c.subgrp = '${tablename}'
+        GROUP BY a.id, a.nobukti
+      `);
 
       return tempHasil;
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
+      console.error('Error building status pendukung pivot table:', error);
+      throw new Error('Failed to build status pendukung pivot table');
     }
   }
 

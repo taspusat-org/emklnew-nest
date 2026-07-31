@@ -51,7 +51,7 @@ export class UseraclService {
     return `This action returns a #${id} useracl`;
   }
 
-  async update(id: string, acoIds: number[], modifiedBy: string, trx: any) {
+  async update(id: string, acoIds: string[], modifiedBy: string, trx: any) {
     try {
       console.log('acoIds', acoIds);
       if (acoIds.length === 0) {

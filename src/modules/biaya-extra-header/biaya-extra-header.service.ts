@@ -6,7 +6,13 @@ import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+  calculateItemIndex,
+  getFetchedPages,
+} from 'src/utils/utils.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import {
   Inject,
@@ -148,38 +154,66 @@ export class BiayaExtraHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          // filters: data.filters,
-          filters: {
-            ...data.filters,
-            jenisOrderan: data.jenisorder_id,
+      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
+      // Header + detail SUDAH ter-insert di atas. Blok ini hanya menghitung
+      // posisi/halaman baris baru untuk grid (sama seperti pengeluaranheader).
+      // Kegagalannya TIDAK boleh me-rollback simpan yang sudah berhasil.
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      let pagedData: Record<number, any> = {};
+      let itemIndex: any = { zeroBasedIndex: 0 };
+      try {
+        const { data: filteredItems } = await this.findAll(
+          {
+            search: data.search,
+            filters: {
+              ...data.filters,
+              jenisOrderan: data.jenisorder_id,
+            },
+            pagination: { page: data.page, limit: 0 },
+            sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
+            isLookUp: false,
           },
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
-        trx,
-      );
+          trx,
+        );
 
-      let dataIndex = filteredItems.findIndex((item) => item.id === newItem.id);
+        let dataIndex = filteredItems.findIndex(
+          (item) => item.id === newItem.id,
+        );
+        if (dataIndex === -1) {
+          dataIndex = 0;
+        }
 
-      if (dataIndex === -1) {
-        dataIndex = 0;
+        const limit = data.limit || 50;
+        const posisi = dataIndex + 1; // posisi 1-based
+        const totalPages = Math.ceil(filteredItems.length / limit) || 1;
+        pageNumber = Math.ceil(posisi / limit);
+        fetchedPages = getFetchedPages(pageNumber, totalPages);
+        itemIndex = calculateItemIndex(posisi, fetchedPages, limit);
+
+        fetchedPages.forEach((p) => {
+          const start = (p - 1) * limit;
+          pagedData[p] = filteredItems.slice(start, start + limit);
+        });
+        const allFetchedData = fetchedPages.flatMap((p) => pagedData[p]);
+
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      } catch (posErr: any) {
+        console.warn(
+          'biayaextraheader: komputasi posisi pasca-simpan gagal (non-fatal):',
+          posErr?.message,
+        );
       }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
 
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
       console.error(
@@ -613,6 +647,13 @@ export class BiayaExtraHeaderService {
         updatedData = updated[0];
       }
 
+      // `updatedData` HANYA terisi bila header benar-benar berubah. Saat user
+      // cuma mengubah baris DETAIL (header identik -> hasChanges false), semua
+      // akses updatedData.* di bawah melempar TypeError dan seluruh transaksi
+      // di-rollback jadi 500, padahal detailnya sah untuk disimpan. Pakai baris
+      // yang sudah ada di DB sebagai sumber data header untuk kasus itu.
+      const headerRow = updatedData ?? existingData;
+
       switch (String(data.jenisorder_id)) {
         case getOrderanMuatanId?.id:
           detailServiceCreate = this.biayaExtraMuatanDetailService;
@@ -631,8 +672,8 @@ export class BiayaExtraHeaderService {
       if (data.details && data.details.length > 0) {
         const detailsWithNobukti = data.details.map((detail: any) => ({
           id: detail.id || 0,
-          nobukti: updatedData.nobukti || data.nobukti,
-          biayaextra_id: updatedData.id || data.id,
+          nobukti: headerRow?.nobukti || data.nobukti,
+          biayaextra_id: headerRow?.id || data.id || id,
           orderanmuatan_nobukti: detail.orderanmuatan_nobukti,
           estimasi: detail.estimasi,
           // nominal: detail.nominal,
@@ -640,7 +681,7 @@ export class BiayaExtraHeaderService {
           nominaltagih: detail.nominaltagih,
           keterangan: detail.keterangan || '',
           groupbiayaextra_id: detail.groupbiayaextra_id,
-          modifiedby: updatedData.modifiedby,
+          modifiedby: headerRow?.modifiedby ?? data.modifiedby,
         }));
         await detailServiceCreate.create(detailsWithNobukti, id, trx);
       }
@@ -649,44 +690,78 @@ export class BiayaExtraHeaderService {
         {
           namatabel: this.tableName,
           postingdari: `EDIT BIAYA EXTRA HEADER`,
-          idtrans: updatedData.id,
-          nobuktitrans: updatedData.id,
+          idtrans: headerRow?.id ?? id,
+          nobuktitrans: headerRow?.id ?? id,
           aksi: 'ADD',
-          datajson: JSON.stringify([updatedData]),
-          modifiedby: updatedData.modifiedby,
+          datajson: JSON.stringify([headerRow]),
+          modifiedby: headerRow?.modifiedby ?? data.modifiedby,
         },
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
-        trx,
-      );
+      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
+      // Sama seperti create(): hanya menghitung posisi/halaman baris yang
+      // diedit untuk grid. Kegagalannya TIDAK boleh me-rollback update yang
+      // sudah berhasil.
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      let pagedData: Record<number, any> = {};
+      let itemIndex: any = { zeroBasedIndex: 0 };
+      try {
+        const { data: filteredItems } = await this.findAll(
+          {
+            search: data.search,
+            filters: {
+              ...data.filters,
+              jenisOrderan: data.jenisorder_id,
+            },
+            pagination: { page: data.page, limit: 0 },
+            sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
+            isLookUp: false,
+          },
+          trx,
+        );
 
-      let dataIndex = filteredItems.findIndex(
-        (item) => item.id === updatedData.id,
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
+        let dataIndex = filteredItems.findIndex(
+          (item) => item.id === (headerRow?.id ?? id),
+        );
+        if (dataIndex === -1) {
+          dataIndex = 0;
+        }
+
+        const limit = data.limit || 50;
+        const posisi = dataIndex + 1; // posisi 1-based
+        const totalPages = Math.ceil(filteredItems.length / limit) || 1;
+        pageNumber = Math.ceil(posisi / limit);
+        fetchedPages = getFetchedPages(pageNumber, totalPages);
+        itemIndex = calculateItemIndex(posisi, fetchedPages, limit);
+
+        fetchedPages.forEach((p) => {
+          const start = (p - 1) * limit;
+          pagedData[p] = filteredItems.slice(start, start + limit);
+        });
+        const allFetchedData = fetchedPages.flatMap((p) => pagedData[p]);
+
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      } catch (posErr: any) {
+        console.warn(
+          'biayaextraheader: komputasi posisi pasca-update gagal (non-fatal):',
+          posErr?.message,
+        );
       }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
 
       return {
-        updatedData,
+        // headerRow, bukan updatedData: grid memakai `updatedData?.id` untuk
+        // mem-fokus ulang baris yang baru disimpan. Kalau hanya detail yang
+        // berubah, updatedData undefined -> id null -> fokus lompat ke baris 1.
+        updatedData: headerRow,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
       console.error(

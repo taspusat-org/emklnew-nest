@@ -20,26 +20,39 @@ export class BiayaExtraMuatanDetailService {
   ) {}
 
   async create(details: any, id: any = 0, trx: any = null) {
+    // Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
+    // Server (tak ada di PG -> "function openjson(unknown) does not exist"), dan
+    // jsonExtract memakai jsonb_path_query yang mengembalikan jsonb ber-quote
+    // (korupsi nilai). Upsert langsung dari array JS: update per-baris existing,
+    // hapus baris yang tak dikirim (whereNotIn), insert baris baru dgn
+    // withUuidV7. Pola ini sama dengan pengeluarandetail.service.ts.
     try {
-      let insertedData = null;
+      let insertedData: any = null;
+      let updatedData: any = null;
       const logData: any[] = [];
-      const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-      const tableTemp = await this.utilsService.createTempTable(
-        this.tableName,
-        trx,
-        tempTableName,
-      );
+
+      // estimasi/nominal/nominaltagih bertipe money->numeric. Grid mengirimnya
+      // lewat InputCurrency sebagai string ter-format ("100,000.00"); koma
+      // ribuan ditolak PG dengan 22P02 invalid input syntax for type numeric.
+      // Kosong -> null (kolom nullable).
+      const toNumeric = (value: any): number | null => {
+        if (value === null || value === undefined || value === '') return null;
+        if (typeof value === 'number')
+          return Number.isFinite(value) ? value : null;
+        const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+        return Number.isNaN(parsed) ? null : parsed;
+      };
 
       if (details.length === 0) {
         await trx(this.tableName).delete().where('biayaextra_id', id);
         return;
       }
 
-      for (const data of details) {
-        let isDataChanged = false;
+      const existingRows: any[] = []; // baris dgn id nyata (bukan '0'/kosong)
+      const newRows: any[] = [];
 
+      for (const data of details) {
         // Uppercase hanya kolom teks manusiawi. id (PK), biayaextra_id/
         // groupbiayaextra_id (FK), status*, dan *_nobukti adalah UUID/kunci
         // bertipe text (case-sensitive); blanket uppercase meng-corrupt id.
@@ -49,166 +62,105 @@ export class BiayaExtraMuatanDetailService {
           }
         });
 
-        // Check if the data has an id (existing record)
-        if (data.id) {
+        data.estimasi = toNumeric(data.estimasi);
+        data.nominal = toNumeric(data.nominal);
+        data.nominaltagih = toNumeric(data.nominaltagih);
+
+        const isNew = !data.id || String(data.id) === '0';
+        if (!isNew) {
           const existingData = await trx(this.tableName)
             .where('id', data.id)
             .first();
 
           if (existingData) {
-            const createdAt = {
-              created_at: existingData.created_at,
-              updated_at: existingData.updated_at,
-            };
-            Object.assign(data, createdAt);
-
+            data.created_at = existingData.created_at;
+            data.updated_at = existingData.updated_at;
             if (this.utilsService.hasChanges(data, existingData)) {
               data.updated_at = time;
-              isDataChanged = true;
               data.aksi = 'UPDATE';
+            } else {
+              data.aksi = 'NO UPDATE';
             }
+          } else {
+            data.aksi = 'NO UPDATE';
           }
+          existingRows.push(data);
         } else {
-          // New record: Set timestamps
-          const newTimestamps = {
-            created_at: time,
-            updated_at: time,
-          };
-          Object.assign(data, newTimestamps);
-          isDataChanged = true;
+          data.created_at = time;
+          data.updated_at = time;
           data.aksi = 'CREATE';
+          newRows.push(data);
         }
 
-        if (!isDataChanged) {
-          data.aksi = 'NO UPDATE';
-        }
-
-        const { aksi, ...dataForInsert } = data;
-
-        mainDataToInsert.push(dataForInsert);
-        logData.push({
-          ...data,
-          created_at: time,
-        });
+        logData.push({ ...data, created_at: time });
       }
 
-      await trx.raw(tableTemp);
-      const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
+      // UPDATE baris existing (per baris).
+      for (const row of existingRows) {
+        const res = await trx(this.tableName)
+          .where('id', row.id)
+          .update({
+            nobukti: row.nobukti,
+            biayaextra_id: row.biayaextra_id ?? id,
+            orderanmuatan_nobukti: row.orderanmuatan_nobukti,
+            estimasi: row.estimasi,
+            nominal: row.nominal,
+            statustagih: row.statustagih,
+            nominaltagih: row.nominaltagih,
+            keterangan: row.keterangan,
+            groupbiayaextra_id: row.groupbiayaextra_id,
+            info: row.info,
+            modifiedby: row.modifiedby,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+          })
+          .returning('*');
+        if (res && res[0]) updatedData = res[0];
+      }
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
-
-      // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          biayaextra_id: trx.raw(`${tempTableName}.biayaextra_id`),
-          orderanmuatan_nobukti: trx.raw(
-            `${tempTableName}.orderanmuatan_nobukti`,
-          ),
-          estimasi: trx.raw(`${tempTableName}.estimasi`),
-          nominal: trx.raw(`${tempTableName}.nominal`),
-          statustagih: trx.raw(`${tempTableName}.statustagih`),
-          nominaltagih: trx.raw(`${tempTableName}.nominaltagih`),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          groupbiayaextra_id: trx.raw(`${tempTableName}.groupbiayaextra_id`),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
+      // Baris di DB (biayaextra_id = id) yang tak dikirim lagi -> log DELETE,
+      // lalu hapus.
+      const incomingIds = existingRows.map((r) => r.id);
+      const getDeleted = await trx(this.tableName)
+        .where('biayaextra_id', id)
+        .modify((qb: any) => {
+          if (incomingIds.length) qb.whereNotIn('id', incomingIds);
         })
-        .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error('Error updated data biaya extra muatan detail:', error);
-          throw error;
-        });
-
-      // Handle insertion if no update occurs
-      const insertedDataQuery = await trx(tempTableName)
-        .select([
-          'nobukti',
-          'biayaextra_id',
-          'orderanmuatan_nobukti',
-          'estimasi',
-          'nominal',
-          'statustagih',
-          'nominaltagih',
-          'keterangan',
-          'groupbiayaextra_id',
-          'info',
-          'modifiedby',
-          'created_at',
-          'updated_at',
-        ])
-        .where(`${tempTableName}.id`, '0');
-
-      const getDeleted = await trx(`${this.tableName} as u`)
-        .leftJoin(`${tempTableName}`, 'u.id', `${tempTableName}.id`)
-        .select(
-          'u.nobukti',
-          'u.biayaextra_id',
-          'u.orderanmuatan_nobukti',
-          'u.estimasi',
-          'u.nominal',
-          'u.statustagih',
-          'u.nominaltagih',
-          'u.keterangan',
-          'u.groupbiayaextra_id',
-          'u.info',
-          'u.modifiedby',
-          'u.created_at',
-          'u.updated_at',
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where('u.biayaextra_id', id);
-
-      let pushToLog: any[] = [];
-
-      if (getDeleted.length > 0) {
-        pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-      }
-
-      const pushToLogWithAction = pushToLog.map((entry) => ({
+        .select('*');
+      const pushToLogWithAction = getDeleted.map((entry: any) => ({
         ...entry,
         aksi: 'DELETE',
       }));
-
       const finalData = logData.concat(pushToLogWithAction);
 
-      const deletedData = await trx(this.tableName)
-        .leftJoin(
-          `${tempTableName}`,
-          `${this.tableName}.id`,
-          `${tempTableName}.id`,
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where(`${this.tableName}.biayaextra_id`, id)
+      await trx(this.tableName)
+        .where('biayaextra_id', id)
+        .modify((qb: any) => {
+          if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+        })
         .del();
 
-      if (insertedDataQuery.length > 0) {
+      // INSERT baris baru dgn uuid v7.
+      if (newRows.length > 0) {
+        const toInsert = newRows.map((r: any) => ({
+          nobukti: r.nobukti,
+          biayaextra_id: r.biayaextra_id ?? id,
+          orderanmuatan_nobukti: r.orderanmuatan_nobukti,
+          estimasi: r.estimasi,
+          nominal: r.nominal,
+          statustagih: r.statustagih,
+          nominaltagih: r.nominaltagih,
+          keterangan: r.keterangan,
+          groupbiayaextra_id: r.groupbiayaextra_id,
+          info: r.info,
+          modifiedby: r.modifiedby,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+        }));
         insertedData = await trx(this.tableName)
-          .insert(await withUuidV7(trx, insertedDataQuery))
+          .insert(await withUuidV7(trx, toInsert))
           .returning('*')
-          .then((result: any) => result[0])
-          .catch((error: any) => {
-            console.error(
-              'Error inserting data biaya extra muatan detail:',
-              error,
-            );
-            throw error;
-          });
+          .then((result: any) => result[0]);
       }
 
       await this.logTrailService.create(
@@ -222,13 +174,6 @@ export class BiayaExtraMuatanDetailService {
           modifiedby: details[0].modifiedby || 'unknown',
         },
         trx,
-      );
-
-      console.log(
-        'RESULT BIAYA EXTRA MUATAN DETAIL insertedData',
-        insertedData,
-        'updatedData',
-        updatedData,
       );
 
       return updatedData || insertedData;
@@ -252,11 +197,60 @@ export class BiayaExtraMuatanDetailService {
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, limit = 0 } = pagination ?? {};
+      const sortBy = sort?.sortBy || 'id';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      const query = trx(`${this.tableName} as u`)
+      const buildBaseQuery = () =>
+        trx(`${this.tableName} as u`)
+          .leftJoin('parameter as p', 'u.statustagih', 'p.id')
+          .leftJoin('groupbiayaextra as q', 'u.groupbiayaextra_id', 'q.id')
+          .where('biayaextra_id', id);
+
+      const excludeSearchKeys = ['statustagih_text'];
+      const searchFields = Object.keys(filters || {}).filter(
+        (k) => !excludeSearchKeys.includes(k),
+      );
+
+      const applyFilters = (qb: any) => {
+        if (search) {
+          const sanitized = String(search).replace(/\[/g, '[[]').trim();
+
+          qb.where((qb2: any) => {
+            searchFields.forEach((field) => {
+              if (field === 'groupbiayaextra_text') {
+                qb2.orWhere(`q.keterangan`, 'like', `%${sanitized}%`);
+              } else {
+                qb2.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
+              }
+            });
+          });
+        }
+
+        if (filters) {
+          for (const [key, value] of Object.entries(filters)) {
+            const sanitizedValue = String(value).replace(/\[/g, '[[]');
+            if (value) {
+              if (key === 'statustagih_text') {
+                qb.andWhere(`p.id`, '=', sanitizedValue);
+              } else if (key === 'groupbiayaextra_text') {
+                qb.andWhere(`q.keterangan`, 'like', `%${sanitizedValue}%`);
+              } else {
+                qb.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+              }
+            }
+          }
+        }
+      };
+
+      const countResult = await buildBaseQuery()
+        .count('u.id as total')
+        .modify(applyFilters)
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      const query = buildBaseQuery()
         .select(
           'u.id',
           'u.nobukti',
@@ -272,61 +266,39 @@ export class BiayaExtraMuatanDetailService {
           'p.memo as statustagih_memo',
           'q.keterangan as groupbiayaextra_nama',
         )
-        .leftJoin('parameter as p', 'u.statustagih', 'p.id')
-        .leftJoin('groupbiayaextra as q', 'u.groupbiayaextra_id', 'q.id')
-        .where('biayaextra_id', id);
+        .modify(applyFilters);
 
-      const excludeSearchKeys = ['statustagih_text'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'groupbiayaextra_text') {
-              qb.orWhere(`q.keterangan`, 'like', `%${sanitized}%`);
-            } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-            }
-          });
-        });
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda saat grid menggeser window.
+      if (sortBy === 'statustagih_text') {
+        const memoExpr = '(CASE WHEN p.memo IS JSON THEN p.memo::jsonb END)';
+        query.orderByRaw(`JSON_VALUE(${memoExpr}, '$.MEMO') ${sortDirection}`);
+      } else if (sortBy === 'groupbiayaextra_text') {
+        query.orderBy(`q.keterangan`, sortDirection);
+      } else {
+        query.orderBy(`u.${sortBy}`, sortDirection);
+      }
+      if (sortBy !== 'id') {
+        query.orderBy('u.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            if (key === 'statustagih_text') {
-              query.andWhere(`p.id`, '=', sanitizedValue);
-            } else if (key === 'groupbiayaextra_text') {
-              query.andWhere(`q.keterangan`, 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
+      const offset = (Number(page) - 1) * Number(limit);
+      if (Number(limit) > 0) {
+        query.offset(offset).limit(Number(limit));
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'statustagih_text') {
-          const memoExpr = '(CASE WHEN p.memo IS JSON THEN p.memo::jsonb END)';
-          query.orderByRaw(
-            `JSON_VALUE(${memoExpr}, '$.MEMO') ${sort.sortDirection}`,
-          );
-        } else if (sort?.sortBy === 'groupbiayaextra_text') {
-          query.orderBy(`q.keterangan`, sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await query;
+      const data = await query;
+      const totalPages = Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
 
       return {
-        data: result,
+        data,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error('Error to findAll Schedule detail in service', error);

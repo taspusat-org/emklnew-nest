@@ -12,7 +12,11 @@ import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+} from 'src/utils/utils.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { ShippingInstructionDetailService } from '../shipping-instruction-detail/shipping-instruction-detail.service';
 import { ShippingInstructionDetailRincianService } from '../shipping-instruction-detail-rincian/shipping-instruction-detail-rincian.service';
@@ -121,7 +125,7 @@ export class ShippingInstructionService {
             comodity: detail.comodity,
             notifyparty: detail.notifyparty,
             totalgw: detail.totalgw,
-            emkllain_id: detail.emkllain_id,
+            emkl_id: detail.emkl_id,
             containerpelayaran_id: detail.containerpelayaran_id,
             tujuankapal_id: detail.tujuankapal_id,
             daftarbl_id: detail.daftarbl_id,
@@ -212,8 +216,12 @@ export class ShippingInstructionService {
           trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
           'u.schedule_id',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'p.voyberangkat',
           'p.pelayaran_id',
           'pel.nama as pelayaran_nama',
@@ -285,19 +293,20 @@ export class ShippingInstructionService {
 
           if (value) {
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'tglbukti') {
               query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
                 key,
                 `%${sanitizedValue}%`,
               ]);
             } else if (key === 'tglberangkat') {
-              query.andWhereRaw("TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?", [
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?",
+                [`%${sanitizedValue}%`],
+              );
             } else if (key === 'voyberangkat') {
               query.andWhere(`p.voyberangkat`, 'like', `%${sanitizedValue}%`);
             } else if (key === 'pelayaran_text') {
@@ -367,8 +376,12 @@ export class ShippingInstructionService {
           'u.schedule_id',
           trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           trx.raw("TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
           'p.kapal_id',
           'kapal.nama as kapal_nama',
@@ -495,7 +508,7 @@ export class ShippingInstructionService {
             comodity: detail.comodity,
             notifyparty: detail.notifyparty,
             totalgw: detail.totalgw,
-            emkllain_id: detail.emkllain_id,
+            emkl_id: detail.emkl_id,
             containerpelayaran_id: detail.containerpelayaran_id,
             tujuankapal_id: detail.tujuankapal_id,
             daftarbl_id: detail.daftarbl_id,

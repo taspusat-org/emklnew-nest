@@ -10,7 +10,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Column, Workbook } from 'exceljs';
 import { LocksService } from '../locks/locks.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+} from 'src/utils/utils.service';
 import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -344,8 +348,12 @@ export class BookingOrderanHeaderService {
           'jenisorderan.nama as jenisorderan_nama',
           'u.statusformat',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'muatan.nobukti as nobukti_muatan',
           'container.nama as container_nama',
           'shipper.nama as shipper_nama',
@@ -360,7 +368,7 @@ export class BookingOrderanHeaderService {
           'noseal as noseal_muatan',
           'lokasistuffing as lokasistuffing_muatan',
           'nominalstuffing as nominalstuffing_muatan',
-          // 'emkllain.nama as emkllain_nama',
+          // 'emkl.nama as emkllain_nama',
           'asalmuatan as asalmuatan_muatan',
           'daftarbl.nama as daftarbl_nama',
           'comodity as comodity_muatan',
@@ -384,7 +392,7 @@ export class BookingOrderanHeaderService {
         // .leftJoin('pelayarancontainer', 'u.pelayarancontainer_id', 'pelayarancontainer.id')
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        .leftJoin('emkllain', 'u.emkllain_id', 'emkllain.id')
+        .leftJoin('emkl', 'u.emkl_id', 'emkl.id')
         .leftJoin('daftarbl', 'u.daftarbl_id', 'daftarbl.id');
 
       console.log('filters', filters, filters?.tglDari, filters?.tglSampai);
@@ -419,12 +427,14 @@ export class BookingOrderanHeaderService {
             .orWhere('u.keterangan', 'like', `%${sanitizedValue}%`)
             .orWhere('u.nominal', 'like', `%${sanitizedValue}%`)
             .orWhere('u.modifiedby', 'like', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhereRaw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ]);
+            .orWhereRaw(
+              "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+              [`%${sanitizedValue}%`],
+            )
+            .orWhereRaw(
+              "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+              [`%${sanitizedValue}%`],
+            );
         });
       }
 
@@ -438,10 +448,10 @@ export class BookingOrderanHeaderService {
 
           if (value) {
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'tglbukti' || key === 'tgljatuhtempo') {
               query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
                 key,

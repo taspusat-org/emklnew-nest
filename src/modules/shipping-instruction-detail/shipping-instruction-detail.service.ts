@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { CreateShippingInstructionDetailDto } from './dto/create-shipping-instruction-detail.dto';
 import { UpdateShippingInstructionDetailDto } from './dto/update-shipping-instruction-detail.dto';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { ShippingInstructionDetailRincianService } from '../shipping-instruction-detail-rincian/shipping-instruction-detail-rincian.service';
@@ -52,17 +52,22 @@ export class ShippingInstructionDetailService {
         let isDataChanged = false;
 
         // Uppercase hanya kolom teks manusiawi. id (PK), orderan_id/
-        // shippinginstruction_id/emkllain_id/containerpelayaran_id/tujuankapal_id/
+        // shippinginstruction_id/emkl_id/containerpelayaran_id/tujuankapal_id/
         // daftarbl_id (FK), status*, dan *_nobukti adalah UUID/kunci bertipe text
         // (case-sensitive); blanket uppercase meng-corrupt id/FK (mis. lookup
         // statuspendukung by orderan_id) sehingga lookup gagal.
-        ['asalpelabuhan', 'keterangan', 'consignee', 'shipper', 'comodity', 'notifyparty'].forEach(
-          (field) => {
-            if (typeof data[field] === 'string') {
-              data[field] = data[field].toUpperCase();
-            }
-          },
-        );
+        [
+          'asalpelabuhan',
+          'keterangan',
+          'consignee',
+          'shipper',
+          'comodity',
+          'notifyparty',
+        ].forEach((field) => {
+          if (typeof data[field] === 'string') {
+            data[field] = data[field].toUpperCase();
+          }
+        });
 
         const { detailsrincian, orderan_id, ...detailsWithoutRincian } = data;
         detailsWithoutRincian.statusformat = getFormatShippingDetail.id;
@@ -224,7 +229,7 @@ export class ShippingInstructionDetailService {
           notifyparty: trx.raw(`${tempTableName}.notifyparty`),
           totalgw: trx.raw(`${tempTableName}.totalgw`),
           statuspisahbl: trx.raw(`${tempTableName}.statuspisahbl`),
-          emkllain_id: trx.raw(`${tempTableName}.emkllain_id`),
+          emkl_id: trx.raw(`${tempTableName}.emkl_id`),
           containerpelayaran_id: trx.raw(
             `${tempTableName}.containerpelayaran_id`,
           ),
@@ -251,7 +256,7 @@ export class ShippingInstructionDetailService {
           'notifyparty',
           'totalgw',
           'statuspisahbl',
-          'emkllain_id',
+          'emkl_id',
           'containerpelayaran_id',
           'tujuankapal_id',
           'daftarbl_id',
@@ -277,7 +282,7 @@ export class ShippingInstructionDetailService {
           'u.notifyparty',
           'u.totalgw',
           'u.statuspisahbl',
-          'u.emkllain_id',
+          'u.emkl_id',
           'u.containerpelayaran_id',
           'u.tujuankapal_id',
           'u.daftarbl_id',
@@ -402,7 +407,7 @@ export class ShippingInstructionDetailService {
           'p.notifyparty',
           'p.totalgw',
           'p.statuspisahbl',
-          'p.emkllain_id',
+          'p.emkl_id',
           'p.containerpelayaran_id',
           'p.tujuankapal_id',
           'p.daftarbl_id',
@@ -414,7 +419,7 @@ export class ShippingInstructionDetailService {
           'bl.nama as daftarbl_nama',
         )
         .leftJoin('parameter', 'p.statuspisahbl', 'parameter.id')
-        .leftJoin('emkl', 'p.emkllain_id', 'emkl.id')
+        .leftJoin('emkl', 'p.emkl_id', 'emkl.id')
         .leftJoin('pelayaran as pel', 'p.containerpelayaran_id', 'pel.id')
         .leftJoin('tujuankapal as tjk', 'p.tujuankapal_id', 'tjk.id')
         .leftJoin('daftarbl as bl', 'p.daftarbl_id', 'bl.id')
