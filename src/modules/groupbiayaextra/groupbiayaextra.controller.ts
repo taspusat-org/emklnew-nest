@@ -38,11 +38,17 @@ import { dbMssql } from 'src/common/utils/db';
 import { any } from 'zod';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import {
+  ReportGroupbiayaextraDto,
+  ReportGroupbiayaextraSchema,
+} from './dto/report-groupbiayaextra.dto';
 
 @Controller('groupbiayaextra')
 export class GroupbiayaextraController {
   constructor(
     private readonly GroupbiayaextraService: GroupbiayaextraService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -190,6 +196,72 @@ export class GroupbiayaextraController {
       );
     }
   }
+  /**
+   * POST /groupbiayaextra/report
+   *
+   * Cetak laporan di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Data laporan diambil lewat findAll() milik service ini dengan limit 0,
+   * jadi filter kolom / search global / sort yang dikirim frontend berperilaku
+   * persis sama seperti yang tampil di grid — hanya saja tanpa paging.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportGroupbiayaextraSchema))
+    body: ReportGroupbiayaextraDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
+        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
+        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
+        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
+        // karena hanya memakai API baca (from/raw/count).
+        const result = await this.GroupbiayaextraService.findAll(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
+            pagination: { page: 1, limit: 0 },
+            sort: {
+              sortBy: sortBy || 'keterangan',
+              sortDirection: sortDirection || 'asc',
+            },
+            isLookUp: false,
+          },
+          dbMssql,
+        );
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'Laporan Group Biaya Extra',
+          usercetak: username,
+          tglcetak,
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        }));
+      },
+    });
+  }
+
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {
     try {

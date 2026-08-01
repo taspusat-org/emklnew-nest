@@ -11,6 +11,7 @@ import { UtilsModule } from './utils/utils.module';
 import { RedisModule } from './common/redis/redis.module';
 import { RedisController } from './common/redis/redis.controller';
 import { SocketModule } from './common/socket/socket.module';
+import { ReportModule } from './common/report/report.module';
 import { AcosModule } from './modules/acos/acos.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AuthGuard } from './modules/auth/auth.guard';
@@ -164,6 +165,7 @@ import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-mua
     RedisModule,
     LogtrailModule,
     SocketModule,
+    ReportModule,
     MenuModule,
     RoleModule,
     UserModule,
