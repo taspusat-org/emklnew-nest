@@ -44,7 +44,7 @@ export class RoleaclController {
   @Put(':id')
   async update(
     @Param('id') id: string, // Role ID (varchar UUID, jangan di-parseInt)
-    @Body() body: { data: number[] }, // Expecting { data: [1, 2, 3, 4] }
+    @Body() body: { data: string[] }, // aco id = varchar uuid v7, bukan angka
     @Req() req: any, // Request object to get user info (from JWT, session, etc.)
   ) {
     if (!id) {

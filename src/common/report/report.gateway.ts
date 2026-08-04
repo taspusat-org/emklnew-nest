@@ -78,13 +78,15 @@ export class ReportGateway
     const job = this.jobStore.get(jobId);
     if (!job || job.status === 'processing') return;
 
+    const berkas = job.kind === 'excel' ? 'Excel' : 'PDF';
+
     if (job.status === 'done') {
       this.logger.log(
         `[join] catch-up → client=${client.id} telat join, job=${jobId} sudah done`,
       );
       client.emit('report:progress', {
         jobId,
-        step: 'PDF siap diunduh.',
+        step: `${berkas} siap diunduh.`,
         percent: 100,
         status: 'done',
         downloadUrl: `/report/download/${jobId}`,
@@ -95,7 +97,7 @@ export class ReportGateway
       );
       client.emit('report:progress', {
         jobId,
-        step: 'Gagal generate PDF.',
+        step: `Gagal generate ${berkas}.`,
         percent: 100,
         status: 'error',
         error: job.error,

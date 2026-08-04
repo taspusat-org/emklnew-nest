@@ -36,9 +36,17 @@ import { AuthGuard } from '../auth/auth.guard';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ExportAlatbayarDto,
+  ExportAlatbayarSchema,
+} from './dto/export-alatbayar.dto';
 @Controller('alatbayar')
 export class AlatbayarController {
-  constructor(private readonly alatbayarService: AlatbayarService) {}
+  constructor(
+    private readonly alatbayarService: AlatbayarService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -169,6 +177,7 @@ export class AlatbayarController {
   }
   @UseGuards(AuthGuard)
   @Delete(':id')
+
   //@ALAT-BAYAR
   async delete(@Param('id') id: string, @Req() req) {
     const trx = await dbMssql.transaction();
@@ -195,6 +204,39 @@ export class AlatbayarController {
 
       throw new InternalServerErrorException('Failed to delete alat bayar');
     }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportAlatbayarSchema))
+    body: ExportAlatbayarDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_alatbayar_${stamp}.xlsx`,
+      countRows: () =>
+        this.alatbayarService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.alatbayarService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.alatbayarService.exportSheet,
+    });
   }
 
   @Get('/export')

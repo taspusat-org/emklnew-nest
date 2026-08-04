@@ -33,11 +33,17 @@ import {
   UpdateBiayaExtraHeaderDto,
   UpdateBiayaExtraHeaderSchema,
 } from './dto/create-biaya-extra-header.dto';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ExportBiayaExtraHeaderDto,
+  ExportBiayaExtraHeaderSchema,
+} from './dto/export-biaya-extra-header.dto';
 
 @Controller('biayaextraheader')
 export class BiayaExtraHeaderController {
   constructor(
     private readonly biayaExtraHeaderService: BiayaExtraHeaderService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -210,6 +216,60 @@ export class BiayaExtraHeaderController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /biayaextraheader/export
+   *
+   * Export Excel DAFTAR biaya extra (bukan satu bukti seperti
+   * GET /export/:id) di background. Request langsung balas { jobId };
+   * progresnya dikirim lewat socket namespace `/report` (kanal yang sama
+   * dengan cetak laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBiayaExtraHeaderSchema))
+    body: ExportBiayaExtraHeaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    // Diresolusi di sini (async) karena ExportJobService meminta stream-nya
+    // secara sinkron; grid selalu menampilkan satu jenis order saja.
+    const jenisorderId = await this.biayaExtraHeaderService.resolveJenisOrderId(
+      filters,
+      dbMssql,
+    );
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+      jenisorderId,
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_biaya_extra_${stamp}.xlsx`,
+      countRows: () =>
+        this.biayaExtraHeaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.biayaExtraHeaderService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.biayaExtraHeaderService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

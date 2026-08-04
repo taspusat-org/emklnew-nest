@@ -44,6 +44,10 @@ async function bootstrap() {
       ], // List of allowed origins
       methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allowed methods
       allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
+      // Tanpa ini browser menyembunyikan Content-Disposition dari response
+      // lintas origin, sehingga frontend tidak bisa membaca nama file hasil
+      // download (mis. export Excel di /report/download/:jobId).
+      exposedHeaders: ['Content-Disposition'],
     });
     // main.ts
     setupSwagger(app);

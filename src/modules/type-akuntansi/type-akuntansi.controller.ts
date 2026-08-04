@@ -39,6 +39,11 @@ import {
 import { InjectMethodPipe } from 'src/common/pipes/inject-method.pipe';
 import { AclGuard } from '../auth/acl.guard';
 import { RequireAcos } from '../auth/access.decorator';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import {
+  ReportTypeAkuntansiDto,
+  ReportTypeAkuntansiSchema,
+} from './dto/report-type-akuntansi.dto';
 import {
   ApiTags,
   ApiOperation,
@@ -52,7 +57,10 @@ import {
 
 @Controller('type-akuntansi')
 export class TypeAkuntansiController {
-  constructor(private readonly typeAkuntansiService: TypeAkuntansiService) {}
+  constructor(
+    private readonly typeAkuntansiService: TypeAkuntansiService,
+    private readonly reportJobService: ReportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @ApiBearerAuth()
@@ -158,7 +166,7 @@ export class TypeAkuntansiController {
   @Put(':id')
   //@TYPE-AKUNTANSI
   async update(
-    @Param('id') dataId: string,
+    @Param('id') id: string,
     @Body(
       new InjectMethodPipe('update'),
       new ZodValidationPipe(UpdateTypeAkuntansiSchema),
@@ -170,7 +178,9 @@ export class TypeAkuntansiController {
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
-      const result = await this.typeAkuntansiService.update(+dataId, data, trx);
+      // id = varchar UUID, JANGAN dikonversi ke number (+id -> NaN). Sumber
+      // kebenaran adalah path param, bukan `id` di body.
+      const result = await this.typeAkuntansiService.update(id, data, trx);
 
       await trx.commit();
       return result;
@@ -249,6 +259,72 @@ export class TypeAkuntansiController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /type-akuntansi/report
+   *
+   * Cetak laporan di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Data laporan diambil lewat findAll() milik service ini dengan limit 0,
+   * jadi filter kolom / search global / sort yang dikirim frontend berperilaku
+   * persis sama seperti yang tampil di grid — hanya saja tanpa paging.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportTypeAkuntansiSchema))
+    body: ReportTypeAkuntansiDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
+        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
+        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
+        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
+        // karena hanya memakai API baca (from/raw/count).
+        const result = await this.typeAkuntansiService.findAll(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
+            pagination: { page: 1, limit: 0 },
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+            isLookUp: false,
+          },
+          dbMssql,
+        );
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'Laporan Type Akuntansi',
+          usercetak: username,
+          tglcetak,
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        }));
+      },
+    });
   }
 
   @Get('/export')

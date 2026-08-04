@@ -36,13 +36,17 @@ import { AuthGuard } from '../auth/auth.guard';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { Response } from 'express';
 import * as fs from 'fs';
-import { ReportAsuransiDto, ReportAsuransiSchema } from './dto/report-asuransi.dto';
+import {
+  ReportAsuransiDto,
+  ReportAsuransiSchema,
+} from './dto/report-asuransi.dto';
 import { ReportJobService } from 'src/common/report/report-job.service';
-
 
 @Controller('asuransi')
 export class AsuransiController {
-  constructor(private readonly asuransiService: AsuransiService,    private readonly reportJobService: ReportJobService,
+  constructor(
+    private readonly asuransiService: AsuransiService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -202,17 +206,6 @@ export class AsuransiController {
     }
   }
 
-  /**
-   * POST /groupbiayaextra/report
-   *
-   * Cetak laporan di background. Request langsung balas { jobId }; progres
-   * render dikirim lewat socket namespace `/report` (event `report:progress`,
-   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
-   *
-   * Data laporan diambil lewat findAll() milik service ini dengan limit 0,
-   * jadi filter kolom / search global / sort yang dikirim frontend berperilaku
-   * persis sama seperti yang tampil di grid — hanya saja tanpa paging.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
