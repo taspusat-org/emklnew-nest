@@ -44,15 +44,12 @@ export class ReportJobService {
     const filename =
       options.filename ?? options.mrtName.replace(/\.mrt$/i, '.pdf');
 
-    this.jobStore.set(jobId, { status: 'processing', createdAt: new Date() });
+    this.jobStore.set(jobId, {
+      status: 'processing',
+      kind: 'pdf',
+      createdAt: new Date(),
+    });
 
-    // WAJIB dijalankan DI LUAR AsyncLocalStorage milik request HTTP.
-    // Kalau tidak, job ini mewarisi `RequestStore` request yang sudah selesai;
-    // begitu TimeoutInterceptor meng-abort store tersebut, listener di
-    // wrapWithTimeout (common/utils/db.ts) me-rollback transaksi job yang
-    // masih berjalan -> "Transaction query already complete".
-    // Job background umurnya memang lebih panjang dari request pemicunya,
-    // jadi ia tidak boleh terikat pada siklus hidup request.
     requestContext.exit(() => {
       void this.run(jobId, options, filename);
     });
@@ -90,6 +87,7 @@ export class ReportJobService {
   private failJob(jobId: string, step: string, error: string): void {
     this.jobStore.set(jobId, {
       status: 'error',
+      kind: 'pdf',
       error,
       createdAt: new Date(),
     });
@@ -184,6 +182,7 @@ export class ReportJobService {
 
       this.jobStore.set(jobId, {
         status: 'done',
+        kind: 'pdf',
         buffer: pdfBuffer,
         filename,
         createdAt: new Date(),

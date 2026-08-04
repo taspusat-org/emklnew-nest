@@ -39,16 +39,22 @@ import { any } from 'zod';
 import { Response } from 'express';
 import * as fs from 'fs';
 import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
 import {
   ReportGroupbiayaextraDto,
   ReportGroupbiayaextraSchema,
 } from './dto/report-groupbiayaextra.dto';
+import {
+  ExportGroupbiayaextraDto,
+  ExportGroupbiayaextraSchema,
+} from './dto/export-groupbiayaextra.dto';
 
 @Controller('groupbiayaextra')
 export class GroupbiayaextraController {
   constructor(
     private readonly GroupbiayaextraService: GroupbiayaextraService,
     private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -262,33 +268,49 @@ export class GroupbiayaextraController {
     });
   }
 
-  @Get('/export')
-  async exportToExcel(@Query() params: any, @Res() res: Response) {
-    try {
-      const { data } = await this.findAll(params);
+  /**
+   * POST /groupbiayaextra/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportGroupbiayaextraSchema))
+    body: ExportGroupbiayaextraDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
 
-      if (!Array.isArray(data)) {
-        throw new Error('Data is not an array or is undefined.');
-      }
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 
-      const tempFilePath =
-        await this.GroupbiayaextraService.exportToExcel(data);
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'keterangan',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
 
-      const fileStream = fs.createReadStream(tempFilePath);
-
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="groupbiayaextra.xlsx"',
-      );
-
-      fileStream.pipe(res);
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      res.status(500).send('Failed to export file');
-    }
+    return this.exportJobService.start({
+      filename: `laporan_groupbiayaextra_${stamp}.xlsx`,
+      countRows: () =>
+        this.GroupbiayaextraService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.GroupbiayaextraService.buildExportQuery(
+          queryParams,
+          dbMssql,
+        ).stream(),
+      sheet: this.GroupbiayaextraService.exportSheet,
+    });
   }
 }

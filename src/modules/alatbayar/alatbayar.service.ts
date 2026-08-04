@@ -81,9 +81,6 @@ export class AlatbayarService {
   }
 
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
-    // Tabel `alatbayar` hanya punya kolom status* (varchar id parameter),
-    // TIDAK ada kolom *_uuid. Menyisipkan *_uuid -> "Invalid column name".
-    // Kolom _text/_uuid/_memo diturunkan di view valatbayar via JOIN parameter.
     return {
       id: uuid ? uuid : dto.uuid, // id (uuidV7)
       nama: dto.nama ? dto.nama.toUpperCase() : null,
@@ -99,13 +96,6 @@ export class AlatbayarService {
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (text/*_text), bukan id (varchar
-   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
-   * fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -165,10 +155,6 @@ export class AlatbayarService {
           sortBy,
           sortDirection,
         );
-        // Posisi = jumlah baris yang tampil sebelum-atau-pada baris baru,
-        // memakai kolom & arah urut yang sama dengan grid (findAll). Tidak
-        // ada klausa tiebreaker `id <=` lagi: id UUID tidak terurut, jadi
-        // klausa itu malah memfilter baris acak & membuat posisi meleset.
         const resultposition = await trx(`${this.viewName} as ab`)
           .count('* as posisi')
           .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
@@ -319,8 +305,12 @@ export class AlatbayarService {
         'ab.memo',
         'ab.info',
         'ab.modifiedby',
-        trx.raw("to_char(ab.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-        trx.raw("to_char(ab.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+        trx.raw(
+          "to_char(ab.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(ab.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
       ]);
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
@@ -345,7 +335,7 @@ export class AlatbayarService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
- console.log(query.toQuery());
+      console.log(query.toQuery());
       const data = await query;
       const totalPages = Math.ceil(total / limit);
       const responseType = total > 500 ? 'json' : 'local';
@@ -535,7 +525,107 @@ export class AlatbayarService {
     }
   }
 
-  async exportToExcel(data: any[]) {
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
+  private readonly EXPORT_COLUMNS = [
+    'ab.nama',
+    'ab.keterangan',
+    'ab.statuslangsungcair_text',
+    'ab.statusdefault_text',
+    'ab.statusbank_text',
+    'ab.text',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
+   * proses kehabisan heap.
+   */
+  buildExportQuery(
+    { search, filters, sort }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as ab`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('ab.text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('ab.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('ab.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('ab.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`ab.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
+   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
+   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as ab`)
+      .count('ab.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN ALAT BAYAR',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'KETERANGAN',
+      'STATUS LANGSUNG CAIR',
+      'STATUS DEFAULT',
+      'STATUS BANK',
+      'STATUS AKTIF',
+    ],
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    columnWidths: [6, 30, 40, 22, 18, 18, 15],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+      row.statuslangsungcair_text,
+      row.statusdefault_text,
+      row.statusbank_text,
+      row.text,
+    ],
+  };
+
+  /**
+   * Merakit workbook Excel dan mengembalikannya sebagai buffer.
+   *
+   * Hanya untuk export kecil (endpoint GET /alatbayar/export yang lama):
+   * seluruh data ditampung di memori. Export lewat background job memakai
+   * ExportJobService yang streaming.
+   */
+  async buildExcelBuffer(data: any[]): Promise<Buffer> {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
@@ -636,6 +726,12 @@ export class AlatbayarService {
 
     worksheet.getColumn(1).width = 6;
 
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  async exportToExcel(data: any[]) {
+    const buffer = await this.buildExcelBuffer(data);
+
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -645,7 +741,7 @@ export class AlatbayarService {
       tempDir,
       `laporan_alatbayar_${Date.now()}.xlsx`,
     );
-    await workbook.xlsx.writeFile(tempFilePath);
+    await fs.promises.writeFile(tempFilePath, buffer);
 
     return tempFilePath;
   }

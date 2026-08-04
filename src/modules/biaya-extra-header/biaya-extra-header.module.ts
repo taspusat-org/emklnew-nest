@@ -10,6 +10,7 @@ import { RunningNumberModule } from '../running-number/running-number.module';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthModule } from '../auth/auth.module';
 import { BiayaExtraMuatanDetailModule } from '../biaya-extra-muatan-detail/biaya-extra-muatan-detail.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   controllers: [BiayaExtraHeaderController],
@@ -24,6 +25,8 @@ import { BiayaExtraMuatanDetailModule } from '../biaya-extra-muatan-detail/biaya
     LogtrailModule,
     RunningNumberModule,
     BiayaExtraMuatanDetailModule,
+    // Menyediakan ExportJobService (export Excel background + socket progres).
+    ReportModule,
   ],
 })
 export class BiayaExtraHeaderModule {}

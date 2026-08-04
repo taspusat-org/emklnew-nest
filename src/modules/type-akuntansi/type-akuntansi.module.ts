@@ -6,8 +6,8 @@ import { RedisModule } from 'src/common/redis/redis.module';
 import { TypeAkuntansiService } from './type-akuntansi.service';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { TypeAkuntansiController } from './type-akuntansi.controller';
-import { LocksService } from '../locks/locks.service';
 import { LocksModule } from '../locks/locks.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -17,9 +17,10 @@ import { LocksModule } from '../locks/locks.module';
     LogtrailModule,
     GlobalModule,
     LocksModule,
-    UtilsModule,
+    ReportModule,
   ],
   controllers: [TypeAkuntansiController],
   providers: [TypeAkuntansiService],
+  exports: [TypeAkuntansiService],
 })
 export class TypeAkuntansiModule {}

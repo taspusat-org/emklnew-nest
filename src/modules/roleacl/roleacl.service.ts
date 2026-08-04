@@ -70,7 +70,8 @@ export class RoleaclService {
     return `This action returns a #${id} roleacl`;
   }
 
-  async update(id: string, acoIds: number[], modifiedBy: string, trx: any) {
+  // acoIds = acos.id yang bertipe varchar (uuid v7), bukan angka.
+  async update(id: string, acoIds: string[], modifiedBy: string, trx: any) {
     try {
       if (acoIds.length === 0) {
         await trx('acl').where('role_id', id).del();
@@ -90,26 +91,39 @@ export class RoleaclService {
         updated_at: dbMssql.fn.now(),
       }));
 
-      await trx('acl').insert(await withUuidV7(trx, aclData));
+      // Insert dipecah per batch: Postgres membatasi jumlah bind parameter per
+      // statement (65535), dan satu INSERT raksasa juga lebih lambat di-parse.
+      const rowsWithId = await withUuidV7(trx, aclData);
+      const INSERT_CHUNK_SIZE = 500;
+      for (let i = 0; i < rowsWithId.length; i += INSERT_CHUNK_SIZE) {
+        await trx('acl').insert(rowsWithId.slice(i, i + INSERT_CHUNK_SIZE));
+      }
 
       const usersRole = await trx('userrole')
         .select('user_id')
         .where('role_id', id);
 
-      for (const user of usersRole) {
-        const { abilities } =
-          await this.utilsService.fetchUserRolesAndAbilities(user.user_id, trx);
-
+      if (usersRole.length > 0) {
+        // Struktur menu sidebar sama untuk semua user, jadi cukup diambil
+        // sekali di luar loop — sebelumnya di-query ulang per user.
         const menuData = await this.utilsService.getDataMenuSidebar(trx);
 
-        const menuString = this.utilsService.buildMenuString(
-          menuData,
-          abilities,
-        );
-        await trx('users').where({ id: user.user_id }).update({
-          menu: menuString,
-          updated_at: new Date(),
-        });
+        for (const user of usersRole) {
+          const { abilities } =
+            await this.utilsService.fetchUserRolesAndAbilities(
+              user.user_id,
+              trx,
+            );
+
+          const menuString = this.utilsService.buildMenuString(
+            menuData,
+            abilities,
+          );
+          await trx('users').where({ id: user.user_id }).update({
+            menu: menuString,
+            updated_at: new Date(),
+          });
+        }
       }
       return { status: true, message: 'Role and ACL updated successfully' };
     } catch (error) {
