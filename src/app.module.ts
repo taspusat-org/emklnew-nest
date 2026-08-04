@@ -141,6 +141,7 @@ import { EstimasiBiayaHeaderModule } from './modules/estimasi-biaya-header/estim
 import { EstimasiBiayaDetailInvoiceModule } from './modules/estimasi-biaya-detail-invoice/estimasi-biaya-detail-invoice.module';
 import { BiayaHeaderModule } from './modules/biaya-header/biaya-header.module';
 import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-muatan-detail.module';
+import { AsuransiModule } from './modules/asuransi/asuransi.module';
 
 @Module({
   imports: [
@@ -279,6 +280,7 @@ import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-mua
     EstimasiBiayaDetailInvoiceModule,
     BiayaHeaderModule,
     BiayaMuatanDetailModule,
+    AsuransiModule,
   ],
   controllers: [],
   providers: [
