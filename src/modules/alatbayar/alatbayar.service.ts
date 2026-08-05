@@ -544,7 +544,11 @@ export class AlatbayarService {
    * proses kehabisan heap.
    */
   buildExportQuery(
-    { search, filters, sort }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
     db: any,
   ) {
     const safeFilters = filters || {};
@@ -605,6 +609,8 @@ export class AlatbayarService {
       'STATUS BANK',
       'STATUS AKTIF',
     ],
+    columnWidths: [5, 30, 25, 20, 20, 20, 20],
+
     // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,

@@ -43,6 +43,50 @@ const STEP = {
   done: 'Excel siap diunduh.',
 } as const;
 
+export type ExportColumnAlign = 'left' | 'center' | 'right';
+
+/**
+ * Format angka Excel siap pakai. Yang disimpan di sel tetap angka mentah —
+ * ini hanya mengatur cara Excel menampilkannya, jadi sel-nya masih bisa
+ * di-SUM / difilter sebagai angka.
+ *
+ * Pemisah ribuan/desimal ditulis mengikuti notasi Excel (`,` ribuan, `.`
+ * desimal); saat dibuka, Excel menampilkannya sesuai regional setting
+ * pemakainya — di Windows Indonesia otomatis jadi `Rp1.500.000,00`.
+ */
+export const EXCEL_FORMAT = {
+  /** 1500000 → Rp1.500.000 (negatif merah dalam kurung). */
+  RUPIAH: '"Rp"#,##0;[Red]("Rp"#,##0)',
+  /** 1500000.5 → Rp1.500.000,50 */
+  RUPIAH_DESIMAL: '"Rp"#,##0.00;[Red]("Rp"#,##0.00)',
+  /** 1500000 → 1.500.000 — tanpa simbol mata uang. */
+  ANGKA: '#,##0',
+  ANGKA_DESIMAL: '#,##0.00',
+  /** 0.155 → 15,50% */
+  PERSEN: '0.00%',
+  TANGGAL: 'dd-mm-yyyy',
+  TANGGAL_JAM: 'dd-mm-yyyy hh:mm',
+} as const;
+
+export interface ExportColumnFormat {
+  /**
+   * Format tampilan Excel (numFmt) — pakai salah satu dari `EXCEL_FORMAT`
+   * atau string format kustom. Hanya berlaku untuk sel bertipe angka; nilai
+   * dari `mapRow` yang berupa string angka ('1500000.00', umum keluar dari
+   * driver database untuk kolom DECIMAL) otomatis dikonversi.
+   */
+  numFmt?: string;
+  /**
+   * Perataan isi sel. Default: rata kanan untuk kolom nomor urut (kolom
+   * pertama) dan kolom ber-`numFmt`, sisanya rata kiri.
+   */
+  align?: ExportColumnAlign;
+  /** Perataan judul kolomnya. Default: kolom pertama rata kanan, sisanya tengah. */
+  headerAlign?: ExportColumnAlign;
+  /** Bungkus teks panjang jadi beberapa baris dalam satu sel. */
+  wrapText?: boolean;
+}
+
 export interface ExportSheetDefinition {
   sheetName?: string;
   /** Baris judul di atas header (di-merge selebar kolom header). */
@@ -54,8 +98,89 @@ export interface ExportSheetDefinition {
    * (auto-fit). Isi hanya bila memang ingin menguncinya di angka tertentu.
    */
   columnWidths?: (number | null | undefined)[];
+  /**
+   * Format per kolom (mata uang, persen, tanggal, perataan). Urutannya sejajar
+   * `headers`; kolom yang tidak diisi memakai format bawaan.
+   */
+  columnFormats?: (ExportColumnFormat | null | undefined)[];
   /** Memetakan satu baris database menjadi nilai-nilai sel. */
   mapRow: (row: any, rowNumber: number) => (string | number | null)[];
+}
+
+interface ResolvedColumnFormat {
+  numFmt?: string;
+  align: ExportColumnAlign;
+  headerAlign: ExportColumnAlign;
+  wrapText: boolean;
+}
+
+const DEFAULT_COLUMN_FORMAT: ResolvedColumnFormat = {
+  align: 'left',
+  headerAlign: 'center',
+  wrapText: false,
+};
+
+/**
+ * Format angka Excel hanya berlaku pada sel bertipe angka. Kolom DECIMAL
+ * sering keluar dari driver database sebagai string ('1500000.00'); kalau
+ * ditulis apa adanya, sel-nya jadi teks dan format rupiahnya diabaikan diam-diam.
+ */
+function toNumericCell(
+  value: string | number | null | undefined,
+): string | number {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number') return value;
+
+  const trimmed = String(value).trim();
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return value;
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : value;
+}
+
+/**
+ * Panjang teks yang TAMPIL di Excel, bukan nilai mentahnya: 1500000 dengan
+ * format rupiah muncul sebagai "Rp1.500.000" — 11 karakter, bukan 7. Kalau
+ * yang diukur nilai mentahnya, kolomnya jadi kesempitan dan Excel menampilkan
+ * `#######`. Hasilnya perkiraan, dan itu cukup untuk menentukan lebar kolom.
+ */
+function displayedLength(
+  value: string | number | null | undefined,
+  numFmt?: string,
+): number {
+  const text = value === null || value === undefined ? '' : String(value);
+  // Sel multi-baris: yang menentukan lebar hanya penggal terpanjang.
+  const plainLength = Math.max(
+    ...text.split('\n').map((line) => line.length),
+    0,
+  );
+
+  const numeric = typeof value === 'number' ? value : Number(text);
+  if (!numFmt || text === '' || !Number.isFinite(numeric)) return plainLength;
+
+  // Bagian sebelum ';' adalah format untuk angka positif; `[Red]` dsb hanya
+  // instruksi warna, tidak ikut tampil.
+  const pattern = numFmt.split(';')[0].replace(/\[[^\]]*\]/g, '');
+  const quoted = [...pattern.matchAll(/"([^"]*)"/g)].reduce(
+    (sum, match) => sum + match[1].length,
+    0,
+  );
+  const literals = pattern
+    .replace(/"[^"]*"/g, '')
+    .replace(/[#0.,_*\\]/g, '').length;
+  const decimals = /\.([#0]+)/.exec(pattern)?.[1].length ?? 0;
+  const digits = Math.abs(Math.trunc(numeric)).toString().length;
+  const grouped = /[#0],[#0]{3}/.test(pattern);
+
+  return Math.max(
+    plainLength,
+    digits +
+      (grouped ? Math.floor((digits - 1) / 3) : 0) +
+      (decimals > 0 ? decimals + 1 : 0) +
+      quoted +
+      literals +
+      (numeric < 0 ? 1 : 0),
+  );
 }
 
 export interface StartExportJobOptions {
@@ -249,19 +374,22 @@ export class ExportJobService {
       // Header sengaja BELUM ditulis: lebar kolom baru bisa dihitung setelah
       // sebagian isi terlihat, dan setelah baris pertama di-flush lebarnya
       // tidak bisa diubah lagi.
-      const widths = this.createWidthMeasurer(sheet);
+      // Format kolom dihitung sekali di luar loop — bagian ini dilewati
+      // sekali per sel, jutaan kali pada export besar.
+      const formats = this.resolveColumnFormats(sheet);
+      const widths = this.createWidthMeasurer(sheet, formats);
       const pending: (string | number | null)[][] = [];
       let headerWritten = false;
       let flushed = 0;
 
       const flushPending = () => {
         if (!headerWritten) {
-          this.writeHeader(worksheet, sheet, widths.result());
+          this.writeHeader(worksheet, sheet, formats, widths.result());
           headerWritten = true;
         }
         for (const values of pending) {
           flushed += 1;
-          this.writeDataRow(worksheet, values, headerOffset + flushed);
+          this.writeDataRow(worksheet, formats, values, headerOffset + flushed);
         }
         pending.length = 0;
       };
@@ -278,7 +406,12 @@ export class ExportJobService {
 
           if (headerWritten) {
             flushed += 1;
-            this.writeDataRow(worksheet, values, headerOffset + flushed);
+            this.writeDataRow(
+              worksheet,
+              formats,
+              values,
+              headerOffset + flushed,
+            );
           } else {
             widths.add(values);
             pending.push(values);
@@ -355,12 +488,41 @@ export class ExportJobService {
   }
 
   /**
+   * Menggabungkan format dari pemanggil dengan bawaannya — sekali per export,
+   * bukan per sel. Kolom pertama (nomor urut) dan kolom ber-`numFmt` isinya
+   * angka, jadi defaultnya rata kanan supaya digitnya sejajar.
+   */
+  private resolveColumnFormats(
+    sheet: ExportSheetDefinition,
+  ): ResolvedColumnFormat[] {
+    const custom = sheet.columnFormats ?? [];
+
+    return sheet.headers.map((_, index) => {
+      const format = custom[index];
+      const numeric = index === 0 || !!format?.numFmt;
+
+      return {
+        numFmt: format?.numFmt,
+        align:
+          format?.align ?? (numeric ? 'right' : DEFAULT_COLUMN_FORMAT.align),
+        headerAlign:
+          format?.headerAlign ??
+          (index === 0 ? 'right' : DEFAULT_COLUMN_FORMAT.headerAlign),
+        wrapText: format?.wrapText ?? DEFAULT_COLUMN_FORMAT.wrapText,
+      };
+    });
+  }
+
+  /**
    * Mengukur lebar tiap kolom dari teks terpanjang yang pernah dilihat —
    * dimulai dari judul kolomnya sendiri, lalu ditambah baris data yang
    * di-sample. Baris judul laporan sengaja tidak ikut diukur karena sel-nya
    * di-merge selebar tabel; kalau ikut, kolom pertama jadi melar sendiri.
    */
-  private createWidthMeasurer(sheet: ExportSheetDefinition) {
+  private createWidthMeasurer(
+    sheet: ExportSheetDefinition,
+    formats: ResolvedColumnFormat[],
+  ) {
     const fixed = sheet.columnWidths ?? [];
     const longest = sheet.headers.map((header) => String(header ?? '').length);
 
@@ -368,11 +530,10 @@ export class ExportJobService {
       add(values: (string | number | null)[]): void {
         values.forEach((value, index) => {
           if (index >= longest.length) return;
-          const text = value === null || value === undefined ? '' : String(value);
-          // Sel multi-baris: yang menentukan lebar hanya penggal terpanjang.
-          for (const line of text.split('\n')) {
-            longest[index] = Math.max(longest[index], line.length);
-          }
+          longest[index] = Math.max(
+            longest[index],
+            displayedLength(value, formats[index]?.numFmt),
+          );
         });
       },
       result(): number[] {
@@ -391,6 +552,7 @@ export class ExportJobService {
   private writeHeader(
     worksheet: any,
     sheet: ExportSheetDefinition,
+    formats: ResolvedColumnFormat[],
     columnWidths: number[],
   ): void {
     const columnCount = sheet.headers.length;
@@ -434,7 +596,7 @@ export class ExportJobService {
       };
       cell.font = { bold: true, name: 'Tahoma', size: 10 };
       cell.alignment = {
-        horizontal: index === 0 ? 'right' : 'center',
+        horizontal: formats[index]?.headerAlign ?? 'center',
         vertical: 'middle',
       };
       cell.border = {
@@ -449,17 +611,23 @@ export class ExportJobService {
 
   private writeDataRow(
     worksheet: any,
+    formats: ResolvedColumnFormat[],
     values: (string | number | null)[],
     rowNumber: number,
   ): void {
     const row = worksheet.getRow(rowNumber);
     values.forEach((value, index) => {
+      const format = formats[index] ?? DEFAULT_COLUMN_FORMAT;
       const cell = row.getCell(index + 1);
-      cell.value = value ?? '';
+      // Konversi ke angka hanya untuk kolom yang memang diformat sebagai
+      // angka — kolom teks seperti nomor bukti ('0012') harus tetap apa adanya.
+      cell.value = format.numFmt ? toNumericCell(value) : (value ?? '');
+      if (format.numFmt) cell.numFmt = format.numFmt;
       cell.font = { name: 'Tahoma', size: 10 };
       cell.alignment = {
-        horizontal: index === 0 ? 'right' : 'left',
+        horizontal: format.align,
         vertical: 'middle',
+        wrapText: format.wrapText,
       };
       cell.border = {
         top: { style: 'thin' },
