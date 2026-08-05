@@ -653,7 +653,9 @@ export class UtilsService {
     };
   }
   async fetchUserRolesAndUserAcl(
-    userId: number,
+    // Sama seperti fetchUserRolesAndAbilities: user id kini varchar (uuid v7),
+    // jadi nilainya dipakai apa adanya di WHERE — jangan dipaksa ke number.
+    userId: string | number,
     trx: any,
   ): Promise<UserRoleAbilities> {
     const roles = await trx('userrole')

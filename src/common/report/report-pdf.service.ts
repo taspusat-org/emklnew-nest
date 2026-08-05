@@ -60,9 +60,15 @@ export class ReportPdfService {
    * Template lama (mis. LaporanGroupbiayaextra.mrt) mereferensikan kolom
    * lewat `Data.data`, jadi nama tabel default sengaja huruf kecil `data`.
    * Mengubahnya akan membuat PDF ter-render kosong.
+   *
+   * `data` boleh berupa array (template satu datasource — namanya diambil dari
+   * `tableName`) ATAU objek `{ namaTabel: baris[] }` untuk template yang
+   * memakai lebih dari satu datasource. LaporanHutang.mrt misalnya membaca
+   * `Data.data` (header bukti) DAN `Data.detail` (rincian coa/nominal); tanpa
+   * key `detail` band rinciannya ter-render kosong.
    */
   async generatePdf(
-    rows: any[],
+    data: any[] | Record<string, any[]>,
     mrtName: string,
     tableName = 'data',
   ): Promise<Buffer> {
@@ -92,18 +98,23 @@ export class ReportPdfService {
 
     const Stimulsoft = this.getStimulsoft();
 
+    const tables = Array.isArray(data) ? { [tableName]: data } : data;
+
     const report = new Stimulsoft.Report.StiReport();
     report.loadFile(templatePath);
 
     const dataSet = new Stimulsoft.System.Data.DataSet('Data');
-    dataSet.readJson(JSON.stringify({ [tableName]: rows }));
+    dataSet.readJson(JSON.stringify(tables));
 
     report.dictionary.dataSources.clear();
     report.regData('Data', '', dataSet);
     report.dictionary.synchronize();
 
+    const ringkasan = Object.entries(tables)
+      .map(([nama, baris]) => `${nama}=${baris?.length ?? 0}`)
+      .join(', ');
     this.logger.log(
-      `[generatePdf] render → template=${safeName}, table=${tableName}, rows=${rows.length}`,
+      `[generatePdf] render → template=${safeName}, tables: ${ringkasan}`,
     );
 
     return new Promise<Buffer>((resolve, reject) => {
