@@ -1022,7 +1022,6 @@ export class BiayaExtraHeaderService {
       'UPDATED AT',
     ],
     // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
-    columnWidths: [6, 25, 15, 20, 40, 25, 20, 25, 25],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.nobukti,

@@ -606,7 +606,6 @@ export class AlatbayarService {
       'STATUS AKTIF',
     ],
     // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
-    columnWidths: [6, 30, 40, 22, 18, 18, 15],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.nama,

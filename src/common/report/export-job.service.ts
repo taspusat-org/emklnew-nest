@@ -15,6 +15,23 @@ const PROGRESS_ROW_INTERVAL = 5_000;
 const PROGRESS_TIME_INTERVAL_MS = 400;
 
 /**
+ * Lebar kolom pada xlsx ditulis di elemen `<cols>`, yang HARUS berada sebelum
+ * `<sheetData>`. Pada mode streaming ExcelJS menulis `<cols>` tepat saat baris
+ * pertama di-flush, jadi lebar kolom hanya bisa diukur dari baris yang sudah
+ * dilihat sebelum itu. Karena itu sejumlah baris pertama ditahan dulu di memori
+ * untuk diukur, baru sisanya mengalir seperti biasa. Jumlahnya sengaja kecil
+ * supaya pemakaian memori tetap datar walau datanya jutaan baris.
+ */
+const WIDTH_SAMPLE_ROWS = 500;
+
+/** Batas lebar kolom hasil auto-fit (satuan ≈ jumlah karakter). */
+const MIN_COLUMN_WIDTH = 6;
+const MAX_COLUMN_WIDTH = 60;
+
+/** Kelonggaran supaya teks tidak menempel ke garis border sel. */
+const COLUMN_WIDTH_PADDING = 2;
+
+/**
  * Label tahap yang tampil di toast. Sengaja hanya menyebut tahapannya, tanpa
  * angka baris — hitungan detailnya sudah terwakili oleh progress bar.
  */
@@ -31,8 +48,12 @@ export interface ExportSheetDefinition {
   /** Baris judul di atas header (di-merge selebar kolom header). */
   titleLines?: string[];
   headers: string[];
-  /** Lebar kolom. Wajib diisi manual: mode streaming tidak bisa auto-fit. */
-  columnWidths?: number[];
+  /**
+   * Lebar kolom tetap. Boleh dikosongkan seluruhnya, atau per kolom (`null` /
+   * `undefined`) — kolom yang tidak diisi lebarnya mengikuti isi data
+   * (auto-fit). Isi hanya bila memang ingin menguncinya di angka tertentu.
+   */
+  columnWidths?: (number | null | undefined)[];
   /** Memetakan satu baris database menjadi nilai-nilai sel. */
   mapRow: (row: any, rowNumber: number) => (string | number | null)[];
 }
@@ -220,11 +241,30 @@ export class ExportJobService {
       });
 
       const worksheet = workbook.addWorksheet(sheet.sheetName ?? 'Data Export');
-      this.writeHeader(worksheet, sheet);
 
       const rowStream = options.streamRows();
       let lastEmitAt = Date.now();
       let lastEmitRow = 0;
+
+      // Header sengaja BELUM ditulis: lebar kolom baru bisa dihitung setelah
+      // sebagian isi terlihat, dan setelah baris pertama di-flush lebarnya
+      // tidak bisa diubah lagi.
+      const widths = this.createWidthMeasurer(sheet);
+      const pending: (string | number | null)[][] = [];
+      let headerWritten = false;
+      let flushed = 0;
+
+      const flushPending = () => {
+        if (!headerWritten) {
+          this.writeHeader(worksheet, sheet, widths.result());
+          headerWritten = true;
+        }
+        for (const values of pending) {
+          flushed += 1;
+          this.writeDataRow(worksheet, values, headerOffset + flushed);
+        }
+        pending.length = 0;
+      };
 
       try {
         for await (const row of rowStream as AsyncIterable<any>) {
@@ -234,11 +274,16 @@ export class ExportJobService {
           }
 
           written += 1;
-          this.writeDataRow(
-            worksheet,
-            sheet.mapRow(row, written),
-            headerOffset + written,
-          );
+          const values = sheet.mapRow(row, written);
+
+          if (headerWritten) {
+            flushed += 1;
+            this.writeDataRow(worksheet, values, headerOffset + flushed);
+          } else {
+            widths.add(values);
+            pending.push(values);
+            if (pending.length >= WIDTH_SAMPLE_ROWS) flushPending();
+          }
 
           const now = Date.now();
           if (
@@ -259,6 +304,10 @@ export class ExportJobService {
       } finally {
         if (queryTicker) clearInterval(queryTicker);
       }
+
+      // Data lebih sedikit dari ukuran sample: header + sisa baris belum
+      // sempat ditulis di dalam loop.
+      flushPending();
 
       this.gateway.emitProgress(jobId, {
         step: STEP.finalizing,
@@ -305,10 +354,55 @@ export class ExportJobService {
     }
   }
 
-  private writeHeader(worksheet: any, sheet: ExportSheetDefinition): void {
+  /**
+   * Mengukur lebar tiap kolom dari teks terpanjang yang pernah dilihat —
+   * dimulai dari judul kolomnya sendiri, lalu ditambah baris data yang
+   * di-sample. Baris judul laporan sengaja tidak ikut diukur karena sel-nya
+   * di-merge selebar tabel; kalau ikut, kolom pertama jadi melar sendiri.
+   */
+  private createWidthMeasurer(sheet: ExportSheetDefinition) {
+    const fixed = sheet.columnWidths ?? [];
+    const longest = sheet.headers.map((header) => String(header ?? '').length);
+
+    return {
+      add(values: (string | number | null)[]): void {
+        values.forEach((value, index) => {
+          if (index >= longest.length) return;
+          const text = value === null || value === undefined ? '' : String(value);
+          // Sel multi-baris: yang menentukan lebar hanya penggal terpanjang.
+          for (const line of text.split('\n')) {
+            longest[index] = Math.max(longest[index], line.length);
+          }
+        });
+      },
+      result(): number[] {
+        return longest.map((length, index) => {
+          const override = fixed[index];
+          if (typeof override === 'number') return override;
+          return Math.min(
+            MAX_COLUMN_WIDTH,
+            Math.max(MIN_COLUMN_WIDTH, length + COLUMN_WIDTH_PADDING),
+          );
+        });
+      },
+    };
+  }
+
+  private writeHeader(
+    worksheet: any,
+    sheet: ExportSheetDefinition,
+    columnWidths: number[],
+  ): void {
     const columnCount = sheet.headers.length;
     const lastColumn = String.fromCharCode(64 + columnCount); // 7 kolom -> 'G'
     const titleLines = sheet.titleLines ?? [];
+
+    // WAJIB sebelum baris mana pun di-commit. ExcelJS menulis elemen `<cols>`
+    // sekali saja, tepat saat baris pertama di-flush ke stream — lebar yang
+    // diset setelah itu tidak pernah sampai ke file.
+    columnWidths.forEach((width, index) => {
+      worksheet.getColumn(index + 1).width = width;
+    });
 
     titleLines.forEach((line, index) => {
       const row = worksheet.getRow(index + 1);
@@ -351,14 +445,6 @@ export class ExportJobService {
       };
     });
     headerRow.commit();
-
-    // Lebar kolom harus ditentukan di depan: mode streaming tidak bisa
-    // mengukur ulang isi sel setelah barisnya ditulis.
-    if (sheet.columnWidths?.length) {
-      sheet.columnWidths.forEach((width, index) => {
-        worksheet.getColumn(index + 1).width = width;
-      });
-    }
   }
 
   private writeDataRow(
