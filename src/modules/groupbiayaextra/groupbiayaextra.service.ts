@@ -606,8 +606,7 @@ export class GroupbiayaextraService {
       'Data Export',
     ],
     headers: ['NO.', 'KETERANGAN', 'STATUS AKTIF'],
-    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
-    columnWidths: [10, 60, 30],
+    columnWidths: [5, 20, 25],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.keterangan,
@@ -689,7 +688,7 @@ export class GroupbiayaextraService {
       });
 
     worksheet.getColumn(1).width = 6;
-    worksheet.getColumn(4).width = 20;
+    worksheet.getColumn(4).width = 120;
 
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {

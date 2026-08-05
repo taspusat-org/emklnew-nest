@@ -857,7 +857,6 @@ export class MenuService {
       'UPDATED AT',
     ],
     // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
-    columnWidths: [10, 30, 30, 30, 20, 10, 15, 25, 25],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.title,
