@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { CreateScheduleKapalDto } from './dto/create-schedule-kapal.dto';
 // import { UpdateScheduleKapalDto } from './dto/update-schedule-kapal.dto';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, formatDateToSQL, UtilsService } from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { GlobalService } from '../global/global.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
@@ -23,7 +23,7 @@ export class ScheduleKapalService {
     private readonly redisService: RedisService,
     private readonly globalService: GlobalService,
     private readonly logTrailService: LogtrailService,
-  ) {}
+  ) { }
 
   async create(createData: any, trx: any) {
     try {
@@ -228,7 +228,11 @@ export class ScheduleKapalService {
             } else if (key === 'asalkapal_nama') {
               query.andWhere(`e.keterangan`, 'ilike', `%${sanitizedValue}%`);
             } else {
-              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+              if (key === 'tglberangkat') {
+                query.andWhere('u.tglberangkat', value);
+              } else {
+                query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+              }
             }
           }
         }

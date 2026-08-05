@@ -12,7 +12,7 @@ import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, formatDateToSQL, UtilsService } from 'src/utils/utils.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { ScheduleDetailService } from '../schedule-detail/schedule-detail.service';
 
@@ -29,7 +29,7 @@ export class ScheduleHeaderService {
     private readonly logTrailService: LogtrailService,
     private readonly runningNumberService: RunningNumberService,
     private readonly scheduleDetailService: ScheduleDetailService,
-  ) {}
+  ) { }
 
   async create(data: any, trx: any) {
     try {

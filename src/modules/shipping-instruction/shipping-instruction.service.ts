@@ -24,7 +24,11 @@ import { dbMssql } from 'src/common/utils/db';
 
 @Injectable()
 export class ShippingInstructionService {
+  // tableName = target TULIS (insert/update/delete). viewName = sumber BACA,
+  // sudah memuat kolom turunan hasil join (pelayaran_nama, kapal_nama,
+  // tujuankapal_nama, voyberangkat, tglberangkat). Pola sama dgn alatbayar.
   private readonly tableName: string = 'shippinginstructionheader';
+  private readonly viewName: string = 'vshippinginstructionheader';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -35,7 +39,7 @@ export class ShippingInstructionService {
     private readonly runningNumberService: RunningNumberService,
     private readonly shippingInstructionDetailService: ShippingInstructionDetailService,
     private readonly shippingInstructionDetailRincianService: ShippingInstructionDetailRincianService,
-  ) {}
+  ) { }
 
   async create(data: any, trx: any) {
     try {
@@ -199,6 +203,127 @@ export class ShippingInstructionService {
     }
   }
 
+  /**
+   * Kirim rentang tanggal ke view lewat session context Postgres.
+   *
+   * vshippinginstructionheader membacanya via current_setting('tas.si_*', true)
+   * dan menyaring di dalam view, jadi filter tanggal TIDAK lagi dirakit di
+   * applyFilters. is_local=true → GUC otomatis hilang begitu transaksi selesai
+   * sehingga tidak bocor ke request lain lewat connection pool.
+   *
+   * Selalu di-set (termasuk ke '') supaya tidak ada nilai sisa yang terbawa,
+   * sama seperti PengeluaranheaderService.setDateRangeSessionContext.
+   */
+  private async setDateRangeSessionContext(
+    trx: any,
+    filters: Record<string, any> | undefined,
+  ): Promise<void> {
+    const tglDari =
+      filters?.tglDari && filters?.tglSampai
+        ? formatDateToSQL(String(filters.tglDari))
+        : '';
+    const tglSampai =
+      filters?.tglDari && filters?.tglSampai
+        ? formatDateToSQL(String(filters.tglSampai))
+        : '';
+
+    await trx.raw(`SELECT set_config('tas.si_tgldari', ?, true)`, [
+      tglDari ? String(tglDari) : '',
+    ]);
+    await trx.raw(`SELECT set_config('tas.si_tglsampai', ?, true)`, [
+      tglSampai ? String(tglSampai) : '',
+    ]);
+  }
+
+  /**
+   * Filter + search untuk vshippinginstructionheader. Dipakai BERSAMA oleh query
+   * count dan query data (pola applyFilters di AlatbayarService) supaya total
+   * halaman tidak pernah lagi beda dengan isi grid — versi lama menghitung
+   * `count(*)` tanpa filter apa pun, jadi totalPages selalu memakai jumlah
+   * seluruh tabel.
+   *
+   * tglDari/tglSampai TIDAK ditangani di sini — keduanya sudah disaring di dalam
+   * view lewat session context (setDateRangeSessionContext).
+   *
+   * Semua referensi kolom memakai alias `u` = view, jadi tidak ada lagi kolom
+   * dari tabel join (pel.nama / kapal.nama / tujuankapal.nama); kolom turunan
+   * sudah ikut di view sebagai *_nama.
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    const excludeSearchKeys = ['tglDari', 'tglSampai'];
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    // ilike, bukan like: data disimpan uppercase sedangkan user mengetik apa
+    // saja di kotak filter grid — dengan `like` (case-sensitive di Postgres)
+    // pencarian huruf kecil tidak pernah ketemu. Sama seperti alatbayar.
+    // Escape '[' ala MSSQL juga dibuang; di Postgres '[' bukan metakarakter LIKE
+    // sehingga '[[]' justru membuat pencarian yang memuat '[' gagal.
+    if (search) {
+      const sanitized = String(search).trim();
+      qb.where((inner: any) => {
+        searchFields.forEach((field) => {
+          if (field === 'tglbukti') {
+            inner.orWhereRaw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') ilike ?", [
+              `%${sanitized}%`,
+            ]);
+          } else if (field === 'tglberangkat') {
+            inner.orWhereRaw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') ilike ?", [
+              `%${sanitized}%`,
+            ]);
+          } else if (field === 'created_at' || field === 'updated_at') {
+            inner.orWhereRaw(
+              `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') ilike ?`,
+              [`%${sanitized}%`],
+            );
+          } else if (field === 'pelayaran_text') {
+            inner.orWhere('u.pelayaran_nama', 'ilike', `%${sanitized}%`);
+          } else if (field === 'kapal_text') {
+            inner.orWhere('u.kapal_nama', 'ilike', `%${sanitized}%`);
+          } else if (field === 'tujuankapal_text') {
+            inner.orWhere('u.tujuankapal_nama', 'ilike', `%${sanitized}%`);
+          } else {
+            inner.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const value = String(rawValue);
+      if (key === 'tglbukti') {
+        qb.andWhereRaw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') ilike ?", [
+          `%${value}%`,
+        ]);
+      } else if (key === 'tglberangkat') {
+        qb.andWhereRaw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') ilike ?", [
+          `%${value}%`,
+        ]);
+      } else if (key === 'created_at' || key === 'updated_at') {
+        qb.andWhereRaw(`TO_CHAR(u.${key}, 'DD-MM-YYYY HH24:MI:SS') ilike ?`, [
+          `%${value}%`,
+        ]);
+      } else if (key === 'pelayaran_text') {
+        qb.andWhere('u.pelayaran_nama', 'ilike', `%${value}%`);
+      } else if (key === 'kapal_text') {
+        qb.andWhere('u.kapal_nama', 'ilike', `%${value}%`);
+      } else if (key === 'tujuankapal_text') {
+        qb.andWhere('u.tujuankapal_nama', 'ilike', `%${value}%`);
+      } else {
+        qb.andWhere(`u.${key}`, 'ilike', `%${value}%`);
+      }
+    });
+  }
+
   async findAll(
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
     trx: any,
@@ -208,155 +333,71 @@ export class ShippingInstructionService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
-        .select([
-          'u.id',
-          'u.nobukti',
-          trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
-          'u.schedule_id',
-          'u.modifiedby',
-          trx.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          trx.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-          'p.voyberangkat',
-          'p.pelayaran_id',
-          'pel.nama as pelayaran_nama',
-          'p.kapal_id',
-          'kapal.nama as kapal_nama',
-          trx.raw("TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
-          'p.tujuankapal_id',
-          'tujuankapal.nama as tujuankapal_nama',
-        ])
-        .leftJoin('schedulekapal as p', 'u.schedule_id', 'p.id')
-        .leftJoin('pelayaran as pel', 'p.pelayaran_id', 'pel.id')
-        .leftJoin('kapal', 'p.kapal_id', 'kapal.id')
-        .leftJoin('tujuankapal', 'p.tujuankapal_id', 'tujuankapal.id');
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      if (filters?.tglDari && filters?.tglSampai) {
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
+      // HARUS sebelum query apa pun ke view: rentang tanggal disaring di dalam
+      // view lewat GUC ini. Kalau tidak di-set, view memulangkan semua periode.
+      await this.setDateRangeSessionContext(trx, filters);
 
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
-        ]);
-      }
+      // Count DARI VIEW, bukan tabel base seperti di alatbayar: filter di sini
+      // ikut menyentuh kolom hasil join (pelayaran_text/kapal_text/
+      // tujuankapal_text/voyberangkat/tglberangkat) yang tidak ada di
+      // shippinginstructionheader. LEFT JOIN tidak menambah baris, jadi
+      // count(view) == count(base) untuk filter yang sama.
+      const countResult = await trx(`${this.viewName} as u`)
+        .count('u.id as total')
+        .modify((qb: any) => this.applyFilters(qb, filters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
-      const excludeSearchKeys = ['tglDari', 'tglSampai'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      const query = trx(`${this.viewName} as u`).select([
+        'u.id',
+        'u.nobukti',
+        trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        'u.schedule_id',
+        'u.modifiedby',
+        trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+        'u.voyberangkat',
+        'u.pelayaran_id',
+        'u.pelayaran_nama',
+        'u.kapal_id',
+        'u.kapal_nama',
+        trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+        'u.tujuankapal_id',
+        'u.tujuankapal_nama',
+      ]);
 
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'voyberangkat') {
-              qb.orWhere(`p.voyberangkat`, 'like', `%${sanitized}%`);
-            } else if (field === 'pelayaran_text') {
-              qb.orWhere(`pel.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'kapal_text') {
-              qb.orWhere(`kapal.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'tglbukti') {
-              qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'tglberangkat') {
-              qb.orWhereRaw(`TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else if (field === 'tujuankapal_text') {
-              qb.orWhere(`tujuankapal.nama`, 'like', `%${sanitized}%`);
-            } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-            }
-          });
-        });
-      }
+      query.modify((qb: any) => this.applyFilters(qb, filters, search));
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue;
-          }
-
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
-                [key, `%${sanitizedValue}%`],
-              );
-            } else if (key === 'tglbukti') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'tglberangkat') {
-              query.andWhereRaw(
-                "TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?",
-                [`%${sanitizedValue}%`],
-              );
-            } else if (key === 'voyberangkat') {
-              query.andWhere(`p.voyberangkat`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'pelayaran_text') {
-              query.andWhere(`pel.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'kapal_text') {
-              query.andWhere(`kapal.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'tujuankapal_text') {
-              query.andWhere(`tujuankapal.nama`, 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
+      // Kolom *_text di grid diurutkan berdasarkan teksnya, bukan id-nya.
+      if (sortBy === 'pelayaran_text') {
+        query.orderBy('u.pelayaran_nama', sortDirection);
+      } else if (sortBy === 'kapal_text') {
+        query.orderBy('u.kapal_nama', sortDirection);
+      } else if (sortBy === 'tujuankapal_text') {
+        query.orderBy('u.tujuankapal_nama', sortDirection);
+      } else {
+        query.orderBy(`u.${sortBy}`, sortDirection);
       }
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.limit(limit).offset((page - 1) * limit);
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'voyberangkat') {
-          query.orderBy('p.voyberangkat', sort.sortDirection);
-        } else if (sort?.sortBy === 'pelayaran_text') {
-          query.orderBy('pel.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'kapal_text') {
-          query.orderBy('kapal.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'tglberangkat') {
-          query.orderBy('p.tglberangkat', sort.sortDirection);
-        } else if (sort?.sortBy === 'tujuankapal_text') {
-          query.orderBy('tujuankapal.nama', sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
       const data = await query;
-      console.log('data', data);
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
           currentPage: Number(page),
-          totalPages: totalPages,
+          totalPages,
           totalItems: total,
           itemsPerPage: limit > 0 ? limit : total,
         },
@@ -369,7 +410,15 @@ export class ShippingInstructionService {
 
   async findOne(id: string, trx: any) {
     try {
-      const query = trx(`${this.tableName} as u`)
+      // Kosongkan dulu rentang tanggal di session context. findOne mencari SATU
+      // record by id dan tidak boleh ikut tersaring periode — kalau transaksi ini
+      // sebelumnya sempat memanggil findAll (mis. lewat create/update), GUC-nya
+      // masih terisi dan record di luar periode itu akan balik kosong.
+      await this.setDateRangeSessionContext(trx, undefined);
+
+      // Baca dari view juga — kolom tglberangkat/kapal_id/kapal_nama sudah ada
+      // di sana, jadi dua LEFT JOIN di sini tidak diperlukan lagi.
+      const query = trx(`${this.viewName} as u`)
         .select([
           'u.id',
           'u.nobukti',
@@ -382,12 +431,10 @@ export class ShippingInstructionService {
           trx.raw(
             "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
           ),
-          trx.raw("TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
-          'p.kapal_id',
-          'kapal.nama as kapal_nama',
+          trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+          'u.kapal_id',
+          'u.kapal_nama',
         ])
-        .leftJoin('schedulekapal as p', 'u.schedule_id', 'p.id')
-        .leftJoin('kapal', 'p.kapal_id', 'kapal.id')
         .where('u.id', id);
 
       const data = await query;

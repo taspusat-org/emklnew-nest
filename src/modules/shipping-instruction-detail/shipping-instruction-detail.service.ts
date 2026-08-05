@@ -14,7 +14,11 @@ import { dbMssql } from 'src/common/utils/db';
 
 @Injectable()
 export class ShippingInstructionDetailService {
+  // tableName untuk TULIS, viewName untuk BACA (pola alatbayar). View sudah
+  // memuat statuspisahbl_nama/_memo, emkllain_nama, containerpelayaran_nama,
+  // tujuankapal_nama, daftarbl_nama.
   private readonly tableName: string = 'shippinginstructiondetail';
+  private readonly viewName: string = 'vshippinginstructiondetail';
 
   constructor(
     private readonly utilsService: UtilsService,
@@ -23,6 +27,31 @@ export class ShippingInstructionDetailService {
     private readonly shippingInstructionDetailRincianService: ShippingInstructionDetailRincianService,
   ) {}
 
+  /**
+   * Pola temp table dipertahankan seperti versi asli — hanya bagian yang memang
+   * sintaks SQL Server yang diganti padanan Postgres:
+   *
+   *  1. OPENJSON(?) + jsonExtract  ->  jsonb_populate_recordset(null::<tabel>, ?::jsonb)
+   *     Dipilih ketimbang `value ->> 'kolom'` karena ->> SELALU memulangkan text,
+   *     sedangkan temp table mewarisi tipe kolom tabel asli — text masuk ke kolom
+   *     non-text ditolak PG. jsonb_populate_recordset memetakan JSON ke ROW TYPE
+   *     tabel, jadi tipe tiap kolom otomatis benar dan key yang tidak ada -> NULL
+   *     (persis semantik OPENJSON WITH (...)).
+   *
+   *  2. .join(temp).update(...)  ->  raw `UPDATE ... FROM temp WHERE ...`
+   *     WAJIB raw: knex-pg MEMBUANG join pada .update() tanpa error —
+   *     `update "sid" set "nobukti" = tmp.nobukti` saja, tanpa FROM/WHERE.
+   *
+   *  3. .leftJoin(temp).whereNull(temp.id).del()  ->  whereNotExists(...)
+   *     WAJIB diganti: knex-pg menerjemahkannya jadi `delete ... using "temp"
+   *     where "temp"."id" is null and "sid"."id" = "temp"."id"`. USING itu inner
+   *     join, jadi `temp.id is null` tidak pernah benar — hasilnya nol baris
+   *     terhapus, diam-diam.
+   *
+   *  4. Nama temp TANPA prefiks '#'. createTempTable() menormalkan '##temp_x'
+   *     menjadi 'temp_x' saat CREATE, jadi caller yang tetap memakai '##temp_x'
+   *     akan menunjuk tabel yang tidak ada.
+   */
   async create(details: any, id: any, trx: any) {
     try {
       const allRincian: any[] = []; // Ambil semua data rincian di luar mapping utama
@@ -30,7 +59,7 @@ export class ShippingInstructionDetailService {
       const logData: any[] = [];
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -101,17 +130,16 @@ export class ShippingInstructionDetailService {
             )
             .first();
 
+          // `?.` — baris detail baru belum punya nobukti tersimpan, jadi first()
+          // bisa undefined dan versi lama melempar TypeError di sini.
           detailsWithoutRincian.statuspisahbl =
-            getDataStatusPisahBl.statuspisahbl;
+            getDataStatusPisahBl?.statuspisahbl ?? 15;
         }
 
         if (data.shippinginstructiondetail_nobukti === '') {
           // Cek ada payload nobukti detail atau enggak, kalo gada buat
-          const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
           const getcabang = await trx('parameter')
-            .select(
-              trx.raw(`JSON_VALUE(${memoExpr}, '$.CABANG_ID') AS cabang_id`),
-            )
+            .select(trx.raw(`(memo::jsonb ->> 'CABANG_ID') AS cabang_id`))
             .where('grp', 'CABANG')
             .first();
 
@@ -144,29 +172,39 @@ export class ShippingInstructionDetailService {
           allRincian.push(tempRincian);
         }
 
-        if (detailsWithoutRincian.id) {
-          const existingData = await trx(this.tableName) // Check if the data has an id (existing record)
+        // Baris dianggap LAMA hanya bila id-nya benar-benar ada di DB. Grid
+        // mengirim id sementara (index baris) untuk baris hasil PROSES, jadi
+        // `if (id)` saja tidak cukup.
+        let existingData: any = null;
+        if (
+          detailsWithoutRincian.id !== null &&
+          detailsWithoutRincian.id !== undefined &&
+          String(detailsWithoutRincian.id) !== '' &&
+          String(detailsWithoutRincian.id) !== '0'
+        ) {
+          existingData = await trx(this.tableName)
             .where('id', detailsWithoutRincian.id)
             .first();
+        }
 
-          if (existingData) {
-            const createdAt = {
-              created_at: existingData.created_at,
-              updated_at: existingData.updated_at,
-            };
-            Object.assign(detailsWithoutRincian, createdAt);
+        if (existingData) {
+          const createdAt = {
+            created_at: existingData.created_at,
+            updated_at: existingData.updated_at,
+          };
+          Object.assign(detailsWithoutRincian, createdAt);
 
-            if (
-              this.utilsService.hasChanges(detailsWithoutRincian, existingData)
-            ) {
-              detailsWithoutRincian.updated_at = time;
-              isDataChanged = true;
-              detailsWithoutRincian.aksi = 'UPDATE';
-            }
+          if (
+            this.utilsService.hasChanges(detailsWithoutRincian, existingData)
+          ) {
+            detailsWithoutRincian.updated_at = time;
+            isDataChanged = true;
+            detailsWithoutRincian.aksi = 'UPDATE';
           }
         } else {
+          // Baris baru: id dipaksa '0' supaya terjaring insertedDataQuery.
+          detailsWithoutRincian.id = 0;
           const newTimestamps = {
-            // New record: Set timestamps
             created_at: time,
             updated_at: time,
           };
@@ -189,58 +227,42 @@ export class ShippingInstructionDetailService {
 
       await trx.raw(tableTemp);
 
-      // const processedData = mainDataToInsert.map((item: any) => ({
-      //   ...item,
-      //   shippinginstruction_id: item.shippinginstruction_id ?? id,
-      //   // statuspisahbl: 15,
-      // }));
-
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
+      // Padanan OPENJSON (lihat catatan 1 di atas).
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
-
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          tglbukti: trx.raw(`${tempTableName}.tglbukti`),
-          shippinginstructiondetail_nobukti: trx.raw(
-            `${tempTableName}.shippinginstructiondetail_nobukti`,
-          ),
-          shippinginstruction_id: trx.raw(
-            `${tempTableName}.shippinginstruction_id`,
-          ),
-          asalpelabuhan: trx.raw(`${tempTableName}.asalpelabuhan`),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          consignee: trx.raw(`${tempTableName}.consignee`),
-          shipper: trx.raw(`${tempTableName}.shipper`),
-          comodity: trx.raw(`${tempTableName}.comodity`),
-          notifyparty: trx.raw(`${tempTableName}.notifyparty`),
-          totalgw: trx.raw(`${tempTableName}.totalgw`),
-          statuspisahbl: trx.raw(`${tempTableName}.statuspisahbl`),
-          emkl_id: trx.raw(`${tempTableName}.emkl_id`),
-          containerpelayaran_id: trx.raw(
-            `${tempTableName}.containerpelayaran_id`,
-          ),
-          tujuankapal_id: trx.raw(`${tempTableName}.tujuankapal_id`),
-          daftarbl_id: trx.raw(`${tempTableName}.daftarbl_id`),
-          statusformat: trx.raw(`${tempTableName}.statusformat`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*');
+      // Padanan UPDATE ... JOIN (lihat catatan 2 di atas).
+      const updatedResult = await trx.raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           tglbukti = tmp.tglbukti,
+           shippinginstructiondetail_nobukti = tmp.shippinginstructiondetail_nobukti,
+           shippinginstruction_id = tmp.shippinginstruction_id,
+           asalpelabuhan = tmp.asalpelabuhan,
+           keterangan = tmp.keterangan,
+           consignee = tmp.consignee,
+           shipper = tmp.shipper,
+           comodity = tmp.comodity,
+           notifyparty = tmp.notifyparty,
+           totalgw = tmp.totalgw,
+           statuspisahbl = tmp.statuspisahbl,
+           emkl_id = tmp.emkl_id,
+           containerpelayaran_id = tmp.containerpelayaran_id,
+           tujuankapal_id = tmp.tujuankapal_id,
+           daftarbl_id = tmp.daftarbl_id,
+           statusformat = tmp.statusformat,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      );
+      const updatedData = updatedResult?.rows ?? [];
 
       const insertedDataQuery = await trx(tempTableName)
         .select([
@@ -267,8 +289,16 @@ export class ShippingInstructionDetailService {
         ])
         .where(`${tempTableName}.id`, '0');
 
+      // Padanan leftJoin + whereNull (lihat catatan 3 di atas).
+      const notInTemp = (qb: any) => {
+        qb.whereNotExists(function (this: any) {
+          this.select(trx.raw('1'))
+            .from(tempTableName)
+            .whereRaw(`"${tempTableName}".id = u.id`);
+        });
+      };
+
       const getDeleted = await trx(`${this.tableName} as u`)
-        .leftJoin(`${tempTableName}`, 'u.id', `${tempTableName}.id`)
         .select(
           'u.nobukti',
           'u.tglbukti',
@@ -291,29 +321,19 @@ export class ShippingInstructionDetailService {
           'u.created_at',
           'u.updated_at',
         )
-        .whereNull(`${tempTableName}.id`)
-        .where('u.shippinginstruction_id', id);
+        .where('u.shippinginstruction_id', id)
+        .modify(notInTemp);
 
-      let pushToLog: any[] = [];
-      if (getDeleted.length > 0) {
-        pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-      }
-
-      const pushToLogWithAction = pushToLog.map((entry) => ({
+      const pushToLogWithAction = getDeleted.map((entry: any) => ({
         ...entry,
         aksi: 'DELETE',
       }));
 
       const finalData = logData.concat(pushToLogWithAction);
 
-      const deletedData = await trx(this.tableName)
-        .leftJoin(
-          `${tempTableName}`,
-          `${this.tableName}.id`,
-          `${tempTableName}.id`,
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where(`${this.tableName}.shippinginstruction_id`, id)
+      await trx(`${this.tableName} as u`)
+        .where('u.shippinginstruction_id', id)
+        .modify(notInTemp)
         .del();
 
       // Insert new records
@@ -328,28 +348,23 @@ export class ShippingInstructionDetailService {
       const allDetails = [...(updatedData || []), ...(insertedData || [])];
 
       for (let i = 0; i < allRincian.length; i++) {
-        // Map rincian dengan ID detail yang benar
         const rincianItem = allRincian[i];
 
-        // Panggil service rincian jika ada data rincian
         if (rincianItem.rincian && rincianItem.rincian.length > 0) {
-          // Tambahkan keperluan data lainnya ke setiap rincian
           const fixDataRincian = rincianItem.rincian.map((r: any) => ({
             ...r,
-            shippinginstructiondetail_id: allDetails[i].id,
+            shippinginstructiondetail_id: allDetails[i]?.id,
             shippinginstructiondetail_nobukti:
-              allDetails[i].shippinginstructiondetail_nobukti,
+              allDetails[i]?.shippinginstructiondetail_nobukti,
           }));
 
-          const test =
-            await this.shippingInstructionDetailRincianService.create(
-              fixDataRincian,
-              allDetails[i].id,
-              trx,
-            );
+          await this.shippingInstructionDetailRincianService.create(
+            fixDataRincian,
+            allDetails[i]?.id,
+            trx,
+          );
         }
       }
-      console.log('insertedData', insertedData, 'updatedData', updatedData);
 
       await this.logTrailService.create(
         {
@@ -364,7 +379,6 @@ export class ShippingInstructionDetailService {
         trx,
       );
 
-      // throw new Error('test')
       return updatedData || insertedData;
     } catch (error) {
       console.error(
@@ -386,18 +400,18 @@ export class ShippingInstructionDetailService {
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
   ) {
     try {
-      // const { tglDari, tglSampai, ...filtersWithoutTanggal } = filters ?? {};
-
       let { page, limit } = pagination ?? {};
       page = page ?? 1;
       limit = limit ?? 0;
 
-      const query = trx(`${this.tableName} as p`)
+      // Baca dari VIEW: kolom *_nama & statuspisahbl_memo sudah diturunkan di
+      // sana, jadi 5 LEFT JOIN tidak lagi dirakit ulang tiap request. Alias `p`
+      // dipertahankan supaya seluruh referensi kolom di bawah tetap sama.
+      const query = trx(`${this.viewName} as p`)
         .select(
           'p.id',
           'p.shippinginstruction_id',
           'p.nobukti',
-          // trx.raw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY') as tglbukti"),
           'p.shippinginstructiondetail_nobukti',
           'p.asalpelabuhan',
           'p.keterangan',
@@ -411,46 +425,47 @@ export class ShippingInstructionDetailService {
           'p.containerpelayaran_id',
           'p.tujuankapal_id',
           'p.daftarbl_id',
-          'parameter.text as statuspisahbl_nama',
-          'parameter.memo as statuspisahbl_memo',
-          'emkl.nama as emkllain_nama',
-          'pel.nama as containerpelayaran_nama',
-          'tjk.nama as tujuankapal_nama',
-          'bl.nama as daftarbl_nama',
+          'p.statuspisahbl_nama',
+          'p.statuspisahbl_memo',
+          'p.emkllain_nama',
+          'p.containerpelayaran_nama',
+          'p.tujuankapal_nama',
+          'p.daftarbl_nama',
         )
-        .leftJoin('parameter', 'p.statuspisahbl', 'parameter.id')
-        .leftJoin('emkl', 'p.emkl_id', 'emkl.id')
-        .leftJoin('pelayaran as pel', 'p.containerpelayaran_id', 'pel.id')
-        .leftJoin('tujuankapal as tjk', 'p.tujuankapal_id', 'tjk.id')
-        .leftJoin('daftarbl as bl', 'p.daftarbl_id', 'bl.id')
-        .where('shippinginstruction_id', id);
+        .where('p.shippinginstruction_id', id);
 
       const excludeSearchKeys = ['statuspisahbl_text'];
       const searchFields = Object.keys(filters || {}).filter(
         (k) => !excludeSearchKeys.includes(k),
       );
 
+      // ilike + tanpa escape '[' ala MSSQL — lihat catatan yang sama di
+      // ShippingInstructionService.applyFilters.
       if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
+        const sanitized = String(search).trim();
 
-        query.where((qb) => {
+        query.where((qb: any) => {
           searchFields.forEach((field) => {
             if (field === 'detail_nobukti') {
               qb.orWhere(
-                `p.shippinginstructiondetail_nobukti`,
-                'like',
+                'p.shippinginstructiondetail_nobukti',
+                'ilike',
                 `%${sanitized}%`,
               );
             } else if (field === 'emkllain_text') {
-              qb.orWhere(`emkl.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere('p.emkllain_nama', 'ilike', `%${sanitized}%`);
             } else if (field === 'containerpelayaran_text') {
-              qb.orWhere(`pel.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere(
+                'p.containerpelayaran_nama',
+                'ilike',
+                `%${sanitized}%`,
+              );
             } else if (field === 'tujuankapal_text') {
-              qb.orWhere(`tjk.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere('p.tujuankapal_nama', 'ilike', `%${sanitized}%`);
             } else if (field === 'daftarbl_text') {
-              qb.orWhere(`bl.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere('p.daftarbl_nama', 'ilike', `%${sanitized}%`);
             } else {
-              qb.orWhere(`p.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`p.${field}`, 'ilike', `%${sanitized}%`);
             }
           });
         });
@@ -458,52 +473,67 @@ export class ShippingInstructionDetailService {
 
       if (filters) {
         for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            if (key === 'detail_nobukti') {
-              query.andWhere(
-                `p.shippinginstructiondetail_nobukti`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'emkllain_text') {
-              query.andWhere(`emkl.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'containerpelayaran_text') {
-              query.andWhere(`pel.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'tujuankapal_text') {
-              query.andWhere(`tjk.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'daftarbl_text') {
-              query.andWhere(`bl.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'statuspisahbl_text') {
-              query.andWhere('parameter.id', '=', sanitizedValue);
-            } else {
-              query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
-            }
+          if (value === null || value === undefined || value === '') continue;
+
+          const sanitizedValue = String(value);
+          if (key === 'detail_nobukti') {
+            query.andWhere(
+              'p.shippinginstructiondetail_nobukti',
+              'ilike',
+              `%${sanitizedValue}%`,
+            );
+          } else if (key === 'emkllain_text') {
+            query.andWhere('p.emkllain_nama', 'ilike', `%${sanitizedValue}%`);
+          } else if (key === 'containerpelayaran_text') {
+            query.andWhere(
+              'p.containerpelayaran_nama',
+              'ilike',
+              `%${sanitizedValue}%`,
+            );
+          } else if (key === 'tujuankapal_text') {
+            query.andWhere(
+              'p.tujuankapal_nama',
+              'ilike',
+              `%${sanitizedValue}%`,
+            );
+          } else if (key === 'daftarbl_text') {
+            query.andWhere('p.daftarbl_nama', 'ilike', `%${sanitizedValue}%`);
+          } else if (key === 'statuspisahbl_text') {
+            // FilterOptions mengirim id parameter, jadi cocokkan ke kolom id-nya
+            // (statuspisahbl), bukan ke teksnya.
+            query.andWhere('p.statuspisahbl', '=', sanitizedValue);
+          } else {
+            query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
           }
         }
       }
 
       if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'detail_nobukti') {
-          query.orderBy(
-            `p.shippinginstructiondetail_nobukti`,
-            sort.sortDirection,
-          );
-        } else if (sort?.sortBy === 'emkllain_text') {
-          query.orderBy(`emkl.nama`, sort.sortDirection);
-        } else if (sort?.sortBy === 'containerpelayaran_text') {
-          query.orderBy(`pel.nama`, sort.sortDirection);
-        } else if (sort?.sortBy === 'tujuankapal_text') {
-          query.orderBy(`tjk.nama`, sort.sortDirection);
-        } else if (sort?.sortBy === 'daftarbl_text') {
-          query.orderBy('bl.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'statuspisahbl_text') {
-          query.orderBy('parameter.text', sort.sortDirection);
+        const sortDirection =
+          String(sort.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+        if (sort.sortBy === 'detail_nobukti') {
+          query.orderBy('p.shippinginstructiondetail_nobukti', sortDirection);
+        } else if (sort.sortBy === 'emkllain_text') {
+          query.orderBy('p.emkllain_nama', sortDirection);
+        } else if (sort.sortBy === 'containerpelayaran_text') {
+          query.orderBy('p.containerpelayaran_nama', sortDirection);
+        } else if (sort.sortBy === 'tujuankapal_text') {
+          query.orderBy('p.tujuankapal_nama', sortDirection);
+        } else if (sort.sortBy === 'daftarbl_text') {
+          query.orderBy('p.daftarbl_nama', sortDirection);
+        } else if (sort.sortBy === 'statuspisahbl_text') {
+          query.orderBy('p.statuspisahbl_nama', sortDirection);
         } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
+          query.orderBy(`p.${sort.sortBy}`, sortDirection);
         }
       }
 
+      // SENGAJA tanpa limit/offset, sama seperti sebelumnya. FormShippingInstruction
+      // membangun payload simpan dari hasil endpoint ini, dan create() MENGHAPUS
+      // detail yang tidak ada di payload — begitu response dipotong per halaman,
+      // menyimpan akan membuang detail yang tidak ikut terkirim. Kalau nanti
+      // butuh paginasi, sediakan jalur terpisah untuk form (ambil semua).
       const result = await query;
 
       return {

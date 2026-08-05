@@ -3,7 +3,7 @@ import { isRecordExist } from 'src/utils/utils.service';
 
 const baseFields = {
   schedule_id: z
-    .number({
+    .string({
       required_error: 'SCHEDULE WAJIB DIISI',
     })
     .min(1, { message: 'SCHEDULE WAJIB DIISI' }),
@@ -13,7 +13,7 @@ const baseFields = {
     .nonempty({ message: 'VOY BERANGKAT WAJIB DIISI' }),
 
   kapal_id: z
-    .number({
+    .string({
       required_error: 'KAPAL WAJIB DIISI',
     })
     .min(1, { message: 'KAPAL WAJIB DIISI' }),
@@ -24,7 +24,7 @@ const baseFields = {
     .nonempty({ message: 'TGL BERANGKAT WAJIB DIISI' }),
 
   tujuankapal_id: z
-    .number({
+    .string({
       required_error: 'TUJUAN WAJIB DIISI',
     })
     .min(1, { message: 'TUJUAN WAJIB DIISI' }),

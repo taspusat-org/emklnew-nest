@@ -18,7 +18,7 @@ export class BlDetailService {
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
     private readonly blDetailRincianService: BlDetailRincianService,
-  ) {}
+  ) { }
 
   async create(details: any, id: any = 0, trx: any = null) {
     try {

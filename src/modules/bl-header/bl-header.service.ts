@@ -36,7 +36,8 @@ export class BlHeaderService {
     private readonly blDetailService: BlDetailService,
     private readonly blDetailRincianService: BlDetailRincianService,
     private readonly blDetailRincianBiayaService: BlDetailRincianBiayaService,
-  ) {}
+  ) { }
+  ) { }
 
   async create(data: any, trx: any) {
     try {
@@ -668,6 +669,7 @@ export class BlHeaderService {
           'u.id',
           'p.shippinginstruction_id',
         )
+        .leftJoin('emkl', 'p.emkl_id', 'emkl.id')
         .leftJoin('emkl', 'p.emkl_id', 'emkl.id')
         .leftJoin('pelayaran as pel', 'p.containerpelayaran_id', 'pel.id')
         .where('u.schedule_id', schedule_id);

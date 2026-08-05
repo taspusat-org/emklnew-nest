@@ -6,7 +6,7 @@ import {
   formatDateTimeToSQL,
   formatDateToSQL,
   UtilsService,
- } from 'src/utils/utils.service';
+} from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { ScheduleKapalService } from '../schedule-kapal/schedule-kapal.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -26,7 +26,7 @@ export class ScheduleDetailService {
   async create(details: any, id: any = 0, trx: any = null) {
     let insertedData = null;
     let data: any = null;
-    const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+    const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
     const time = this.utilsService.getTime();
     const logData: any[] = [];
     const mainDataToInsert: any[] = [];
@@ -189,39 +189,48 @@ export class ScheduleDetailService {
     ]);
 
     const openJson = await trx
-      .from(trx.raw('OPENJSON(?)', [jsonString]))
-      .jsonExtract(mappingData)
-      .as('jsonData');
-    //
+      .from(trx.raw(`jsonb_array_elements(?::jsonb) as jsonData`, [jsonString]))
+      .select(
+        mappingData.map(([_, path, key]) =>
+          trx.raw(`jsonData->>${trx.raw('?', [path.substring(2)])} as ??`, [
+            key,
+          ]),
+        ),
+      );
 
-    // Insert into temp table
     await trx(tempTableName).insert(openJson);
 
-    const updatedData = await trx('scheduledetail')
-      .join(`${tempTableName}`, 'scheduledetail.id', `${tempTableName}.id`)
-      .update({
-        nobukti: trx.raw(`${tempTableName}.nobukti`),
-        pelayaran_id: trx.raw(`${tempTableName}.pelayaran_id`),
-        kapal_id: trx.raw(`${tempTableName}.kapal_id`),
-        tujuankapal_id: trx.raw(`${tempTableName}.tujuankapal_id`),
-        schedulekapal_id: trx.raw(`${tempTableName}.schedulekapal_id`),
-        tglberangkat: trx.raw(`${tempTableName}.tglberangkat`),
-        tgltiba: trx.raw(`${tempTableName}.tgltiba`),
-        etb: trx.raw(`${tempTableName}.etb`),
-        eta: trx.raw(`${tempTableName}.eta`),
-        etd: trx.raw(`${tempTableName}.etd`),
-        voyberangkat: trx.raw(`${tempTableName}.voyberangkat`),
-        voytiba: trx.raw(`${tempTableName}.voytiba`),
-        closing: trx.raw(`${tempTableName}.closing`),
-        etatujuan: trx.raw(`${tempTableName}.etatujuan`),
-        etdtujuan: trx.raw(`${tempTableName}.etdtujuan`),
-        keterangan: trx.raw(`${tempTableName}.keterangan`),
-        modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-        created_at: trx.raw(`${tempTableName}.created_at`),
-        updated_at: trx.raw(`${tempTableName}.updated_at`),
-      })
-      .returning('*')
-      .then((result: any) => result[0])
+    // WAJIB raw. knex-pg MEMBUANG join pada .update() tanpa error apa pun —
+    // yang keluar cuma `update "scheduledetail" set ... = temp_x.kolom`, tanpa
+    // FROM/WHERE, sehingga Postgres menolak dengan
+    // 42P01 "missing FROM-clause entry for table temp_x".
+    // Padanan UPDATE ... JOIN di Postgres adalah UPDATE ... FROM ... WHERE.
+    const updatedResult = await trx
+      .raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           pelayaran_id = tmp.pelayaran_id,
+           kapal_id = tmp.kapal_id,
+           tujuankapal_id = tmp.tujuankapal_id,
+           schedulekapal_id = tmp.schedulekapal_id,
+           tglberangkat = tmp.tglberangkat,
+           tgltiba = tmp.tgltiba,
+           etb = tmp.etb,
+           eta = tmp.eta,
+           etd = tmp.etd,
+           voyberangkat = tmp.voyberangkat,
+           voytiba = tmp.voytiba,
+           closing = tmp.closing,
+           etatujuan = tmp.etatujuan,
+           etdtujuan = tmp.etdtujuan,
+           keterangan = tmp.keterangan,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      )
       .catch((error: any) => {
         console.error(
           'Error inserting data schedule detail in servoce',
@@ -230,6 +239,7 @@ export class ScheduleDetailService {
         );
         throw error;
       });
+    const updatedData = updatedResult?.rows?.[0] ?? null;
 
     // Handle insertion if no update occurs
     const insertedDataQuery = await trx(tempTableName)
@@ -300,10 +310,18 @@ export class ScheduleDetailService {
 
     const finalData = logData.concat(pushToLogWithAction);
 
-    const deletedData = await trx(this.tableName)
-      .leftJoin(`${tempTableName}`, 'scheduledetail.id', `${tempTableName}.id`)
-      .whereNull(`${tempTableName}.id`)
-      .where('scheduledetail.schedule_id', id)
+    // leftJoin + whereNull TIDAK bisa dipakai pada .del() di Postgres: knex
+    // menerjemahkannya jadi `delete ... using "temp" where "temp"."id" is null
+    // and "scheduledetail"."id" = "temp"."id"`. USING itu inner join, jadi
+    // `temp.id is null` tidak pernah benar — hasilnya NOL baris terhapus, tanpa
+    // error. Padanan yang benar: NOT EXISTS.
+    const deletedData = await trx(`${this.tableName} as u`)
+      .where('u.schedule_id', id)
+      .whereNotExists(function (this: any) {
+        this.select(trx.raw('1'))
+          .from(tempTableName)
+          .whereRaw(`"${tempTableName}".id = u.id`);
+      })
       .del();
 
     if (insertedDataQuery.length > 0) {
@@ -370,8 +388,12 @@ export class ScheduleDetailService {
           trx.raw("TO_CHAR(p.etdtujuan, 'DD-MM-YYYY') as etdtujuan"),
           'p.keterangan',
           'p.modifiedby',
-          trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'pel.nama as pelayaran_nama',
           'kapal.nama as kapal_nama',
           'q.nama as tujuankapal_nama',

@@ -38,7 +38,7 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 
 @Controller('schedule-header')
 export class ScheduleHeaderController {
-  constructor(private readonly scheduleHeaderService: ScheduleHeaderService) {}
+  constructor(private readonly scheduleHeaderService: ScheduleHeaderService) { }
 
   @UseGuards(AuthGuard)
   @Post()
@@ -62,7 +62,7 @@ export class ScheduleHeaderController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error while creating type akuntansi in controller', error);
+      console.error('Error while creating type scheduleheader in controller', error);
 
       if (error instanceof HttpException) {
         throw error;
@@ -71,7 +71,7 @@ export class ScheduleHeaderController {
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Failed to create type akuntansi',
+          message: 'Failed to create type scheduleheader',
         },
         HttpStatus.INTERNAL_SERVER_ERROR,
       );

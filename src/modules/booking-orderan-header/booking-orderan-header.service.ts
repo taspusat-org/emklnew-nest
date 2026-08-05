@@ -35,7 +35,8 @@ export class BookingOrderanHeaderService {
     private readonly logTrailService: LogtrailService,
     private readonly runningNumberService: RunningNumberService,
     private readonly bookingOrderanMuatanService: BookingOrderanMuatanService,
-  ) {}
+  ) { }
+  ) { }
 
   async create(createData: any, trx: any) {
     try {

@@ -41,6 +41,7 @@ async function bootstrap() {
         'http://localhost:5173',
         'http://192.168.3.217:3000',
         'http://100.91.135.37:3000',
+        'https://emkldev.transporindo.com',
       ], // List of allowed origins
       methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allowed methods
       allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
