@@ -28,10 +28,24 @@ import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import { AuthGuard } from '../auth/auth.guard';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportHutangheaderDto,
+  ReportHutangheaderSchema,
+} from './dto/report-hutangheader.dto';
+import {
+  ExportHutangheaderDto,
+  ExportHutangheaderSchema,
+} from './dto/export-hutangheader.dto';
 
 @Controller('hutangheader')
 export class HutangheaderController {
-  constructor(private readonly hutangheaderService: HutangheaderService) {}
+  constructor(
+    private readonly hutangheaderService: HutangheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -97,30 +111,11 @@ export class HutangheaderController {
   @UseGuards(AuthGuard)
   @Get(':id')
   //@HUTANG
-  async findOne(@Param('id') id: string, @Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
-
-    const sortParams = {
-      sortBy: sortBy || 'nobukti',
-      sortDirection: sortDirection || 'asc',
-    };
-
-    const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
-    };
-
-    const params: FindAllParams = {
-      search,
-      filters,
-      pagination,
-      sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
-    };
+  async findOne(@Param('id') id: string) {
     const trx = await dbMssql.transaction();
 
     try {
-      const result = await this.hutangheaderService.findOne(params, id, trx);
+      const result = await this.hutangheaderService.findOne(id, trx);
       trx.commit();
 
       return result;
@@ -172,16 +167,93 @@ export class HutangheaderController {
     }
   }
 
-  @Get('/export/:id')
-  async exportToExcel(
-    @Param('id') id: string,
-    @Query() query: any,
-    @Res() res: Response,
+  /**
+   * POST /hutangheader/report
+   *
+   * Cetak bukti hutang di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Beda dengan laporan daftar (mis. Group Biaya Extra) yang mencetak seluruh
+   * baris hasil filter grid: LaporanHutang.mrt adalah bukti PER TRANSAKSI, jadi
+   * yang dikirim frontend hanya id baris yang dicentang. Datanya dua tabel —
+   * `data` (header) dan `detail` (rincian) — sesuai datasource template.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportHutangheaderSchema))
+    body: ReportHutangheaderDto,
+    @Req() req,
   ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.hutangheaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /hutangheader/export
+   *
+   * Export Excel daftar hutang di background. Request langsung balas { jobId };
+   * progresnya dikirim lewat socket namespace `/report` (kanal yang sama dengan
+   * cetak laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris. Jangan disamakan dengan GET /export/:id di
+   * bawah: yang itu mengekspor SATU bukti beserta rinciannya, yang ini seluruh
+   * baris yang lolos filter grid.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportHutangheaderSchema))
+    body: ExportHutangheaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_hutang_${stamp}.xlsx`,
+      countRows: () =>
+        this.hutangheaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.hutangheaderService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.hutangheaderService.exportSheet,
+    });
+  }
+
+  @Get('/export/:id')
+  async exportToExcel(@Param('id') id: string, @Res() res: Response) {
     try {
       // Ambil data
       const trx = await dbMssql.transaction();
-      const { data } = await this.hutangheaderService.findOne(query, id, trx);
+      const { data } = await this.hutangheaderService.findOne(id, trx);
 
       if (!Array.isArray(data)) {
         return res

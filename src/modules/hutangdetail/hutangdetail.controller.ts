@@ -7,12 +7,18 @@ import {
   Param,
   Delete,
   Query,
+  UsePipes,
 } from '@nestjs/common';
 import { HutangdetailService } from './hutangdetail.service';
 import { CreateHutangdetailDto } from './dto/create-hutangdetail.dto';
 import { UpdateHutangdetailDto } from './dto/update-hutangdetail.dto';
 import { dbMssql } from 'src/common/utils/db';
-import { FindAllDto, FindAllParams } from 'src/common/interfaces/all.interface';
+import {
+  FindAllDto,
+  FindAllParams,
+  FindAllSchema,
+} from 'src/common/interfaces/all.interface';
+import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 
 @Controller('hutangdetail')
 export class HutangdetailController {
@@ -24,19 +30,24 @@ export class HutangdetailController {
   }
 
   @Get()
+  @UsePipes(new ZodValidationPipe(FindAllSchema))
   async findAll(@Query() query: FindAllDto) {
     const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
       query;
 
-    const trx = await dbMssql.transaction();
     const sortParams = {
       sortBy: sortBy || 'nobukti',
       sortDirection: sortDirection || 'asc',
     };
 
+    // Query string selalu string. Tanpa Number() di sini, offset dihitung dari
+    // ('2' - 1) * '50' — kebetulan benar lewat koersi JS, tapi limit tetap
+    // string dan Math.ceil(total / '50') ikut bergantung koersi. Eksplisit saja.
+    const numericLimit = Number(limit);
     const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
     };
 
     const params: FindAllParams = {
@@ -46,20 +57,16 @@ export class HutangdetailController {
       isLookUp: isLookUp === 'true',
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
     };
+
+    const trx = await dbMssql.transaction();
     try {
       const result = await this.hutangdetailService.findAll(params, trx);
-
-      if (result.data.length === 0) {
-        await trx.commit();
-
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-        };
-      }
       await trx.commit();
 
+      // Balikan diteruskan apa adanya, termasuk saat kosong. Dulu hasil kosong
+      // ditukar dengan objek tanpa `pagination`, sehingga grid tidak pernah tahu
+      // totalPages dan windowed lazy-loading tidak bisa berhenti di halaman
+      // terakhir. Service sudah mengisi pagination bahkan untuk hasil kosong.
       return result;
     } catch (error) {
       await trx.rollback();

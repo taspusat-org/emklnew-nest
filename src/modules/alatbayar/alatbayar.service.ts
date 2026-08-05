@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
 import { Knex } from 'knex';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
 
 @Injectable()
 export class AlatbayarService {

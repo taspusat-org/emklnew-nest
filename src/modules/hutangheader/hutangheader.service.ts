@@ -12,6 +12,7 @@ import {
   calculateItemIndex,
   getFetchedPages,
 } from 'src/utils/utils.service';
+import { numberToTerbilang } from 'src/utils/terbilang';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { HutangdetailService } from '../hutangdetail/hutangdetail.service';
@@ -562,6 +563,71 @@ export class HutangheaderService {
     }
   }
 
+  /**
+   * Data untuk cetak bukti Hutang (LaporanHutang.mrt).
+   *
+   * Template-nya punya DUA datasource: `data` (header bukti) dan `detail`
+   * (rincian coa/nominal), jadi yang dikembalikan objek bernama — bukan array
+   * seperti laporan daftar. Kolom tambahan di header (judullaporan, usercetak,
+   * tglcetak, terbilang, judul) tidak ada di database; semuanya dipakai band
+   * header template dan dulu dirakit di browser sebelum cetak dipindah ke
+   * backend.
+   *
+   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
+   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi. findOne
+   * membaca tabel base + JOIN sendiri (bukan vhutangheader), sehingga tidak
+   * bergantung pada GUC periode yang hanya hidup di dalam transaksi.
+   */
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: headerRows } = await this.findOne(id, db);
+
+    if (!headerRows?.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const detailRes = await this.hutangdetailService.findAll(
+      { filters: { nobukti: header.nobukti } },
+      db,
+    );
+    const details = detailRes.data ?? [];
+
+    // Dijumlahkan dalam satuan sen lalu dibagi 100: menjumlah float rupiah
+    // langsung meninggalkan sisa pembulatan yang membuat "terbilang" meleset
+    // satu rupiah.
+    const totalNominal =
+      details.reduce(
+        (sum: number, item: any) =>
+          sum + Math.round((Number(item.nominal) || 0) * 100),
+        0,
+      ) / 100;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: [
+        {
+          ...header,
+          judullaporan: judullaporan ?? 'Laporan Hutang',
+          usercetak: username,
+          tglcetak,
+          terbilang: numberToTerbilang(totalNominal),
+          judul: 'Bukti Hutang',
+        },
+      ],
+      detail: details,
+    };
+  }
+
   async update(id: any, data: any, trx: any) {
     try {
       data.tglbukti = formatDateToSQL(String(data?.tglbukti));
@@ -874,6 +940,137 @@ export class HutangheaderService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
+  /**
+   * tglDari/tglSampai/relasi_id di findAll tidak jadi predikat SQL: ketiganya
+   * diturunkan ke vhutangheader lewat GUC per-transaksi (set_config dengan
+   * is_local=true, lihat setDateRangeSessionContext) dan karena itu sengaja
+   * dikecualikan dari applyFilters.
+   *
+   * Export TIDAK bisa memakai jalur itu. Job-nya berumur panjang dan barisnya
+   * ditarik lewat cursor tanpa transaksi, sehingga set_config(..., true) hilang
+   * begitu statement-nya selesai — view lalu memulangkan SELURUH periode dan
+   * file Excel-nya berisi data di luar filter yang dipilih user. Jadi di sini
+   * ketiganya dipasang sebagai predikat biasa; klausanya sama persis dengan
+   * yang ada di dalam view.
+   */
+  private applyPeriodFilters(
+    qb: any,
+    filters: Record<string, any>,
+    alias: string,
+  ): void {
+    const tglDari = filters?.tglDari
+      ? formatDateToSQL(String(filters.tglDari))
+      : null;
+    const tglSampai = filters?.tglSampai
+      ? formatDateToSQL(String(filters.tglSampai))
+      : null;
+
+    if (tglDari && tglSampai) {
+      qb.whereBetween(`${alias}.tglbukti`, [tglDari, tglSampai]);
+    }
+
+    // Cocok PERSIS (bukan LIKE): relasi_id adalah identifier, dan di view pun
+    // perbandingannya `=`.
+    if (filters?.relasi_id) {
+      qb.andWhere(`${alias}.relasi_id`, String(filters.relasi_id));
+    }
+  }
+
+  /**
+   * Query dasar export: filter, search, dan sort yang sama dengan findAll,
+   * TANPA paging dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    const safeFilters = filters || {};
+
+    const query = db(`${this.viewName} as u`)
+      .select([
+        'u.nobukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        db.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
+        'u.keterangan',
+        'u.relasi_text',
+        'u.coa_text',
+        'u.modifiedby',
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ])
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search, 'u'))
+      .modify((qb: any) => this.applyPeriodFilters(qb, safeFilters, 'u'));
+
+    // Urutan HARUS deterministik — sama alasannya dengan findAll.
+    query.orderBy(`u.${sortBy}`, sortDirection);
+    if (sortBy !== 'id') {
+      query.orderBy('u.id', 'asc');
+    }
+
+    return query;
+  }
+
+  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const safeFilters = filters || {};
+
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search, 'u'))
+      .modify((qb: any) => this.applyPeriodFilters(qb, safeFilters, 'u'))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN HUTANG',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'TGL JATUH TEMPO',
+      'KETERANGAN',
+      'RELASI',
+      'COA',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.tgljatuhtempo,
+      row.keterangan,
+      row.relasi_text,
+      row.coa_text,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
 
   async exportToExcel(data: any[], trx: any) {
     const workbook = new Workbook();

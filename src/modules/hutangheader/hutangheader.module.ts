@@ -11,6 +11,7 @@ import { GlobalModule } from '../global/global.module';
 import { LocksModule } from '../locks/locks.module';
 import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.module';
 import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -24,7 +25,12 @@ import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module
     GlobalModule,
     LocksModule,
     StatuspendukungModule,
+    ReportModule,
   ],
+  // Catatan: GlobalModule & LocksModule dipertahankan di imports meski service
+  // tidak lagi meng-inject GlobalService/LocksService — sama seperti
+  // PengeluaranheaderModule — agar modul lain yang menumpang graf ini tidak
+  // ikut berubah.
   controllers: [HutangheaderController],
   providers: [HutangheaderService],
   exports: [HutangheaderService],

@@ -2,216 +2,412 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { uuidV7, withUuidV7, UtilsService } from 'src/utils/utils.service';
-import { RedisService } from 'src/common/redis/redis.service';
 import { dbMssql } from 'src/common/utils/db';
+import { RedisService } from 'src/common/redis/redis.service';
+import {
+  calculateItemIndex,
+  getFetchedPages,
+  UtilsService,
+  uuidV7,
+  withUuidV7,
+} from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
+import { LocksService } from '../locks/locks.service';
+import { GlobalService } from '../global/global.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { Workbook } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as bcrypt from 'bcrypt';
-import { Knex } from 'nestjs-knex';
+import { Workbook, Column } from 'exceljs';
+
 @Injectable()
 export class UserService {
+  private readonly logger = new Logger(UserService.name);
   private readonly tableName = 'users';
+  /** Password awal user baru — user mengganti sendiri setelah login pertama. */
+  private readonly DEFAULT_PASSWORD = '12345678';
+
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
-    @Inject('KNEX_CONNECTION') private readonly knex: Knex,
+    private readonly globalService: GlobalService,
+    private readonly locksService: LocksService,
   ) {}
-  async create(data: any, trx: any) {
-    try {
-      // Set password otomatis menjadi '123456'
-      const passwordPlain = '12345678';
-      const passwordHash = await bcrypt.hash(passwordPlain, 10); // Enkripsi password
 
-      // Ambil hanya field yang diperlukan untuk insert
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        namakaryawan,
-        page,
-        limit,
-        userId,
-        ...insertData
-      } = data;
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['name'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
-      insertData.password = passwordHash;
+  /**
+   * Tabel `users` tidak punya view turunan, jadi kolom teks status
+   * (p.text / p.memo) dan nama karyawan diambil lewat LEFT JOIN. Query dasar
+   * ini dipakai findAll, COUNT, dan perhitungan posisi baris supaya ketiganya
+   * melihat dataset yang PERSIS sama.
+   */
+  private baseQuery(trx: any) {
+    return trx(`${this.tableName} as u`).leftJoin(
+      'parameter as p',
+      'u.statusaktif',
+      'p.id',
+    );
+  }
 
-      // Tambahkan field password yang sudah dienkripsi ke insertData
+  private selectColumns(trx: any) {
+    return [
+      'u.id as id',
+      'u.username',
+      'u.name',
+      'u.email',
+      'u.statusaktif',
+      'u.modifiedby',
+      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      'p.memo',
+      'p.text',
+    ];
+  }
 
-      // Lakukan insert data ke dalam database
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
+  /**
+   * Kolom yang berada di tabel selain `users`. Dipakai applyFilters supaya
+   * filter/search-nya di-prefix ke alias yang benar — `u.namakaryawan` tidak
+   * ada dan langsung melempar "column does not exist".
+   */
+  private readonly JOINED_COLUMNS: Record<string, string> = {
+    text: 'p.text',
+    memo: 'p.memo',
+  };
 
-      const newItem = insertedItems[0];
-      if (data.userId) {
-        const userAccess = await this.utilsService.fetchUserRolesAndUserAcl(
-          data.userId,
-          trx,
-        );
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    // statusaktif dikirim sebagai id parameter (varchar UUID) oleh FilterOptions,
+    // jadi percuma ikut dicari pada search global yang berisi teks.
+    const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
 
-        // Update user ACL first
-        const abilityIds = userAccess.abilities.map((ability) => ability.id);
-        const existingUserAclRecords = await trx('useracl')
-          .where('user_id', newItem.id)
-          .whereIn('aco_id', abilityIds)
-          .select('aco_id');
-        const existingAcoIds = new Set(
-          existingUserAclRecords.map((record) => record.aco_id),
-        );
-        const newUserAclData = userAccess.abilities
-          .filter((ability) => !existingAcoIds.has(ability.id))
-          .map((ability) => ({
-            user_id: newItem.id,
-            aco_id: ability.id,
-            modifiedby: data.modifiedby,
-            created_at: dbMssql.fn.now(),
-            updated_at: dbMssql.fn.now(),
-          }));
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
 
-        if (newUserAclData.length > 0) {
-          await trx('useracl').insert(await withUuidV7(trx, newUserAclData));
-        }
-
-        // Update user roles before updating the user data
-        for (const roleId of userAccess.roles) {
-          const existingRole = await trx('userrole')
-            .where('user_id', newItem.id)
-            .andWhere('role_id', roleId)
-            .first();
-
-          if (existingRole) {
-            await trx('userrole')
-              .where('user_id', newItem.id)
-              .andWhere('role_id', roleId)
-              .update({
-                modifiedby: data.modifiedby,
-                updated_at: dbMssql.fn.now(),
-              });
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
           } else {
-            await trx('userrole').insert({
-              id: await uuidV7(trx),
-              user_id: newItem.id,
-              role_id: roleId,
-              modifiedby: data.modifiedby,
-              created_at: dbMssql.fn.now(),
-              updated_at: dbMssql.fn.now(),
-            });
+            const column = this.JOINED_COLUMNS[field] ?? `u.${field}`;
+            query.orWhere(column, 'ilike', `%${sanitizedValue}%`);
           }
-        }
+        });
+      });
+    }
 
-        // After roles and ACL are updated, fetch abilities and update menu
-        const { abilities } =
-          await this.utilsService.fetchUserRolesAndAbilities(newItem.id, trx);
-        // Update menu after roles and ACL updates
-        const menuData = await this.utilsService.getDataMenuSidebar(trx);
-        const menuString = this.utilsService.buildMenuString(
-          menuData,
-          abilities,
-        );
-        data.menu = menuString;
-        await trx(this.tableName)
-          .where('id', newItem.id)
-          .update({ menu: data.menu });
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`p.${key}`, '=', sanitizedValue);
+      } else {
+        const column = this.JOINED_COLUMNS[key] ?? `u.${key}`;
+        qb.andWhere(column, 'ilike', `%${sanitizedValue}%`);
       }
-      const itemsPerPage = data.limit || 30;
-      // Siapkan query dasar
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.username',
-          'u.name',
-          'u.email',
-          'u.statusaktif',
-          'u.modifiedby',
-          'k.namakaryawan',
-          'u.karyawan_id',
-          dbMssql.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-          'p.memo',
-          'p.text',
-        ])
-        .leftJoin('karyawan as k', 'u.karyawan_id', 'k.id')
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-        .orderBy(sortBy ? `u.${sortBy}` : 'u.id', sortDirection || 'desc')
-        .where('u.id', '<=', newItem.id); // Filter berdasarkan ID yang lebih kecil atau sama dengan newItem.id
+    });
+  }
 
-      // Terapkan filtering tambahan jika ada
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${value}%`,
-              ]);
-            } else if (key === 'text' || key === 'memo') {
-              query.andWhere(`p.${key}`, '=', value);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${value}%`);
-            }
-          }
-        }
-      }
+  /**
+   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
+   * bantu dari frontend (sortBy, filters, namakaryawan, userId, text, dll)
+   * tidak ikut ditulis -> "Invalid column name". Uppercase HANYA kolom teks
+   * manusiawi: id, statusaktif, dan karyawan_id adalah uuid v7 HURUF KECIL,
+   * meng-uppercase-nya menulis id yang tidak ada sehingga lookup tampil kosong
+   * (lihat pengeluaranheader).
+   *
+   * `username` juga TIDAK di-uppercase walau berupa teks: login mencocokkannya
+   * dengan `where({ username })` yang case-sensitive di Postgres, jadi
+   * mengubah huruf saat simpan akan mengunci user dari akunnya sendiri.
+   */
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.id,
+      username: dto.username ? String(dto.username).trim() : null,
+      name: dto.name ? String(dto.name).toUpperCase() : null,
+      email: dto.email ?? null,
+      statusaktif: dto.statusaktif,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
 
-      // Perbaikan bagian search
-      if (search) {
-        query.where((builder) => {
-          builder
+  /**
+   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
+   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
+   * TEKS parameter (p.text) dan kolom karyawan memakai k.namakaryawan, bukan
+   * id UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
+   */
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { orderCol: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+      case 'text':
+        return { orderCol: 'p.text', dir };
+      default:
+        return { orderCol: `u.${sortBy}`, dir };
+    }
+  }
 
-            .orWhere('u.username', 'like', `%${search}%`)
-            .orWhere('u.name', 'like', `%${search}%`)
-            .orWhere('u.email', 'like', `%${search}%`)
+  /**
+   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
+   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
+   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
+   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
+   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
 
-            .orWhere('p.memo', 'like', `%${search}%`)
-            .orWhere('p.text', 'like', `%${search}%`);
+    const existingData = await this.baseQuery(trx)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+
+    // Baris tidak lolos filter aktif (mis. habis diedit jadi tidak cocok) ->
+    // jatuhkan fokus ke baris pertama daripada menghitung posisi yang salah.
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await this.baseQuery(trx)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
+   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
+   * SELURUH tabel lalu findIndex seperti implementasi lama.
+   */
+  private async buildPagedResult(
+    trx: any,
+    posisi: number,
+    totalItems: number,
+    limit: number,
+    sortBy: string,
+    sortDirection: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+  ) {
+    const pageNumber = Math.ceil(posisi / limit);
+    const totalPages = Math.ceil(totalItems / limit);
+    const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+    const startPage = fetchedPages[0];
+    const endPage = fetchedPages[fetchedPages.length - 1];
+    const customOffset = (startPage - 1) * limit;
+    const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+    const result = await this.findAll(
+      {
+        search: search || '',
+        filters: filters || {},
+        pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+        sort: { sortBy, sortDirection: sortDirection as 'asc' | 'desc' },
+        isLookUp: false,
+        useCustomOffset: true,
+      },
+      trx,
+    );
+
+    const allFetchedData = result?.data ?? [];
+    const pagedData: Record<number, any[]> = {};
+    let dataIndex = 0;
+    fetchedPages.forEach((pageNum) => {
+      pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+      dataIndex += limit;
+    });
+
+    const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+    await this.redisService.set(
+      `${this.tableName}-page-${pageNumber}`,
+      JSON.stringify(allFetchedData),
+    );
+
+    return {
+      itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
+      pageNumber,
+      fetchedPages,
+      pagedData,
+    };
+  }
+
+  /**
+   * Menyalin hak akses (useracl + userrole) dari `sourceUserId` ke
+   * `targetUserId`, lalu menyusun ulang string menu milik target sesuai
+   * ability hasil salinan. Dipakai create() maupun update() — dulu logikanya
+   * digandakan di kedua tempat.
+   */
+  private async copyAccessFromUser(
+    trx: any,
+    targetUserId: string,
+    sourceUserId: string,
+    modifiedby: string,
+  ): Promise<string> {
+    const userAccess = await this.utilsService.fetchUserRolesAndUserAcl(
+      sourceUserId,
+      trx,
+    );
+
+    const abilityIds = userAccess.abilities.map((ability) => ability.id);
+    const existingUserAclRecords = abilityIds.length
+      ? await trx('useracl')
+          .where('user_id', targetUserId)
+          .whereIn('aco_id', abilityIds)
+          .select('aco_id')
+      : [];
+    const existingAcoIds = new Set(
+      existingUserAclRecords.map((record) => record.aco_id),
+    );
+    const newUserAclData = userAccess.abilities
+      .filter((ability) => !existingAcoIds.has(ability.id))
+      .map((ability) => ({
+        user_id: targetUserId,
+        aco_id: ability.id,
+        modifiedby,
+        created_at: this.utilsService.getTime(),
+        updated_at: this.utilsService.getTime(),
+      }));
+
+    if (newUserAclData.length > 0) {
+      await trx('useracl').insert(await withUuidV7(trx, newUserAclData));
+    }
+
+    for (const roleId of userAccess.roles) {
+      const existingRole = await trx('userrole')
+        .where('user_id', targetUserId)
+        .andWhere('role_id', roleId)
+        .first();
+
+      if (existingRole) {
+        await trx('userrole')
+          .where('user_id', targetUserId)
+          .andWhere('role_id', roleId)
+          .update({
+            modifiedby,
+            updated_at: this.utilsService.getTime(),
+          });
+      } else {
+        await trx('userrole').insert({
+          id: await uuidV7(trx),
+          user_id: targetUserId,
+          role_id: roleId,
+          modifiedby,
+          created_at: this.utilsService.getTime(),
+          updated_at: this.utilsService.getTime(),
         });
       }
+    }
 
-      // Ambil hasil query yang terfilter
-      const filteredItems = await query;
-      // Cari index item baru di hasil yang sudah difilter
-      let itemIndex = filteredItems.findIndex((item) => item.id === newItem.id);
+    const { abilities } = await this.utilsService.fetchUserRolesAndAbilities(
+      targetUserId,
+      trx,
+    );
+    const menuData = await this.utilsService.getDataMenuSidebar(trx);
 
-      if (itemIndex === -1) {
-        itemIndex = 0;
+    return this.utilsService.buildMenuString(menuData, abilities);
+  }
+
+  async create(CreateUserDto: any, trx: any) {
+    try {
+      const { sortBy, sortDirection, filters, search, limit, userId } =
+        CreateUserDto;
+
+      const sortColumn = sortBy || 'username';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
+
+      const uuid = await uuidV7(trx);
+      const insertData = this.buildInsertData(CreateUserDto, uuid);
+      insertData.password = await bcrypt.hash(this.DEFAULT_PASSWORD, 10);
+
+      await trx(this.tableName).insert(insertData);
+
+      // Hak akses disalin SETELAH baris user ada (useracl/userrole punya FK ke
+      // users.id), lalu menu-nya ditulis balik ke baris yang sama.
+      if (userId) {
+        const menuString = await this.copyAccessFromUser(
+          trx,
+          uuid,
+          userId,
+          CreateUserDto.modifiedby,
+        );
+        await trx(this.tableName)
+          .where('id', uuid)
+          .update({ menu: menuString });
       }
 
-      const pageNumber = Math.floor(itemIndex / itemsPerPage) + 1;
-      const endIndex = pageNumber * itemsPerPage;
+      // id berupa varchar UUID (bukan auto-increment), jadi orderBy('id','desc')
+      // TIDAK mengembalikan baris yang baru diinsert. Ambil langsung by uuid
+      // yang barusan digenerate supaya fokus baris setelah simpan tepat.
+      const newItem = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', uuid)
+        .first();
 
-      // Ambil data hingga halaman yang mencakup item baru
-      const limitedItems = filteredItems.slice(0, endIndex);
+      // totalItems SELALU dihitung dengan filter yang sama seperti grid.
+      const totalRecords = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
 
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+      const posisi = await this.resolvePosition(
+        trx,
+        uuid,
+        filters,
+        search,
+        sortColumn,
+        sortDir,
       );
 
-      // Simpan log trail
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
+      );
+
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -225,347 +421,106 @@ export class UserService {
         trx,
       );
 
-      return {
-        newItem,
-        pageNumber,
-        itemIndex,
-      };
+      return { newItem, ...paged };
     } catch (error) {
-      throw new Error(`Error creating menu: ${error.message}`);
-    }
-  }
-  async update(id: string, data: any, trx: any) {
-    try {
-      // Ambil data user ACL dan role sebelum mengambil abilities dan update menu
-      if (data.userId) {
-        const userAccess = await this.utilsService.fetchUserRolesAndUserAcl(
-          data.userId,
-          trx,
-        );
-
-        // Update user ACL first
-        const abilityIds = userAccess.abilities.map((ability) => ability.id);
-        const existingUserAclRecords = await trx('useracl')
-          .where('user_id', id)
-          .whereIn('aco_id', abilityIds)
-          .select('aco_id');
-        const existingAcoIds = new Set(
-          existingUserAclRecords.map((record) => record.aco_id),
-        );
-        const newUserAclData = userAccess.abilities
-          .filter((ability) => !existingAcoIds.has(ability.id))
-          .map((ability) => ({
-            user_id: id,
-            aco_id: ability.id,
-            modifiedby: data.modifiedby,
-            created_at: dbMssql.fn.now(),
-            updated_at: dbMssql.fn.now(),
-          }));
-
-        if (newUserAclData.length > 0) {
-          await trx('useracl').insert(await withUuidV7(trx, newUserAclData));
-        }
-
-        // Update user roles before updating the user data
-        for (const roleId of userAccess.roles) {
-          const existingRole = await trx('userrole')
-            .where('user_id', id)
-            .andWhere('role_id', roleId)
-            .first();
-
-          if (existingRole) {
-            await trx('userrole')
-              .where('user_id', id)
-              .andWhere('role_id', roleId)
-              .update({
-                modifiedby: data.modifiedby,
-                updated_at: dbMssql.fn.now(),
-              });
-          } else {
-            await trx('userrole').insert({
-              id: await uuidV7(trx),
-              user_id: id,
-              role_id: roleId,
-              modifiedby: data.modifiedby,
-              created_at: dbMssql.fn.now(),
-              updated_at: dbMssql.fn.now(),
-            });
-          }
-        }
-
-        // After roles and ACL are updated, fetch abilities and update menu
-        const { abilities } =
-          await this.utilsService.fetchUserRolesAndAbilities(id, trx);
-
-        // Update menu after roles and ACL updates
-        const menuData = await this.utilsService.getDataMenuSidebar(trx);
-        const menuString = this.utilsService.buildMenuString(
-          menuData,
-          abilities,
-        );
-        data.menu = menuString;
-      }
-
-      // Ambil data yang akan diubah (kecuali userId dan data lainnya yang tidak ingin diubah)
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statusaktif_text,
-        userId,
-        namakaryawan,
-        ...updateData
-      } = data;
-
-      const existingData = await trx(this.tableName).where('id', id).first();
-      if (!existingData) {
-        throw new Error('Data not found');
-      }
-      const hasChanges = this.utilsService.hasChanges(updateData, existingData);
-
-      if (hasChanges) {
-        // Melakukan update data yang sudah dipisahkan
-        await trx(this.tableName).where('id', id).update(updateData);
-      }
-
-      // Ambil semua item dengan filter ID yang lebih kecil atau sama dengan yang diupdate
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.username',
-          'u.name',
-          'u.email',
-          'u.statusaktif',
-          'u.modifiedby',
-          dbMssql.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-          'p.memo',
-          'p.text',
-        ])
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-        .orderBy(sortBy ? `u.${sortBy}` : 'u.id', sortDirection || 'desc');
-
-      // Terapkan filtering tambahan jika ada
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${value}%`,
-              ]);
-            } else if (key === 'text' || key === 'memo') {
-              query.andWhere(`p.${key}`, '=', value);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${value}%`);
-            }
-          }
-        }
-      }
-
-      // Perbaikan bagian search
-      if (search) {
-        query.where((builder) => {
-          builder
-
-            .orWhere('u.username', 'like', `%${search}%`)
-            .orWhere('u.name', 'like', `%${search}%`)
-            .orWhere('u.email', 'like', `%${search}%`)
-
-            .orWhere('p.memo', 'like', `%${search}%`)
-            .orWhere('p.text', 'like', `%${search}%`);
-        });
-      }
-
-      // Ambil hasil query yang terfilter
-      const allItems = await query;
-      const itemIndex = allItems.findIndex((item) => Number(item.id) === id);
-      if (itemIndex === -1) {
-        throw new Error('Updated item not found in all items');
-      }
-
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-
-      // Ambil data hingga halaman yang mencakup item yang baru diperbarui
-      const endIndex = pageNumber * limit;
-      const limitedItems = allItems.slice(0, endIndex);
-
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
-      // Simpan log trail
-      await this.logTrailService.create(
-        {
-          namatabel: this.tableName,
-          postingdari: 'EDIT USER',
-          idtrans: id,
-          nobuktitrans: id,
-          aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
-        },
-        trx,
-      );
-
-      return {
-        newItem: {
-          id,
-          ...updateData,
-        },
-        pageNumber,
-        itemIndex,
-      };
-    } catch (error) {
-      console.error('Error updating menu:', error);
-      throw new Error('Failed to update menu');
+      throw new Error(`Error creating User : ${error.message}`);
     }
   }
 
-  async findAll({ search, filters, pagination, sort }: FindAllParams) {
+  async findAll(
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: any,
+  ) {
     try {
-      let { page, limit } = pagination ?? {};
+      const { page = 1, customOffset } = pagination ?? {};
+      let limit = pagination?.limit ?? 0;
 
-      page = page ?? 1;
-      limit = limit ?? 0;
-      const offset = (page - 1) * limit;
+      const sortBy = sort?.sortBy || 'username';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const safeFilters = filters || {};
 
-      const query = dbMssql(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.username',
-          'u.name',
-          'u.email',
-          'u.statusaktif',
-          'u.modifiedby',
-          dbMssql.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-          'p.memo',
-          'p.text',
-        ])
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id');
+      // Count HARUS memakai filter & search yang sama dengan query data —
+      // memakai COUNT tanpa filter (implementasi lama) membuat totalPages dan
+      // posisi baris ikut salah begitu ada filter kolom / search aktif.
+      const countResult = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      if (isLookUp) {
+        // Hasil lookup > 500 baris: jangan tarik semuanya, biarkan komponen
+        // LookUp beralih ke pencarian server-side.
+        if (total > 500) {
+          return {
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
+            },
+          };
+        }
+        limit = 0; // <= 500: kirim seluruh baris, difilter di client.
+      }
+
+      const query = this.baseQuery(trx).select(this.selectColumns(trx));
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+      query.orderBy(orderCol, sortDirection);
+
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        query.limit(limit).offset(offset);
-      }
-
-      if (search) {
-        const esc = search.replace(/\[/g, '[[]');
-        // Penggunaan parameterized query untuk pencarian
-        query.where((builder) => {
-          builder
-
-            .orWhere('u.username', 'like', `%${esc}%`)
-            .orWhere('u.name', 'like', `%${esc}%`)
-            .orWhere('u.email', 'like', `%${esc}%`);
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            // Escape karakter [ dan ] dalam filters
-            const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'text') {
-              query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
-      const result = await dbMssql(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-
-      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
+        type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
+      this.logger.error('Error fetching user data', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
   }
 
   async findAllByIds(ids: { id: string }[]) {
     try {
       const idList = ids.map((item) => item.id);
-      const tempData = `##temp_${Math.random().toString(36).substring(2, 15)}`;
 
-      // Membuat temporary table
-      const createTempTableQuery = `
-        CREATE TABLE ${tempData} (
-          id NVARCHAR(100)
-        );
-      `;
-      await dbMssql.raw(createTempTableQuery);
-
-      // Memasukkan data ID ke dalam temporary table
-      const insertTempTableQuery = `
-        INSERT INTO ${tempData} (id)
-        VALUES ${idList.map((id) => `('${id}')`).join(', ')};
-      `;
-      await dbMssql.raw(insertTempTableQuery);
-
-      // Query utama dengan JOIN ke temporary table
-      const query = dbMssql(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.username',
-          'u.name',
-          'u.email',
-          'u.statusaktif',
-          'u.modifiedby',
-          dbMssql.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-          'p.memo',
-          'p.text',
-        ])
-        .join('parameter as p', 'u.statusaktif', 'p.id')
-        .join(dbMssql.raw(`${tempData} as temp`), 'u.id', 'temp.id') // Menggunakan JOIN antar tabel user dan temporary table
+      const query = this.baseQuery(dbMssql)
+        .select(this.selectColumns(dbMssql))
+        .whereIn('u.id', idList)
         .orderBy('u.username', 'ASC');
 
       const data = await query;
-
-      // Menghapus temporary table setelah query selesai
-      const dropTempTableQuery = `DROP TABLE ${tempData};`;
-      await dbMssql.raw(dropTempTableQuery);
 
       return data;
     } catch (error) {
@@ -576,10 +531,8 @@ export class UserService {
 
   async getById(id: string, trx: any) {
     try {
-      // Fetch data by id from the database table
       const result = await trx(this.tableName).where('id', id).first();
 
-      // Check if data is found
       if (!result) {
         throw new Error('Data not found');
       }
@@ -590,133 +543,95 @@ export class UserService {
       throw new Error('Failed to fetch data by id');
     }
   }
-  async createTemporaryTable() {
+
+  async update(id: string, data: any, trx: any) {
     try {
-      const tempPenjualanDetail = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      const exists = await this.knex.schema.hasTable(tempPenjualanDetail);
-
-      if (!exists) {
-        await this.knex.schema.createTable(tempPenjualanDetail, (table) => {
-          table.bigIncrements('id').primary();
-          table.string('username', 255).nullable();
-          table.string('name', 255).nullable();
-          table.string('password', 255).nullable();
-          table.string('email', 255).nullable();
-          table.text('menu').nullable();
-          table.bigInteger('statusaktif').nullable();
-          table.string('modifiedby', 255).nullable();
-        });
-
-        const data = [
-          {
-            username: 'johndoe',
-            name: 'John Doe',
-            password: 'password123',
-            email: 'johndoe@example.com',
-            menu: 'Dashboard, Settings',
-            statusaktif: 1,
-            modifiedby: 'admin',
-          },
-          {
-            username: 'janedoe',
-            name: 'Jane Doe',
-            password: 'password456',
-            email: 'janedoe@example.com',
-            menu: 'Dashboard, Profile',
-            statusaktif: 1,
-            modifiedby: 'admin',
-          },
-        ];
-
-        await this.knex(tempPenjualanDetail).insert(data);
+      if (!existedData) {
+        throw new Error('User not found');
       }
 
-      const result = await this.knex(tempPenjualanDetail).select('*');
+      const { sortBy, sortDirection, filters, search, limit, userId } = data;
 
-      return {
-        message:
-          'Temporary user table already created. Data retrieved successfully.',
-        data: result,
-      };
-    } catch (error) {
-      console.error(
-        'Error creating temporary table and inserting data:',
-        error,
-      );
-      throw new InternalServerErrorException(
-        'Failed to create temporary table and insert data',
-      );
-    }
-  }
+      const sortColumn = sortBy || 'username';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
-  findOne(id: string) {
-    return `This action returns a #${id} user`;
-  }
+      const insertData = this.buildInsertData(data);
+      // id = kunci WHERE (PK), bukan kolom yang di-SET. created_at juga jangan
+      // ditimpa saat edit (buildInsertData mengisinya dengan now() bila kosong).
+      delete insertData.id;
+      delete insertData.created_at;
 
-  async selectFromTemporaryTable() {
-    try {
-      const parameters = await dbMssql('parameter').select([
-        'id',
-        'memo',
-        'text',
-      ]);
-
-      await dbMssql.raw(`
-        CREATE TABLE ##TempUserParameter (
-          user_id INT,
-          username VARCHAR(255),
-          name VARCHAR(255),
-          email VARCHAR(255),
-          statusaktif INT,
-          memo VARCHAR(255),
-          text VARCHAR(255)
+      // Hak akses disalin lebih dulu supaya string menu hasilnya ikut tersimpan
+      // dalam satu UPDATE yang sama.
+      if (userId) {
+        insertData.menu = await this.copyAccessFromUser(
+          trx,
+          id,
+          userId,
+          data.modifiedby,
         );
-      `);
-
-      await dbMssql.raw(`
-        CREATE TABLE ##TempParameter (
-          id INT,
-          memo VARCHAR(255),
-          text VARCHAR(255)
-        );
-      `);
-
-      for (const param of parameters) {
-        await dbMssql('##TempParameter').insert({
-          id: param.id,
-          memo: param.memo,
-          text: param.text,
-        });
       }
 
-      await dbMssql.raw(`
-        INSERT INTO ##TempUserParameter (user_id, username, name, email, statusaktif, memo, text)
-        SELECT 
-          u.id AS user_id,
-          u.username,
-          u.name,
-          u.email,
-          u.statusaktif,
-          p.memo,
-          p.text
-        FROM 
-          ${this.tableName} AS u
-        LEFT JOIN 
-          ##TempParameter AS p ON u.statusaktif = p.id;
-      `);
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
-      const result = await dbMssql.raw('SELECT * FROM ##TempUserParameter');
+      if (hasChanges) {
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
+      }
 
-      await dbMssql.raw('DROP TABLE ##TempUserParameter');
-      await dbMssql.raw('DROP TABLE ##TempParameter');
+      // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
+      // walau hasil edit tak lagi cocok dengan filter aktif.
+      const updatedItem = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', id)
+        .first();
 
-      return result;
-    } catch (error) {
-      console.error('Error with temporary table operation:', error);
-      throw new InternalServerErrorException(
-        'Failed to perform operation on temporary table',
+      const totalRecords = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
+
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        filters,
+        search,
+        sortColumn,
+        sortDir,
       );
+
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
+      );
+
+      await this.logTrailService.create(
+        {
+          namatabel: this.tableName,
+          postingdari: 'EDIT USER',
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
+          aksi: 'EDIT',
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
+        },
+        trx,
+      );
+
+      return { updatedItem, ...paged };
+    } catch (error) {
+      console.error('Error updating User :', error);
+      throw new Error('Failed to update User');
     }
   }
 
@@ -752,42 +667,110 @@ export class UserService {
     }
   }
 
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
+  private readonly EXPORT_COLUMNS = [
+    'u.username',
+    'u.name',
+    'u.email',
+    'p.text',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'username';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    return this.baseQuery(db)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .orderBy(orderCol, sortDirection);
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
+   * sebenarnya. JOIN ke `parameter` & `karyawan` tetap dipakai karena filter
+   * menyaring lewat p.text / k.namakaryawan.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await this.baseQuery(db)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN USER',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'USERNAME',
+      'NAMA',
+      'EMAIL',
+      'NAMA KARYAWAN',
+      'STATUS AKTIF',
+    ],
+    columnWidths: [5, 25, 30, 30, 30, 20],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.username,
+      row.name,
+      row.email,
+      row.namakaryawan,
+      row.text,
+    ],
+  };
+
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    // Header export
     worksheet.mergeCells('A1:F1');
     worksheet.mergeCells('A2:F2');
     worksheet.mergeCells('A3:F3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN USER';
     worksheet.getCell('A3').value = 'Data Export';
-    worksheet.getCell('A1').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A2').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A3').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A1').font = { size: 14, bold: true };
-    worksheet.getCell('A2').font = { bold: true };
-    worksheet.getCell('A3').font = { bold: true };
+    ['A1', 'A2', 'A3'].forEach((cellKey, i) => {
+      worksheet.getCell(cellKey).alignment = {
+        horizontal: 'center',
+        vertical: 'middle',
+      };
+      worksheet.getCell(cellKey).font = {
+        name: 'Tahoma',
+        size: i === 0 ? 14 : 10,
+        bold: true,
+      };
+    });
 
-    // Mendefinisikan header kolom
-    const headers = [
-      'No.',
-      'Username',
-      'Name',
-      'Email',
-      'Status Aktif',
-      'Created At',
-    ];
+    const headers = this.exportSheet.headers;
+
     headers.forEach((header, index) => {
       const cell = worksheet.getCell(5, index + 1);
       cell.value = header;
@@ -806,39 +789,39 @@ export class UserService {
       };
     });
 
-    // Mengisi data ke dalam Excel dengan nomor urut sebagai ID
     data.forEach((row, rowIndex) => {
-      worksheet.getCell(rowIndex + 6, 1).value = rowIndex + 1; // Nomor urut (ID)
-      worksheet.getCell(rowIndex + 6, 2).value = row.username;
-      worksheet.getCell(rowIndex + 6, 3).value = row.name;
-      worksheet.getCell(rowIndex + 6, 4).value = row.email;
-      worksheet.getCell(rowIndex + 6, 5).value = row.text;
-      worksheet.getCell(rowIndex + 6, 6).value = row.created_at;
-
-      // Menambahkan border untuk setiap cell
-      for (let col = 1; col <= headers.length; col++) {
-        const cell = worksheet.getCell(rowIndex + 6, col);
+      const currentRow = rowIndex + 6;
+      const rowValues = this.exportSheet.mapRow(row, rowIndex + 1);
+      rowValues.forEach((value, colIndex) => {
+        const cell = worksheet.getCell(currentRow, colIndex + 1);
+        cell.value = value ?? '';
         cell.font = { name: 'Tahoma', size: 10 };
+        cell.alignment = {
+          horizontal: colIndex === 0 ? 'right' : 'left',
+          vertical: 'middle',
+        };
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
           bottom: { style: 'thin' },
           right: { style: 'thin' },
         };
-      }
-      const progress = Math.round(((rowIndex + 1) / data.length) * 100);
+      });
     });
 
-    // Mengatur lebar kolom
-    worksheet.getColumn(1).width = 10; // Lebar untuk nomor urut
-    worksheet.getColumn(2).width = 30;
-    worksheet.getColumn(3).width = 30;
-    worksheet.getColumn(4).width = 30;
-    worksheet.getColumn(5).width = 15;
-    worksheet.getColumn(6).width = 20;
-    worksheet.getColumn('F').numFmt = 'dd-mm-yyyy hh:mm:ss';
+    worksheet.columns
+      .filter((c): c is Column => !!c)
+      .forEach((col) => {
+        let maxLength = 0;
+        col.eachCell({ includeEmpty: true }, (cell) => {
+          const cellValue = cell.value ? cell.value.toString() : '';
+          maxLength = Math.max(maxLength, cellValue.length);
+        });
+        col.width = maxLength + 2;
+      });
 
-    // Simpan file Excel ke direktori sementara
+    worksheet.getColumn(1).width = 6;
+
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -846,10 +829,37 @@ export class UserService {
 
     const tempFilePath = path.resolve(
       tempDir,
-      `laporan_user${Date.now()}.xlsx`,
+      `laporan_user_${Date.now()}.xlsx`,
     );
     await workbook.xlsx.writeFile(tempFilePath);
 
-    return tempFilePath; // Kembalikan path file sementara
+    return tempFilePath;
+  }
+
+  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
+    try {
+      if (aksi === 'EDIT') {
+        const forceEdit = await this.locksService.forceEdit(
+          this.tableName,
+          value,
+          editedby,
+          trx,
+        );
+
+        return forceEdit;
+      } else if (aksi === 'DELETE') {
+        const validasi = await this.globalService.checkUsed(
+          'userrole',
+          'user_id',
+          value,
+          trx,
+        );
+
+        return validasi;
+      }
+    } catch (error) {
+      console.error('Error di checkValidasi:', error);
+      throw new InternalServerErrorException('Failed to check validation');
+    }
   }
 }

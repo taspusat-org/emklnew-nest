@@ -12,8 +12,15 @@ export interface StartReportJobOptions {
    * Pengambil data laporan. Dipanggil di background — modul pemanggil
    * biasanya membungkus findAll()-nya sendiri di sini, lalu memetakan
    * baris ke kolom yang dipakai template.
+   *
+   * Balikannya boleh berupa array (template satu datasource) atau objek
+   * `{ namaTabel: baris[] }` untuk template header+rincian seperti
+   * LaporanHutang.mrt yang membaca `Data.data` dan `Data.detail`. Pada bentuk
+   * objek, tabel PERTAMA dianggap tabel utama: kalau isinya kosong, job
+   * dihentikan dengan pesan "Data tidak tersedia" (tabel rincian yang kosong
+   * bukan alasan membatalkan cetak).
    */
-  loadData: () => Promise<any[]>;
+  loadData: () => Promise<any[] | Record<string, any[]>>;
   /** Nama tabel di DataSet Stimulsoft. Default 'data' (dipakai template lama). */
   tableName?: string;
   /** Nama file PDF hasil unduhan. Default: mrtName dengan ekstensi .pdf. */
@@ -120,13 +127,21 @@ export class ReportJobService {
       35,
     );
 
-    let rows: any[];
+    let tables: Record<string, any[]>;
+    let mainRows: any[];
     try {
-      rows = await options.loadData();
+      const loaded = await options.loadData();
+      tables = Array.isArray(loaded)
+        ? { [options.tableName ?? 'data']: loaded }
+        : loaded;
+      mainRows = Object.values(tables)[0] ?? [];
       clearInterval(queryTicker);
 
+      const ringkasan = Object.entries(tables)
+        .map(([nama, baris]) => `${nama}=${baris?.length ?? 0}`)
+        .join(', ');
       this.logger.log(
-        `[run] query done → jobId=${jobId}, rows=${rows.length}, duration=${
+        `[run] query done → jobId=${jobId}, ${ringkasan}, duration=${
           Date.now() - startedAt
         }ms`,
       );
@@ -144,7 +159,7 @@ export class ReportJobService {
       return;
     }
 
-    if (rows.length === 0) {
+    if (mainRows.length === 0) {
       this.logger.warn(`[run] tidak ada data → jobId=${jobId}`);
       this.failJob(
         jobId,
@@ -171,11 +186,9 @@ export class ReportJobService {
     try {
       let pdfBuffer: Buffer;
       try {
-        pdfBuffer = await this.reportPdf.generatePdf(
-          rows,
-          options.mrtName,
-          options.tableName,
-        );
+        // `tables` sudah berbentuk objek bernama di atas, jadi tableName
+        // tidak perlu diteruskan lagi.
+        pdfBuffer = await this.reportPdf.generatePdf(tables, options.mrtName);
       } finally {
         clearInterval(pdfTicker);
       }
