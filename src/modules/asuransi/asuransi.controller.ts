@@ -41,12 +41,18 @@ import {
   ReportAsuransiSchema,
 } from './dto/report-asuransi.dto';
 import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ExportAsuransiDto,
+  ExportAsuransiSchema,
+} from './dto/export-asuransi.dto';
 
 @Controller('asuransi')
 export class AsuransiController {
   constructor(
     private readonly asuransiService: AsuransiService,
     private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -233,7 +239,7 @@ export class AsuransiController {
             // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
             pagination: { page: 1, limit: 0 },
             sort: {
-              sortBy: sortBy || 'keterangan',
+              sortBy: sortBy || 'nama',
               sortDirection: sortDirection || 'asc',
             },
             isLookUp: false,
@@ -258,6 +264,39 @@ export class AsuransiController {
           judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
         }));
       },
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportAsuransiSchema))
+    body: ExportAsuransiDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_asuransi_${stamp}.xlsx`,
+      countRows: () =>
+        this.asuransiService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.asuransiService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.asuransiService.exportSheet,
     });
   }
 

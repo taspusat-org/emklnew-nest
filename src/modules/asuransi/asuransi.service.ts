@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
 import { Knex } from 'knex';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
 
 const MONEY_COLUMNS = [
   'ratemodal',
@@ -580,13 +581,195 @@ export class AsuransiService {
     }
   }
 
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
+  private readonly EXPORT_COLUMNS = [
+    'va.nama',
+    'va.keterangan',
+    'va.contactperson',
+    'va.alamat',
+    'va.kota',
+    'va.kodepos',
+    'va.telp',
+    'va.email',
+    'va.fax',
+    'va.web',
+    'va.ratemodal',
+    'va.ratejual',
+    'va.npwp',
+    'va.nominalasuransi',
+    'va.rateopendoor',
+    'va.adminbiaya',
+    'va.batas1',
+    'va.batas2',
+    'va.batas3',
+    'va.materai1',
+    'va.materai2',
+    'va.materai3',
+    'va.statusaktif_nama',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
+   * proses kehabisan heap.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as va`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('va.text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('va.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('va.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('va.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`va.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
+   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
+   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as va`)
+      .count('va.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN ASURANSI',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'KETERANGAN',
+      'CONTACT PERSON',
+      'ALAMAT',
+      'KOTA',
+      'KODE POS',
+      'NO TELP',
+      'EMAIL',
+      'FAX',
+      'WEB',
+      'RATE MODAL',
+      'RATE JUAL',
+      'NPWP',
+      'NOMINAL ASURANSI',
+      'RATE OPEN DOOR',
+      'ADMIN BIAYA',
+      'BATAS 1',
+      'BATAS 2',
+      'BATAS 3',
+      'MATERAI 1',
+      'MATERAI 2',
+      'MATERAI 3',
+      'STATUS AKTIF',
+    ],
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    columnWidths: [
+      5, 25, 50, 17, 30, 20, 10, 12, 25, 15, 25, 15, 15, 15, 15, 15, 15, 15, 15,
+      15, 15, 15, 15, 15,
+    ],
+    columnFormats: [
+      null, // NO. — default sudah rata kanan
+      null, // NAMA
+      { wrapText: true }, // KETERANGAN — teks panjang dibungkus
+      null, // CONTACT PERSON
+      null, // ALAMAT
+      null, // KOTA
+      null, // KODE POS
+      null, // NO TELP
+      null, // EMAIL
+      null, // FAX
+      null, // WEB
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // RATE MODAL
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // RATE JUAL
+      null, // NPWP
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL ASURANSI
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // RATE OPEN DOOR
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // ADMIN BIAYA
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // BATAS 1
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // BATAS 2
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // BATAS 3
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 1
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 2
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 3
+      { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL — Rp1.500.000, otomatis rata kanan
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+      row.contactperson,
+      row.alamat,
+
+      row.kota,
+      row.kodepos,
+      row.telp,
+      row.email,
+      row.fax,
+
+      row.web,
+      row.ratemodal,
+      row.ratejual,
+      row.npwp,
+      row.nominalasuransi,
+
+      row.rateopendoor,
+      row.adminbiaya,
+      row.batas1,
+      row.batas2,
+      row.batas3,
+
+      row.materai1,
+      row.materai2,
+      row.materai3,
+      row.statusaktif_nama,
+    ],
+  };
+
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    worksheet.mergeCells('A1:T1');
-    worksheet.mergeCells('A2:T2');
-    worksheet.mergeCells('A3:T3');
+    worksheet.mergeCells('A1:X1');
+    worksheet.mergeCells('A2:X2');
+    worksheet.mergeCells('A3:X3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN ASURANSI';
     worksheet.getCell('A3').value = 'Data Export';
