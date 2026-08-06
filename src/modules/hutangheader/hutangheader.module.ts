@@ -27,10 +27,6 @@ import { ReportModule } from 'src/common/report/report.module';
     StatuspendukungModule,
     ReportModule,
   ],
-  // Catatan: GlobalModule & LocksModule dipertahankan di imports meski service
-  // tidak lagi meng-inject GlobalService/LocksService — sama seperti
-  // PengeluaranheaderModule — agar modul lain yang menumpang graf ini tidak
-  // ikut berubah.
   controllers: [HutangheaderController],
   providers: [HutangheaderService],
   exports: [HutangheaderService],

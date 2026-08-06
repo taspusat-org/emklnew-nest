@@ -45,7 +45,7 @@ test-logs/
 .env.test.local
 .env.production.local
 .env.local
-
+CLAUDE.MD
 # temp directory
 .temp
 .tmp
