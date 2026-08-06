@@ -125,11 +125,6 @@ export class AlatbayarService {
 
       const insertData = this.buildInsertData(CreateAlatbayarDto, uuid);
       await trx(this.tableName).insert(insertData);
-      // id sekarang varchar UUID (bukan auto-increment), jadi
-      // orderBy('id','desc').first() TIDAK mengembalikan baris yang baru
-      // diinsert — id UUID tidak terurut secara kronologis. Ambil langsung
-      // by uuid yang baru kita generate & insert supaya fokus baris setelah
-      // simpan menunjuk ke data yang benar.
       const newItem = await trx(this.viewName).where('id', uuid).first();
 
       const existingData = await trx(`${this.viewName} as ab`)
@@ -249,25 +244,11 @@ export class AlatbayarService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
-      // Count dari tabel BASE (alatbayar), bukan view valatbayar. View hanya
-      // menambah kolom _text/_memo lewat LEFT JOIN ke parameter — LEFT JOIN tidak
-      // pernah mengubah jumlah baris, jadi count base == count view tapi tanpa
-      // overhead 4 JOIN (pada ~1jt baris: ~297ms -> ~119ms). applyFilters hanya
-      // mereferensikan kolom yang ada di tabel base (nama, keterangan, status*,
-      // created_at, updated_at, modifiedby) sehingga hasilnya identik.
-      const countResult = await trx(`${this.tableName} as ab`)
+      const countResult = await trx(`${this.viewName} as ab`)
         .count('ab.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
-
-      // Lookup dengan hasil > 500 baris: JANGAN tarik semua baris. Path lookup
-      // tidak mengirim limit (limit=0) sehingga query mengambil SELURUH tabel —
-      // alatbayar ~1jt baris → serialisasi JSON melempar "RangeError: Invalid
-      // string length" (melebihi batas panjang string V8) → 500. Balas
-      // type:'json' tanpa data agar komponen LookUp beralih ke server-side
-      // search, konsisten dgn responseType path normal (>500 → 'json') dan guard
-      // di PengeluaranheaderService.findAll.
       if (isLookUp && total > 500) {
         return {
           data: [],
@@ -360,7 +341,6 @@ export class AlatbayarService {
 
   async update(id: string, data: any, trx: any) {
     try {
-      console.log('data', data);
       const existedData = await trx(this.tableName).where('id', id).first();
 
       if (!existedData) {
@@ -368,19 +348,7 @@ export class AlatbayarService {
       }
 
       const { sortBy, sortDirection, filters, search, limit } = data;
-      // JANGAN blanket-uppercase semua field string. id, uuid, dan status*
-      // adalah UUID bertipe TEXT (case-sensitive). Meng-uppercase-nya mengubah
-      // nilai: id lowercase (mis. 02-019f5ea1-..) jadi 02-019F5EA1-.. sehingga
-      // PK berubah & FK status* bisa tak match. Uppercase nama & keterangan
-      // sudah ditangani buildInsertData().
-      // 2. Build insert payload — uppercase hanya nama & keterangan,
-      //    sama persis seperti create, via buildInsertData()
       const insertData = this.buildInsertData(data);
-      // id = kunci WHERE (PK), bukan kolom yang di-SET saat update.
-      // buildInsertData mengisi id dari dto.uuid; kalau ikut ter-UPDATE, PK
-      // berpindah dan lookup `updatedItem` (by id lama) gagal -> updatedItem
-      // undefined -> updatedItem.id throw -> 500. created_at juga jangan ditimpa
-      // saat edit (buildInsertData mengisinya dengan now() bila dto kosong).
       delete insertData.id;
       delete insertData.created_at;
 

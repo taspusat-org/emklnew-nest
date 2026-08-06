@@ -23,6 +23,39 @@ export class HutangdetailService {
 
   private readonly logger = new Logger(HutangdetailService.name);
 
+  /**
+   * Kolom tabel hutangdetail (selain `id` yang diisi withUuidV7) — satu-satunya
+   * sumber kebenaran untuk INSERT maupun UPDATE, supaya kedua daftar kolom tidak
+   * lagi ditulis terpisah dan bisa menyimpang. Key kiriman frontend di luar
+   * daftar ini (mis. coa_text, aksi) dibuang.
+   */
+  private buildDetailRow(
+    row: any,
+    hutangId: any,
+    { withNobukti }: { withNobukti: boolean },
+  ): Record<string, any> {
+    const data: Record<string, any> = {
+      coa: row.coa,
+      keterangan: row.keterangan,
+      nominal: row.nominal,
+      dpp: row.dpp,
+      noinvoiceemkl: row.noinvoiceemkl,
+      tglinvoiceemkl: row.tglinvoiceemkl,
+      nofakturpajakemkl: row.nofakturpajakemkl,
+      info: row.info,
+      modifiedby: row.modifiedby,
+      hutang_id: hutangId,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+
+    // nobukti hanya diisi saat INSERT. Pada UPDATE sengaja tidak disertakan:
+    // nomor bukti milik header dan tidak boleh berubah lewat baris detail.
+    if (withNobukti) data.nobukti = row.nobukti;
+
+    return data;
+  }
+
   async create(details: any, id: any = 0, trx: any = null) {
     // Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
     // Server (tak ada di PG), dan `##temp_...` adalah sintaks global temp table
@@ -80,26 +113,14 @@ export class HutangdetailService {
       logData.push({ ...data, created_at: time });
     }
 
-    // UPDATE baris existing (per baris). nobukti sengaja TIDAK diubah agar sama
-    // persis dgn perilaku lama (UPDATE JOIN tidak menyertakan nobukti).
+    // UPDATE baris existing (per baris).
     let updatedData: any = null;
     for (const row of existingRows) {
       const res = await trx(this.tableName)
         .where('id', row.id)
-        .update({
-          coa: row.coa,
-          keterangan: row.keterangan,
-          nominal: row.nominal,
-          dpp: row.dpp,
-          noinvoiceemkl: row.noinvoiceemkl,
-          tglinvoiceemkl: row.tglinvoiceemkl,
-          nofakturpajakemkl: row.nofakturpajakemkl,
-          info: row.info,
-          modifiedby: row.modifiedby,
-          hutang_id: row.hutang_id ?? id,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        })
+        .update(
+          this.buildDetailRow(row, row.hutang_id ?? id, { withNobukti: false }),
+        )
         .returning('*');
       if (res && res[0]) updatedData = res[0];
     }
@@ -128,21 +149,9 @@ export class HutangdetailService {
     // INSERT baris baru dgn uuid v7.
     let insertedData: any = null;
     if (newRows.length > 0) {
-      const toInsert = newRows.map((r: any) => ({
-        nobukti: r.nobukti,
-        coa: r.coa,
-        keterangan: r.keterangan,
-        nominal: r.nominal,
-        dpp: r.dpp,
-        noinvoiceemkl: r.noinvoiceemkl,
-        tglinvoiceemkl: r.tglinvoiceemkl,
-        nofakturpajakemkl: r.nofakturpajakemkl,
-        info: r.info,
-        modifiedby: r.modifiedby,
-        hutang_id: id,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-      }));
+      const toInsert = newRows.map((r: any) =>
+        this.buildDetailRow(r, id, { withNobukti: true }),
+      );
       insertedData = await trx(this.tableName)
         .insert(await withUuidV7(trx, toInsert))
         .returning('*')

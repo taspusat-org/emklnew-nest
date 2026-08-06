@@ -100,9 +100,6 @@ export class AsuransiService {
   }
 
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
-    // Tabel `asuransi` hanya punya kolom status* (varchar id parameter),
-    // TIDAK ada kolom *_uuid. Menyisipkan *_uuid -> "Invalid column name".
-    // Kolom _text/_uuid/_memo diturunkan di view vasuransi via JOIN parameter.
     return {
       id: uuid ? uuid : dto.uuid,
       nama: dto.nama ? dto.nama.toUpperCase() : null,
@@ -136,13 +133,6 @@ export class AsuransiService {
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (text/*_text), bukan id (varchar
-   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
-   * fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -171,11 +161,6 @@ export class AsuransiService {
 
       const insertData = this.buildInsertData(CreateAsuransiDto, uuid);
       await trx(this.tableName).insert(insertData);
-      // id sekarang varchar UUID (bukan auto-increment), jadi
-      // orderBy('id','desc').first() TIDAK mengembalikan baris yang baru
-      // diinsert — id UUID tidak terurut secara kronologis. Ambil langsung
-      // by uuid yang baru kita generate & insert supaya fokus baris setelah
-      // simpan menunjuk ke data yang benar.
       const newItem = await trx(this.viewName).where('id', uuid).first();
 
       const existingData = await trx(`${this.viewName} as va`)
@@ -414,19 +399,7 @@ export class AsuransiService {
       }
 
       const { sortBy, sortDirection, filters, search, limit } = data;
-      // JANGAN blanket-uppercase semua field string. id, uuid, dan status*
-      // adalah UUID bertipe TEXT (case-sensitive). Meng-uppercase-nya mengubah
-      // nilai: id lowercase (mis. 02-019f5ea1-..) jadi 02-019F5EA1-.. sehingga
-      // PK berubah & FK status* bisa tak match. Uppercase nama & keterangan
-      // sudah ditangani buildInsertData().
-      // 2. Build insert payload — uppercase hanya nama & keterangan,
-      //    sama persis seperti create, via buildInsertData()
       const insertData = this.buildInsertData(data);
-      // id = kunci WHERE (PK), bukan kolom yang di-SET saat update.
-      // buildInsertData mengisi id dari dto.uuid; kalau ikut ter-UPDATE, PK
-      // berpindah dan lookup `updatedItem` (by id lama) gagal -> updatedItem
-      // undefined -> updatedItem.id throw -> 500. created_at juga jangan ditimpa
-      // saat edit (buildInsertData mengisinya dengan now() bila dto kosong).
       delete insertData.id;
       delete insertData.created_at;
 
@@ -444,13 +417,6 @@ export class AsuransiService {
         insertData.updated_at = this.utilsService.getTime();
         await trx(this.tableName).where('id', id).update(insertData);
       }
-
-      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
-      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_uuid/
-      // _memo) yang tidak ada di tabel base; dipakai untuk acuan posisi dan
-      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
-      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
-      // dengan filter aktif.
       const updatedItem = await trx(this.viewName).where('id', id).first();
 
       const existingData = await trx(`${this.viewName} as va`)

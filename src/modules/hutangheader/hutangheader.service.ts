@@ -24,22 +24,9 @@ import { StatuspendukungService } from '../statuspendukung/statuspendukung.servi
 
 @Injectable()
 export class HutangheaderService {
-  // Kolom teks manusiawi — HANYA ini yang boleh di-uppercase. Sebelumnya
-  // `nobukti` ikut di-uppercase; itu tidak berguna (nilainya datang dari
-  // generateRunningNumber yang memang sudah uppercase) dan berbahaya sebagai
-  // pola, karena kolom identifier lain (id, relasi_id, statusformat, coa)
-  // bertipe text case-sensitive dan mayoritas id master kini uuid v7 HURUF
-  // KECIL. Blanket uppercase menulis id yang tidak ada; tanpa FK Postgres
-  // menerimanya diam-diam sehingga lookup tampil kosong dan perubahan terlihat
-  // "tidak tersimpan" tanpa satu pun error — lihat pengeluaranheader.service.ts.
   private readonly uppercaseFields = ['keterangan', 'info'];
 
   constructor(
-    // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'). Token REDIS_CLIENT
-    // memberi instance ioredis mentah dengan enableOfflineQueue:false → saat
-    // Redis mati, redisService.set() melempar "Stream isn't writeable" dan
-    // menggagalkan create/update (500). Wrapper RedisService membungkus set/get
-    // dengan try/catch sehingga cache bersifat best-effort (lanjut tanpa cache).
     private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
@@ -50,24 +37,53 @@ export class HutangheaderService {
   ) {}
 
   private readonly tableName = 'hutangheader';
-  // Baca lewat view, tulis lewat tabel base — pola yang sama dengan
-  // pengeluaranheader (vpengeluaranheader). View sudah memuat relasi_text,
-  // coa_text, dan link sehingga findAll tidak perlu JOIN + membangun tabel temp
-  // per request; itu syarat agar windowed pagination (grid menarik 5 halaman
-  // sekaligus) tetap murah.
   private readonly viewName = 'vhutangheader';
+
+  private static readonly headerColumns = [
+    'nobukti',
+    'tglbukti',
+    'tgljatuhtempo',
+    'keterangan',
+    'relasi_id',
+    'coa',
+    'statusformat',
+    'info',
+    'modifiedby',
+    'created_at',
+    'updated_at',
+  ] as const;
+
+  private buildHeaderData(
+    dto: any,
+    overrides: Record<string, any> = {},
+  ): Record<string, any> {
+    const source = { ...dto, ...overrides };
+    const data: Record<string, any> = {};
+
+    for (const column of HutangheaderService.headerColumns) {
+      if (source[column] !== undefined) data[column] = source[column];
+    }
+
+    this.uppercaseFields.forEach((field) => {
+      if (typeof data[field] === 'string') {
+        data[field] = data[field].toUpperCase();
+      }
+    });
+
+    if (data.tglbukti !== undefined) {
+      data.tglbukti = formatDateToSQL(String(data.tglbukti));
+    }
+    if (data.tgljatuhtempo !== undefined) {
+      data.tgljatuhtempo = formatDateToSQL(String(data.tgljatuhtempo));
+    }
+
+    return data;
+  }
 
   private async setDateRangeSessionContext(
     trx: any,
     filters: Record<string, any>,
   ): Promise<void> {
-    // DB tasemkl adalah PostgreSQL (dbMssql cuma nama variabel). Filter periode
-    // diturunkan ke view lewat GUC per-transaksi:
-    //   set_config('tas.hutang_*', value, true)
-    // is_local=true → otomatis reset di akhir transaksi (findAll dibungkus satu
-    // transaksi di controller) jadi tidak bocor ke request lain lewat koneksi
-    // pool. View vhutangheader membacanya via current_setting('tas.hutang_*',
-    // true) dan memperlakukan '' sebagai "tanpa filter" (NULLIF(...,'')).
     if (filters?.tglDari && filters?.tglSampai) {
       const tglDariFormatted = formatDateToSQL(String(filters.tglDari));
       const tglSampaiFormatted = formatDateToSQL(String(filters.tglSampai));
@@ -82,28 +98,17 @@ export class HutangheaderService {
       }
     }
 
-    // relasi_id opsional: '' = tanpa filter, di-set eksplisit tiap kali agar
-    // tidak terbawa dari transaksi sebelumnya di koneksi pool yang sama.
     await trx.raw(`SELECT set_config('tas.hutang_relasi_id', ?, true)`, [
       filters?.relasi_id ? String(filters.relasi_id) : '',
     ]);
   }
 
-  /**
-   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
-   * total & halaman selalu konsisten. Dulu total dihitung dari
-   * `trx(tableName).count()` tanpa filter apa pun, sehingga totalPages di grid
-   * selalu menghitung SELURUH baris — infinite scroll tidak pernah berhenti di
-   * halaman terakhir yang benar.
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
     search?: string,
     alias?: string,
   ): void {
-    // tglDari/tglSampai/relasi_id diturunkan ke view lewat GUC, jadi jangan
-    // ikut jadi predikat LIKE di sini.
     const excludeSearchKeys: string[] = ['tglDari', 'tglSampai', 'relasi_id'];
     const dateFields = [
       'created_at',
@@ -163,30 +168,19 @@ export class HutangheaderService {
         search,
         page,
         limit,
-        coa_text,
-        relasi_text,
         details,
         modifiedby,
         created_at,
         updated_at,
-        ...insertData
       } = data;
 
       await this.setDateRangeSessionContext(trx, filters || {});
 
-      this.uppercaseFields.forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
+      const insertData = this.buildHeaderData(data, {
+        modifiedby,
+        created_at: created_at || this.utilsService.getTime(),
+        updated_at: updated_at || this.utilsService.getTime(),
       });
-
-      insertData.tglbukti = formatDateToSQL(String(insertData?.tglbukti));
-      insertData.tgljatuhtempo = formatDateToSQL(
-        String(insertData?.tgljatuhtempo),
-      );
-      insertData.modifiedby = modifiedby;
-      insertData.created_at = created_at || this.utilsService.getTime();
-      insertData.updated_at = updated_at || this.utilsService.getTime();
 
       const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
       const getParam = await trx('parameter')
@@ -486,7 +480,9 @@ export class HutangheaderService {
         'u.link',
       ]);
 
-      query.modify((qb: any) => this.applyFilters(qb, safeFilters, search, 'u'));
+      query.modify((qb: any) =>
+        this.applyFilters(qb, safeFilters, search, 'u'),
+      );
 
       // Urutan HARUS deterministik: tanpa tiebreaker unik, offset/limit bisa
       // memulangkan baris yang sama di dua halaman berbeda (atau melewatkan
@@ -507,7 +503,8 @@ export class HutangheaderService {
 
       const data = await query;
 
-      const totalPages = Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
       const responseType = total > 500 ? 'json' : 'local';
 
       return {
@@ -630,29 +627,15 @@ export class HutangheaderService {
 
   async update(id: any, data: any, trx: any) {
     try {
-      data.tglbukti = formatDateToSQL(String(data?.tglbukti));
-      data.tgljatuhtempo = formatDateToSQL(String(data?.tgljatuhtempo));
-
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        relasi_text,
-        coa_text,
-        details,
-        ...insertData
-      } = data;
+      const { sortBy, sortDirection, filters, search, page, limit, details } =
+        data;
 
       await this.setDateRangeSessionContext(trx, filters || {});
 
-      this.uppercaseFields.forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
+      // created_at tidak ikut: kolom itu milik baris yang sudah ada dan tidak
+      // boleh ditimpa nilai kiriman client saat edit.
+      const { created_at: _createdAt, ...insertData } =
+        this.buildHeaderData(data);
 
       const existedData = await trx(this.tableName).where('id', id).first();
       if (!existedData) {
