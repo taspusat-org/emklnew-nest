@@ -1244,7 +1244,7 @@ async function generateUuidV7Rows(
 export async function uuidV7(trx: any): Promise<string> {
   const kodeCabang = await getKodeCabang(trx);
   const [uuid] = await generateUuidV7Rows(trx, kodeCabang, 1);
-  return uuid ?? null;
+  return uuid?.toUpperCase() ?? null;
 }
 
 /**
@@ -1254,10 +1254,7 @@ export async function uuidV7(trx: any): Promise<string> {
  * Sebelumnya insert massal memanggil uuidV7() per baris: 591 baris ACL = 1.182
  * round-trip DB berurutan, yang membuat PUT /roleacl kena timeout.
  */
-export async function uuidV7Many(
-  trx: any,
-  count: number,
-): Promise<string[]> {
+export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
   if (count <= 0) return [];
 
   const kodeCabang = await getKodeCabang(trx);
@@ -1297,15 +1294,13 @@ export async function withUuidV7(trx: any, data: any): Promise<any> {
   return { ...data, id: await uuidV7(trx) };
 }
 
-
 // estimasi/nominal/nominaltagih bertipe money->numeric. Grid mengirimnya
 // lewat InputCurrency sebagai string ter-format ("100,000.00"); koma
 // ribuan ditolak PG dengan 22P02 invalid input syntax for type numeric.
 // Kosong -> null (kolom nullable).
 export const toNumeric = (value: any): number | null => {
   if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'number')
-    return Number.isFinite(value) ? value : null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
   return Number.isNaN(parsed) ? null : parsed;
 };
