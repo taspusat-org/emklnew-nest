@@ -106,16 +106,16 @@ export class AsuransiService {
       nama: dto.nama ? dto.nama.toUpperCase() : null,
       keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null, // Wajib isi
       contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null, // Wajib isi
-      alamat: dto.alamat ?? null,
-      kota: dto.kota ?? null,
-      kodepos: dto.kodepos ?? null,
-      telp: dto.telp ?? null,
-      email: dto.email ?? null,
-      fax: dto.fax ?? null,
-      web: dto.web ?? null,
+      alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
+      kota: dto.kota ? dto.kota.toUpperCase() : null,
+      kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
+      telp: dto.telp ? dto.telp.toUpperCase() : null,
+      email: dto.email ? dto.email.toUpperCase() : null,
+      fax: dto.fax ? dto.fax.toUpperCase() : null,
+      web: dto.web ? dto.web.toUpperCase() : null,
       ratemodal: toNumeric(dto.ratemodal) ?? 0,
       ratejual: toNumeric(dto.ratejual) ?? 0,
-      npwp: dto.npwp ?? null,
+      npwp: dto.npwp ? dto.npwp.toUpperCase() : null,
       nominalasuransi: toNumeric(dto.nominalasuransi) ?? 0,
       rateopendoor: toNumeric(dto.rateopendoor) ?? 0,
       adminbiaya: toNumeric(dto.adminbiaya) ?? 0,
@@ -127,7 +127,7 @@ export class AsuransiService {
       materai2: toNumeric(dto.materai2) ?? 0,
       materai3: toNumeric(dto.materai3) ?? 0,
       statusaktif: dto.statusaktif,
-      info: dto.info ?? null,
+      info: dto.info ? dto.info.toUpperCase() : null,
       modifiedby: dto.modifiedby,
       created_at: dto.created_at || this.utilsService.getTime(),
       updated_at: dto.updated_at || this.utilsService.getTime(),
@@ -349,7 +349,7 @@ export class AsuransiService {
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .text)
+      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .statusaktif_text)
       if (sortBy === 'statusaktif') {
         query.orderBy('va.statusaktif_nama', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
       } else {
@@ -600,7 +600,7 @@ export class AsuransiService {
       .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
     if (sortBy === 'statusaktif') {
-      query.orderBy('va.text', 'asc');
+      query.orderBy('va.statusaktif_text', 'asc');
     } else if (sortBy === 'statusbank') {
       query.orderBy('va.statusbank_text', sortDirection);
     } else if (sortBy === 'statusdefault') {
@@ -695,7 +695,6 @@ export class AsuransiService {
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 2
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 3
       { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
-      { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL — Rp1.500.000, otomatis rata kanan
     ],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
