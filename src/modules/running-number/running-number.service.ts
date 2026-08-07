@@ -73,6 +73,85 @@ export class RunningNumberService {
     return dbMssql(table).insert(data);
   }
 
+  private resolveScope(
+    type: string,
+    year: number,
+    month: number,
+  ): { from: string; to: string } | null {
+    const formatDate = (date: Date) => {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+
+    if (type === 'RESET BULAN') {
+      return {
+        from: formatDate(new Date(year, month - 1, 1)),
+        to: formatDate(new Date(year, month, 1)),
+      };
+    }
+
+    if (type === 'RESET TAHUN') {
+      return { from: `${year}-01-01`, to: `${year + 1}-01-01` };
+    }
+
+    return null;
+  }
+
+  // Nomor bebas terkecil dihitung di SQL dalam satu round-trip. Versi lama
+  // menarik 1000 nobukti ke Node, men-scan-nya dengan regex JS, lalu menebak
+  // nomor satu per satu lewat query berulang — begitu satu periode melewati
+  // 1000 dokumen, tebakannya selalu mulai dari nomor yang sudah terpakai dan
+  // create-nya timeout.
+  private async findNumberSlot(
+    trx: any,
+    table: string,
+    field: string,
+    pattern: string,
+    scope: { from: string; to: string } | null,
+  ): Promise<{ firstGap: number; maxNum: number }> {
+    const anchored = `^${pattern}$`;
+    const bindings: any[] = [field, anchored, table, field, anchored];
+    let dateFilter = '';
+
+    if (scope) {
+      dateFilter = 'AND tglbukti >= ? AND tglbukti < ?';
+      bindings.push(scope.from, scope.to);
+    }
+
+    const result = await trx.raw(
+      `
+      WITH used AS (
+        SELECT DISTINCT CAST(substring(??::text FROM ?) AS bigint) AS num
+        FROM ??
+        WHERE ??::text ~ ?
+        ${dateFilter}
+      )
+      SELECT
+        COALESCE((SELECT MAX(num) FROM used), 0) AS max_num,
+        CASE
+          WHEN NOT EXISTS (SELECT 1 FROM used WHERE num = 1) THEN 1
+          ELSE COALESCE(
+            (
+              SELECT MIN(u.num) + 1
+              FROM used u
+              WHERE NOT EXISTS (SELECT 1 FROM used v WHERE v.num = u.num + 1)
+            ),
+            1
+          )
+        END AS first_gap
+      `,
+      bindings,
+    );
+
+    const row = result?.rows?.[0] ?? result?.[0] ?? {};
+    return {
+      firstGap: Number(row.first_gap ?? 1) || 1,
+      maxNum: Number(row.max_num ?? 0) || 0,
+    };
+  }
+
   extractPrefixFromFormat(format: string): string {
     let match = format.match(/^([A-Z]+)\s*#/);
     if (match) {
@@ -98,8 +177,6 @@ export class RunningNumberService {
     pattern = pattern.replace(/#(9+)#/g, '(\\d+)');
     pattern = pattern.replace(/^(9+)#/g, '(\\d+)');
 
-    console.log('Pattern after number replacement:', pattern);
-
     // Replace semua placeholder - support both #KEY# and #KEY
     // Definisikan urutan eksplisit untuk menghindari konflik (terpanjang dulu)
     const keysOrder = ['NC', 'R', 'T', 'P', 'M', 'Y', 'y', 'C'];
@@ -113,9 +190,6 @@ export class RunningNumberService {
         const placeholderPatternFull = `#${key}#`;
         if (pattern.includes(placeholderPatternFull)) {
           pattern = pattern.split(placeholderPatternFull).join(escapedValue);
-          console.log(
-            `Replaced ${placeholderPatternFull} with "${value}", pattern now: ${pattern}`,
-          );
           continue;
         }
 
@@ -125,19 +199,12 @@ export class RunningNumberService {
         const regexShort = new RegExp(`#${key}(?![A-Z])`, 'g');
         if (regexShort.test(pattern)) {
           pattern = pattern.replace(regexShort, escapedValue);
-          console.log(
-            `Replaced ${placeholderPatternShort} with "${value}", pattern now: ${pattern}`,
-          );
         }
       }
     }
 
-    console.log('Pattern before removing #:', pattern);
-
     // Hapus semua tanda '#' yang tersisa
     pattern = pattern.replace(/#/g, '');
-
-    console.log('Final pattern:', pattern);
 
     return pattern;
   }
@@ -243,110 +310,53 @@ export class RunningNumberService {
       P: namaPelayaran || '',
     };
 
-    console.log('Placeholders:', placeholders);
-
-    // Buat pattern untuk matching
+    const fixField = field ? field : 'nobukti';
     const pattern = this.createPatternForMatching(format, placeholders);
-    console.log('Pattern for matching:', pattern);
+    const scope = this.resolveScope(type, year, month);
 
-    const lastRowData = await this.getLastNumber(
+    const { firstGap, maxNum } = await this.findNumberSlot(
       trx,
       table,
-      year,
-      month,
-      type,
-      parameter.id,
-      field,
+      fixField,
+      pattern,
+      scope,
     );
 
-    console.log('lastRowData:', lastRowData);
-    console.log('format:', format);
-
-    // Filter nobukti berdasarkan pattern
-    const regex = new RegExp(`^${pattern}$`);
-    const filteredRows = lastRowData.filter((row) => {
-      const isMatch = regex.test(row.nobukti);
-      console.log(`Testing: ${row.nobukti} against pattern = ${isMatch}`);
-      return isMatch;
-    });
-
-    console.log('filteredRows:', filteredRows);
-
-    // Ekstrak angka dari nobukti yang match
-    const usedNumbers = filteredRows
-      .map((row) => {
-        const match = row.nobukti.match(regex);
-        if (match && match[1]) {
-          const num = parseInt(match[1], 10);
-          console.log(`Extracted number from ${row.nobukti}: ${num}`);
-          return num;
-        }
-        return null;
-      })
-      .filter((num) => num !== null);
-
-    console.log('usedNumbers:', usedNumbers);
-
-    // Cari nomor terkecil yang belum dipakai
-    let nextNumber = 1;
-    if (usedNumbers.length > 0) {
-      usedNumbers.sort((a, b) => a - b);
-      for (let i = 0; i < usedNumbers.length; i++) {
-        if (usedNumbers[i] !== nextNumber) {
-          break;
-        }
-        nextNumber++;
-      }
-    }
-
-    console.log('nextNumber:', nextNumber);
-
-    // Hitung digit dari format
     const digitMatch = format.match(/#?(9+)#/);
-    let digitCount = 0;
-    if (digitMatch) {
-      digitCount = digitMatch[1].length;
-    }
+    const digitCount = digitMatch ? digitMatch[1].length : 0;
 
-    let nextNumberString = nextNumber.toString();
-    if (digitCount > 0) {
-      nextNumberString = nextNumberString.padStart(digitCount, '0');
-    }
-
-    let runningNumber = this.formatNumber(
-      format,
-      placeholders,
-      nextNumberString,
-    );
-
-    // Loop cek keunikan nomor
-    let isUnique = false;
-    let attempts = 0;
-    const maxAttempts = 10000;
-
-    while (!isUnique && attempts < maxAttempts) {
-      const existingNobukti = await trx(table)
-        .where('nobukti', runningNumber)
-        .first();
-
-      if (!existingNobukti) {
-        isUnique = true;
-      } else {
-        nextNumber++;
-        nextNumberString = nextNumber.toString().padStart(digitCount, '0');
-        runningNumber = this.formatNumber(
-          format,
-          placeholders,
-          nextNumberString,
-        );
-        attempts++;
-      }
-    }
-
-    if (attempts >= maxAttempts) {
-      throw new Error(
-        'Unable to generate unique running number after maximum attempts',
+    const buildNumber = (value: number) =>
+      this.formatNumber(
+        format,
+        placeholders,
+        digitCount > 0
+          ? String(value).padStart(digitCount, '0')
+          : String(value),
       );
+
+    const isTaken = async (value: string) =>
+      Boolean(await trx(table).where(fixField, value).first());
+
+    let nextNumber = firstGap;
+    let runningNumber = buildNumber(nextNumber);
+
+    // Slot dari SQL praktis selalu bebas; probe ini hanya menangkap balapan
+    // antar transaksi. Kalau tetap terpakai, lompat ke maxNum + 1 agar tidak
+    // menyusuri nomor terpakai satu per satu seperti implementasi lama.
+    if (await isTaken(runningNumber)) {
+      nextNumber = Math.max(firstGap, maxNum) + 1;
+      runningNumber = buildNumber(nextNumber);
+
+      let attempts = 0;
+      while (await isTaken(runningNumber)) {
+        if (++attempts > 50) {
+          throw new Error(
+            'Unable to generate unique running number after maximum attempts',
+          );
+        }
+        nextNumber++;
+        runningNumber = buildNumber(nextNumber);
+      }
     }
 
     return runningNumber;
@@ -395,7 +405,6 @@ export class RunningNumberService {
     // Hapus semua tanda '#' yang tersisa
     formatted = formatted.replace(/#/g, '');
 
-    console.log('formatted:', formatted);
     return formatted;
   }
 

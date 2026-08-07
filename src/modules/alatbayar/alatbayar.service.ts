@@ -122,7 +122,6 @@ export class AlatbayarService {
         CreateAlatbayarDto;
 
       const uuid = await uuidV7(trx);
-
       const insertData = this.buildInsertData(CreateAlatbayarDto, uuid);
       await trx(this.tableName).insert(insertData);
       const newItem = await trx(this.viewName).where('id', uuid).first();
@@ -144,9 +143,6 @@ export class AlatbayarService {
       totalItems = Number(totalRecords?.total ?? 0);
 
       if (existingData) {
-        // Hitung posisi memakai kolom & arah yang SAMA dengan urutan tampil grid
-        // (findAll). Untuk kolom status, bandingkan nilai TEKS dari baris view,
-        // bukan id UUID — supaya fokus baris setelah simpan tepat.
         const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
@@ -317,7 +313,6 @@ export class AlatbayarService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
-      console.log(query.toQuery());
       const data = await query;
       const totalPages = Math.ceil(total / limit);
       const responseType = total > 500 ? 'json' : 'local';
