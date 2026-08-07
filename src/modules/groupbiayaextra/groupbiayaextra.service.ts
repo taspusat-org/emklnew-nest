@@ -24,6 +24,7 @@ import { Workbook, Column } from 'exceljs';
 export class GroupbiayaextraService {
   private readonly logger = new Logger(GroupbiayaextraService.name);
   private readonly tableName = 'groupbiayaextra';
+  private readonly viewName = 'vgroupbiayaextra';
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
@@ -32,41 +33,12 @@ export class GroupbiayaextraService {
     private readonly locksService: LocksService,
   ) {}
 
-  /**
-   * Tabel `groupbiayaextra` tidak punya view turunan seperti `valatbayar`,
-   * jadi kolom teks status (p.text / p.memo) diambil lewat LEFT JOIN. Query
-   * dasar ini dipakai findAll, COUNT, dan perhitungan posisi baris supaya
-   * ketiganya melihat dataset yang PERSIS sama.
-   */
-  private baseQuery(trx: any) {
-    return trx(`${this.tableName} as u`).leftJoin(
-      'parameter as p',
-      'u.statusaktif',
-      'p.id',
-    );
-  }
-
-  private selectColumns(trx: any) {
-    return [
-      'u.id as id',
-      'u.keterangan',
-      'u.statusaktif',
-      'u.modifiedby',
-      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-      'p.memo',
-      'p.text',
-    ];
-  }
-
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
     search?: string,
   ): void {
-    // statusaktif dikirim sebagai id parameter (varchar UUID) oleh FilterOptions,
-    // jadi percuma ikut dicari pada search global yang berisi teks.
-    const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
+    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -78,12 +50,12 @@ export class GroupbiayaextraService {
       qb.where((query) => {
         searchFields.forEach((field) => {
           if (dateFields.includes(field)) {
-            query.orWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+            query.orWhereRaw(
+              "TO_CHAR(ab.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhere(`u.${field}`, 'ilike', `%${sanitizedValue}%`);
+            query.orWhere(`ab.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
         });
       });
@@ -95,43 +67,29 @@ export class GroupbiayaextraService {
 
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+        qb.andWhereRaw("TO_CHAR(ab.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
           key,
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'text' || key === 'memo') {
-        qb.andWhere(`p.${key}`, '=', sanitizedValue);
+        qb.andWhere(`ab.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere(`ab.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
-
-  /**
-   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
-   * bantu dari frontend (sortBy, filters, text, memo, dll) tidak ikut ditulis
-   * -> "Invalid column name". Uppercase HANYA kolom teks manusiawi:
-   * id & statusaktif adalah uuid v7 HURUF KECIL, meng-uppercase-nya menulis id
-   * yang tidak ada sehingga lookup tampil kosong (lihat pengeluaranheader).
-   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
       keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
       statusaktif: dto.statusaktif,
       info: dto.info ?? null,
-      modifiedby: dto.modifiedby,
+      modifiedby: dto.modifiedby.toUpperCase(),
       created_at: dto.created_at || this.utilsService.getTime(),
       updated_at: dto.updated_at || this.utilsService.getTime(),
     };
   }
 
-  /**
-   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
-   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
-   * TEKS parameter (p.text), bukan id UUID-nya. Kalau tidak sama, fokus baris
-   * setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -140,19 +98,12 @@ export class GroupbiayaextraService {
     switch (sortBy) {
       case 'statusaktif':
       case 'text':
-        return { orderCol: 'p.text', dir };
+        return { orderCol: 'ab.statusaktif_text', dir };
       default:
-        return { orderCol: `u.${sortBy}`, dir };
+        return { orderCol: `ab.${sortBy}`, dir };
     }
   }
 
-  /**
-   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
-   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
-   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
-   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
-   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
-   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -163,17 +114,14 @@ export class GroupbiayaextraService {
   ): Promise<number> {
     const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
 
-    const existingData = await this.baseQuery(trx)
+    const existingData = await trx(`${this.viewName} as ab`)
       .select({ posval: orderCol })
-      .where('u.id', id)
+      .where('ab.id', id)
       .modify((qb) => this.applyFilters(qb, filters, search))
       .first();
-
-    // Baris tidak lolos filter aktif (mis. habis diedit jadi tidak cocok) ->
-    // jatuhkan fokus ke baris pertama daripada menghitung posisi yang salah.
     if (!existingData || existingData.posval === null) return 1;
 
-    const resultposition = await this.baseQuery(trx)
+    const resultposition = await trx(`${this.viewName} as ab`)
       .count('* as posisi')
       .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
       .modify((qb) => this.applyFilters(qb, filters, search))
@@ -183,11 +131,6 @@ export class GroupbiayaextraService {
     return posisi > 0 ? posisi : 1;
   }
 
-  /**
-   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
-   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
-   * SELURUH tabel lalu findIndex seperti implementasi lama.
-   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
@@ -252,21 +195,14 @@ export class GroupbiayaextraService {
       const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
       const uuid = await uuidV7(trx);
-      await trx(this.tableName).insert(
-        this.buildInsertData(CreateGroupbiayaextraDto, uuid),
-      );
+      const insertData = this.buildInsertData(CreateGroupbiayaextraDto, uuid);
+      await trx(this.tableName).insert(insertData);
 
-      // id berupa varchar UUID (bukan auto-increment), jadi orderBy('id','desc')
-      // TIDAK mengembalikan baris yang baru diinsert. Ambil langsung by uuid
-      // yang barusan digenerate supaya fokus baris setelah simpan tepat.
-      const newItem = await this.baseQuery(trx)
-        .select(this.selectColumns(trx))
-        .where('u.id', uuid)
-        .first();
+      const newItem = await trx(this.viewName).where('id', uuid).first();
 
       // totalItems SELALU dihitung dengan filter yang sama seperti grid.
-      const totalRecords = await this.baseQuery(trx)
-        .count('u.id as total')
+      const totalRecords = await trx(`${this.viewName} as ab`)
+        .count('ab.id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
       const totalItems = Number(totalRecords?.total ?? 0);
@@ -329,19 +265,13 @@ export class GroupbiayaextraService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
       const safeFilters = filters || {};
-
-      // Count HARUS memakai filter & search yang sama dengan query data —
-      // memakai COUNT tanpa filter (implementasi lama) membuat totalPages dan
-      // posisi baris ikut salah begitu ada filter kolom / search aktif.
-      const countResult = await this.baseQuery(trx)
-        .count('u.id as total')
+      const countResult = await trx(`${this.viewName} as ab`)
+        .count('ab.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
 
       if (isLookUp) {
-        // Hasil lookup > 500 baris: jangan tarik semuanya, biarkan komponen
-        // LookUp beralih ke pencarian server-side.
         if (total > 500) {
           return {
             data: [],
@@ -358,7 +288,21 @@ export class GroupbiayaextraService {
         limit = 0; // <= 500: kirim seluruh baris, difilter di client.
       }
 
-      const query = this.baseQuery(trx).select(this.selectColumns(trx));
+      const query = trx(`${this.viewName} as ab`).select([
+        'ab.id',
+        'ab.keterangan',
+        'ab.statusaktif',
+        'ab.modifiedby',
+        trx.raw(
+          "TO_CHAR(ab.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "TO_CHAR(ab.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+        'ab.statusaktif_memo as memo',
+        'ab.statusaktif_text as text',
+      ]);
+
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
       const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
@@ -466,13 +410,10 @@ export class GroupbiayaextraService {
 
       // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
       // walau hasil edit tak lagi cocok dengan filter aktif.
-      const updatedItem = await this.baseQuery(trx)
-        .select(this.selectColumns(trx))
-        .where('u.id', id)
-        .first();
+      const updatedItem = await trx(this.viewName).where('id', id).first();
 
-      const totalRecords = await this.baseQuery(trx)
-        .count('u.id as total')
+      const totalRecords = await trx(`${this.viewName} as ab`)
+        .count('ab.id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
       const totalItems = Number(totalRecords?.total ?? 0);
@@ -550,7 +491,10 @@ export class GroupbiayaextraService {
   }
 
   /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
-  private readonly EXPORT_COLUMNS = ['u.keterangan', 'p.text'];
+  private readonly EXPORT_COLUMNS = [
+    'ab.keterangan',
+    'ab.statusaktif_text as text',
+  ];
 
   /**
    * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
@@ -574,7 +518,7 @@ export class GroupbiayaextraService {
 
     const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
 
-    return this.baseQuery(db)
+    return db(`${this.viewName} as ab`)
       .select(this.EXPORT_COLUMNS)
       .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
       .orderBy(orderCol, sortDirection);
@@ -582,15 +526,15 @@ export class GroupbiayaextraService {
 
   /**
    * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. JOIN ke `parameter` tetap dipakai karena filter status
-   * menyaring lewat p.text / p.memo.
+   * sebenarnya. Memakai view yang sama dengan findAll supaya filter status
+   * (statusaktif_text / statusaktif_memo) menyaring dataset yang identik.
    */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
   ): Promise<number> {
-    const result = await this.baseQuery(db)
-      .count('u.id as total')
+    const result = await db(`${this.viewName} as ab`)
+      .count('ab.id as total')
       .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
       .first();
 

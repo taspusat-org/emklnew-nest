@@ -181,17 +181,10 @@ export class AsuransiService {
       totalItems = Number(totalRecords?.total ?? 0);
 
       if (existingData) {
-        // Hitung posisi memakai kolom & arah yang SAMA dengan urutan tampil grid
-        // (findAll). Untuk kolom status, bandingkan nilai TEKS dari baris view,
-        // bukan id UUID — supaya fokus baris setelah simpan tepat.
         const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
         );
-        // Posisi = jumlah baris yang tampil sebelum-atau-pada baris baru,
-        // memakai kolom & arah urut yang sama dengan grid (findAll). Tidak
-        // ada klausa tiebreaker `id <=` lagi: id UUID tidak terurut, jadi
-        // klausa itu malah memfilter baris acak & membuat posisi meleset.
         const resultposition = await trx(`${this.viewName} as va`)
           .count('* as posisi')
           .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
@@ -364,11 +357,6 @@ export class AsuransiService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
-
-      // console.log(query.toQuery());
-      // Debug query dan nilainya sebelum dieksekusi:
-      console.log('Query:', query.toSQL().sql);
-      console.log('Bindings (Values):', query.toSQL().bindings);
 
       const data = await query;
       const totalPages = Math.ceil(total / limit);

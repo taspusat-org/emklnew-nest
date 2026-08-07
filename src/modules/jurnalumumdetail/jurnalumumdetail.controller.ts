@@ -37,9 +37,13 @@ export class JurnalumumdetailController {
       sortDirection: sortDirection || 'asc',
     };
 
+    // Query string selalu string. Tanpa Number() di sini offset/totalPages
+    // bergantung pada koersi JS.
+    const numericLimit = Number(limit);
     const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
     };
 
     const params: FindAllParams = {
@@ -51,18 +55,12 @@ export class JurnalumumdetailController {
     };
     try {
       const result = await this.jurnalumumdetailService.findAll(params, trx);
-
-      if (result.data.length === 0) {
-        await trx.commit();
-
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-        };
-      }
       await trx.commit();
 
+      // Balikan diteruskan apa adanya, termasuk saat kosong. Dulu hasil kosong
+      // ditukar objek tanpa `pagination`, sehingga grid tidak pernah tahu
+      // totalPages dan windowed lazy-loading tidak bisa berhenti di halaman
+      // terakhir. Service sudah mengisi pagination bahkan untuk hasil kosong.
       return result;
     } catch (error) {
       trx.rollback();
