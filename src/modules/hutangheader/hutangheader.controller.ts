@@ -14,6 +14,7 @@ import {
   InternalServerErrorException,
   Res,
   HttpStatus,
+  HttpException,
 } from '@nestjs/common';
 import { HutangheaderService } from './hutangheader.service';
 import { CreateHutangheaderDto } from './dto/create-hutangheader.dto';
@@ -65,7 +66,20 @@ export class HutangheaderController {
     } catch (error) {
       await trx.rollback();
       console.error('error', error);
-      throw new Error(`Error: ${error.message}`);
+      // PENTING: Jangan wrap HttpException dengan Error baru
+      if (error instanceof HttpException) {
+        throw error; // Langsung throw HttpException yang sudah ada
+      }
+
+      // Untuk error lainnya yang bukan HttpException
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -152,11 +166,7 @@ export class HutangheaderController {
     const trx = await dbMssql.transaction();
     const modifiedby = req.user?.user?.username || 'unknown';
     try {
-      const result = await this.hutangheaderService.delete(
-        id,
-        trx,
-        modifiedby,
-      );
+      const result = await this.hutangheaderService.delete(id, trx, modifiedby);
 
       trx.commit();
       return result;
@@ -243,7 +253,9 @@ export class HutangheaderController {
       countRows: () =>
         this.hutangheaderService.countExportRows(queryParams, dbMssql),
       streamRows: () =>
-        this.hutangheaderService.buildExportQuery(queryParams, dbMssql).stream(),
+        this.hutangheaderService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
       sheet: this.hutangheaderService.exportSheet,
     });
   }

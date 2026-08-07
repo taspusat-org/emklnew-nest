@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { CreateStatuspendukungDto } from './dto/create-statuspendukung.dto';
 import { UpdateStatuspendukungDto } from './dto/update-statuspendukung.dto';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 
 @Injectable()
@@ -24,8 +24,9 @@ export class StatuspendukungService {
     statuspendukung: any = 0,
   ) {
     const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
-
+    console.log('masuk', tablename, id, modifiedby, statuspendukung);
     try {
+      console.log('masuk222');
       const getDataRequest = await trx('parameter')
         .select(
           'id',
@@ -38,7 +39,7 @@ export class StatuspendukungService {
           trx.raw(`JSON_VALUE(${memoExpr}, '$."NILAI TIDAK"') AS nilai_tidak`),
         )
         .where('grp', 'DATA PENDUKUNG')
-        .andWhere('subgrp', tablename);
+        .andWhere('subgrp', 'ilike', `%${tablename}%`);
 
       if (getDataRequest && getDataRequest.length > 0) {
         const payload = getDataRequest.map((data: any) => {

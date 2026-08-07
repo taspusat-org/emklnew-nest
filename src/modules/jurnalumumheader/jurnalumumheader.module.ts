@@ -10,6 +10,7 @@ import { JurnalumumdetailModule } from '../jurnalumumdetail/jurnalumumdetail.mod
 import { GlobalModule } from '../global/global.module';
 import { LocksModule } from '../locks/locks.module';
 import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module
     GlobalModule,
     LocksModule,
     StatuspendukungModule,
+    ReportModule,
   ],
   controllers: [JurnalumumheaderController],
   providers: [JurnalumumheaderService],

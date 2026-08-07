@@ -1238,13 +1238,17 @@ async function generateUuidV7Rows(
 
   // knex-pg mengembalikan { rows: [...] }; driver lain array langsung.
   const rows = result?.rows ?? result ?? [];
-  return rows.map((row: any) => row?.uuid).filter(Boolean);
+
+  // Postgres selalu merender tipe uuid ke teks huruf kecil. Uppercase di sini,
+  // bukan di uuidV7(), supaya jalur batch (insert massal detail) menghasilkan
+  // id dengan format yang sama seperti jalur satu baris (header).
+  return rows.map((row: any) => row?.uuid?.toUpperCase()).filter(Boolean);
 }
 
 export async function uuidV7(trx: any): Promise<string> {
   const kodeCabang = await getKodeCabang(trx);
   const [uuid] = await generateUuidV7Rows(trx, kodeCabang, 1);
-  return uuid?.toUpperCase() ?? null;
+  return uuid ?? null;
 }
 
 /**
