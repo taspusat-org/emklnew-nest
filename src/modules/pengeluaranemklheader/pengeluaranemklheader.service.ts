@@ -17,7 +17,7 @@ import * as path from 'path';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RedisService } from 'src/common/redis/redis.service';
-import { withUuidV7, tandatanya, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, tandatanya, UtilsService } from 'src/utils/utils.service';
 import { formatDateToSQL } from 'src/utils/utils.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { PengeluaranemkldetailService } from '../pengeluaranemkldetail/pengeluaranemkldetail.service';
@@ -44,9 +44,12 @@ export class PengeluaranemklheaderService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    this.pengeluaranheaderService = this.moduleRef.get(PengeluaranheaderService, {
-      strict: false,
-    });
+    this.pengeluaranheaderService = this.moduleRef.get(
+      PengeluaranheaderService,
+      {
+        strict: false,
+      },
+    );
   }
 
   private readonly tableName = 'pengeluaranemklheader';
@@ -189,7 +192,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           };
 
           const pengeluaranDetails = data.details.map((detail: any) => ({
-            id: 0,
+            id: '0',
             coadebet: data.coadebet ?? null,
             keterangan: detail.keterangan ?? null,
             nominal: detail.nominal ?? null,
@@ -214,6 +217,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           const pengeluaranResult = await this.pengeluaranheaderService.create(
             pengeluaranData,
             trx,
+            { withGridPosition: false },
           );
           insertData.pengeluaran_nobukti = pengeluaranResult?.newItem?.nobukti;
         } else {
@@ -226,7 +230,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           };
 
           const hutangDetails = data.details.map((detail: any) => ({
-            id: 0,
+            id: '0',
             coa: coakredit ?? null,
             keterangan: detail.keterangan ?? null,
             nominal: detail.nominal ?? null,
@@ -399,8 +403,12 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           'u.statusformat',
           'u.info',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'u.jenisseal_id',
           'j.nama as jenisseal_text',
           'tempUrl.link',
@@ -456,10 +464,10 @@ export class PengeluaranemklheaderService implements OnModuleInit {
               key === 'tglbukti' ||
               key === 'tgljatuhtempo'
             ) {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
+              query.andWhereRaw(
+                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
+                [key, `%${sanitizedValue}%`],
+              );
             } else if (key === 'karyawan_nama') {
               query.andWhere('k.nama', 'like', `%${sanitizedValue}%`);
             } else if (key === 'bank_nama') {
@@ -528,8 +536,12 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           'u.statusformat', // bank_id (integer)
           'u.info', // info (text)
           'u.modifiedby', // modifiedby (varchar(200))
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"), // created_at (datetime)
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"), // updated_at (datetime)
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ), // created_at (datetime)
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ), // updated_at (datetime)
         ])
         .leftJoin('karyawan as k', 'u.karyawan_id', 'k.id')
         .leftJoin('parameter as p', 'u.jenisposting', 'p.id')
@@ -652,7 +664,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
         };
 
         const pengeluaranDetails = details.map((detail: any) => ({
-          id: 0,
+          id: '0',
           coadebet: coadebet ?? null,
           keterangan: detail.keterangan ?? null,
           nominal: detail.nominal ?? null,
@@ -678,6 +690,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
           existingPengeluaran.id,
           pengeluaranData,
           trx,
+          { withGridPosition: false },
         );
       } else {
         const existingHutang = await trx('hutangheader')
@@ -691,7 +704,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
         };
 
         const hutangDetails = details.map((detail: any) => ({
-          id: 0,
+          id: '0',
           coa: coakredit ?? null,
           keterangan: detail.keterangan ?? null,
           nominal: detail.nominal ?? null,

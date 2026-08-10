@@ -66,8 +66,11 @@ export class BlDetailRincianService {
           allRincianBiaya.push(tempRincianBiaya);
         }
 
-        // Check if the data has an id (existing record)
-        if (rincianWithOutBiaya.id) {
+        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+        if (
+          rincianWithOutBiaya.id &&
+          String(rincianWithOutBiaya.id) !== '0'
+        ) {
           const existingData = await trx(this.tableName)
             .where('id', rincianWithOutBiaya.id)
             .first();

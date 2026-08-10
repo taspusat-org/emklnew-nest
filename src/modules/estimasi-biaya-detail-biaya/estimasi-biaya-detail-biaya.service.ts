@@ -44,8 +44,8 @@ export class EstimasiBiayaDetailBiayaService {
         // kolom teks manusiawi. Blanket uppercase meng-corrupt id/FK UUID
         // (case-sensitive) sehingga lookup-by-id gagal.
 
-        // Check if the data has an id (existing record)
-        if (data.id) {
+        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+        if (data.id && String(data.id) !== '0') {
           const existingData = await trx(this.tableName)
             .where('id', data.id)
             .first();

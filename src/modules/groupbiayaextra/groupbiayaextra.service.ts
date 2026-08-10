@@ -1,4 +1,6 @@
 import {
+  ConflictException,
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -25,6 +27,11 @@ export class GroupbiayaextraService {
   private readonly logger = new Logger(GroupbiayaextraService.name);
   private readonly tableName = 'groupbiayaextra';
   private readonly viewName = 'vgroupbiayaextra';
+  // Satu-satunya kolom yang mereferensikan groupbiayaextra.id. Tidak memakai
+  // findFirstReference karena skema di migrations sama sekali tidak mendeklarasikan
+  // FOREIGN KEY, jadi pembacaan metadata pg_constraint selalu kosong.
+  private readonly usedByTable = 'biayaextramuatandetail';
+  private readonly usedByColumn = 'groupbiayaextra_id';
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
@@ -242,7 +249,13 @@ export class GroupbiayaextraService {
 
       return { newItem, ...paged };
     } catch (error) {
-      throw new Error(`Error creating Group biaya Extra : ${error.message}`);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error creating groupbiayaextra', error?.stack);
+      throw new InternalServerErrorException(
+        'Gagal menyimpan group biaya extra',
+      );
     }
   }
 
@@ -362,8 +375,8 @@ export class GroupbiayaextraService {
 
       return data;
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
+      this.logger.error('Error fetching groupbiayaextra by ids', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
   }
   async getById(id: string, trx: any) {
@@ -371,13 +384,16 @@ export class GroupbiayaextraService {
       const result = await trx(this.tableName).where('id', id).first();
 
       if (!result) {
-        throw new Error('Data not found');
+        throw new NotFoundException('Group biaya extra tidak ditemukan');
       }
 
       return result;
     } catch (error) {
-      console.error('Error fetching data by id:', error);
-      throw new Error('Failed to fetch data by id');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error fetching groupbiayaextra by id', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data by id');
     }
   }
 
@@ -386,7 +402,7 @@ export class GroupbiayaextraService {
       const existedData = await trx(this.tableName).where('id', id).first();
 
       if (!existedData) {
-        throw new Error('Group biaya Extra  not found');
+        throw new NotFoundException('Group biaya extra tidak ditemukan');
       }
 
       const { sortBy, sortDirection, filters, search, limit } = data;
@@ -453,13 +469,41 @@ export class GroupbiayaextraService {
 
       return { updatedItem, ...paged };
     } catch (error) {
-      console.error('Error updating Group biaya Extra :', error);
-      throw new Error('Failed to update Group biaya Extra ');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error updating groupbiayaextra', error?.stack);
+      throw new InternalServerErrorException(
+        'Gagal memperbarui group biaya extra',
+      );
     }
   }
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
+      // lockAndDestroy mengembalikan `true` (bukan melempar) saat baris tidak
+      // ada, sehingga tanpa cek ini penghapusan id asing tetap dibalas 200 dan
+      // logtrail-nya tercatat dengan idtrans undefined.
+      const existedData = await trx(this.tableName).where('id', id).first();
+      if (!existedData) {
+        throw new NotFoundException('Group biaya extra tidak ditemukan');
+      }
+
+      // Ditegakkan di server, bukan hanya lewat pra-cek check-validation:
+      // pemanggil yang melewatkan pra-cek tetap tidak boleh memutus referensi
+      // di biayaextramuatandetail.
+      const used = await this.globalService.checkUsed(
+        this.usedByTable,
+        this.usedByColumn,
+        id,
+        trx,
+      );
+      if (used.status === 'failed') {
+        throw new ConflictException(
+          `Data tidak dapat dihapus karena masih digunakan pada tabel ${this.usedByTable}.`,
+        );
+      }
+
       const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
@@ -482,10 +526,10 @@ export class GroupbiayaextraService {
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
-      console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
+      this.logger.error('Error deleting groupbiayaextra', error?.stack);
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
@@ -661,8 +705,8 @@ export class GroupbiayaextraService {
         return forceEdit;
       } else if (aksi === 'DELETE') {
         const validasi = await this.globalService.checkUsed(
-          'hargatrucking',
-          'comodity_id',
+          this.usedByTable,
+          this.usedByColumn,
           value,
           trx,
         );
@@ -670,7 +714,10 @@ export class GroupbiayaextraService {
         return validasi;
       }
     } catch (error) {
-      console.error('Error di checkValidasi:', error);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error di checkValidasi groupbiayaextra', error?.stack);
       throw new InternalServerErrorException('Failed to check validation');
     }
   }

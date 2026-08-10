@@ -86,7 +86,7 @@ export class PackinglistheaderService {
           let rincianPayload: any[] = [];
           if (Array.isArray(detail.rincian) && detail.rincian.length > 0) {
             rincianPayload = detail.rincian.map((rincian: any) => ({
-              id: 0,
+              id: '0',
               nobukti: payload.nobukti,
               packinglistdetail_id: detail.id || 0,
               statuspackinglist_id: rincian.statuspackinglist_id,
@@ -101,7 +101,7 @@ export class PackinglistheaderService {
           }
 
           return {
-            id: 0,
+            id: '0',
             nobukti: payload.nobukti,
             packinglist_id: insertedItems[0].id,
             orderanmuatan_nobukti: detail.orderanmuatan_nobukti,

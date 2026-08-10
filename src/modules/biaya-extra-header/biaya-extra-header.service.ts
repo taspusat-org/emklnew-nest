@@ -288,9 +288,10 @@ export class BiayaExtraHeaderService {
               `%${sanitized}%`,
             ]);
           } else if (field === 'created_at' || field === 'updated_at') {
-            qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`, [
-              `%${sanitized}%`,
-            ]);
+            qb.orWhereRaw(
+              `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
+              [`%${sanitized}%`],
+            );
           } else {
             qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
           }
@@ -888,6 +889,49 @@ export class BiayaExtraHeaderService {
       }
       throw new InternalServerErrorException('Failed to delete data');
     }
+  }
+
+  /**
+   * Data untuk LaporanBiayaExtra.mrt. Sebelumnya dirakit di browser sebelum
+   * cetak dipindah ke backend.
+   *
+   * findOne sudah memulangkan header yang di-JOIN dengan barisan detail-nya,
+   * jadi satu datasource `data` sudah memuat seluruh isi bukti. Datasource
+   * `detail` dan `detail_rincian` di template berasal dari shipping instruction
+   * dan tidak pernah diisi jalur cetak ini — dikirim kosong supaya template
+   * tetap ter-bind tanpa mengarang isi.
+   *
+   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
+   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi.
+   */
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: rows } = await this.findOne(id, db);
+
+    if (!rows?.length) {
+      return { data: [], detail: [], detail_rincian: [] };
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: rows.map((row: any) => ({
+        ...row,
+        judullaporan: judullaporan ?? 'Laporan Biaya Extra',
+        usercetak: username,
+        tglcetak,
+        judul: 'Bukti Biaya Extra EMKL',
+      })),
+      detail: [],
+      detail_rincian: [],
+    };
   }
 
   async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {

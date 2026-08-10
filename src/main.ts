@@ -2,6 +2,7 @@ import { NestFactory, Reflector } from '@nestjs/core';
 import { AppModule } from './app.module';
 import * as dotenv from 'dotenv';
 import { ZodFilter } from './common/utils/zod-filter.exception';
+import { SafeExceptionFilter } from './common/utils/safe-exception.filter';
 import { LoggingMiddleware } from './common/middlewares/logging.middleware';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 import * as express from 'express';
@@ -53,7 +54,8 @@ async function bootstrap() {
     setupSwagger(app);
 
     console.log('🔧 Setting up global filters and middleware...');
-    app.useGlobalFilters(new ZodFilter());
+    // SafeExceptionFilter menyaring pesan driver/SQL dari body respons.
+    app.useGlobalFilters(new ZodFilter(), new SafeExceptionFilter());
     app.use(
       '/uploads',
       express.static(path.join(process.cwd(), 'uploads/compress')),
