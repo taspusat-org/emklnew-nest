@@ -56,8 +56,9 @@ export class ShippingInstructionDetailRincianService {
           }
         });
 
-        if (data.id) {
-          const existingData = await trx(this.tableName) // Check if the data has an id (existing record)
+        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+        if (data.id && String(data.id) !== '0') {
+          const existingData = await trx(this.tableName)
             .where('id', data.id)
             .first();
 

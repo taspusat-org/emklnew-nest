@@ -54,7 +54,7 @@ export class ConsigneeService {
       if (Array.isArray(data.details) && data.details.length > 0) {
         const consigneeDetails = data.details.map((detail: any) => {
           return {
-            id: 0,
+            id: '0',
             consignee_id: insertedItems[0].id,
             keterangan: detail.keterangan,
             modifiedby: payload.modifiedby,
@@ -74,7 +74,7 @@ export class ConsigneeService {
       if (Array.isArray(data.hargajual) && data.hargajual.length > 0) {
         const consigneeHargaJual = data.hargajual.map((detail: any) => {
           return {
-            id: 0,
+            id: '0',
             consignee_id: insertedItems[0].id,
             container_id: detail.container_id,
             nominal: detail.nominal,

@@ -33,16 +33,22 @@ import {
   UpdateBiayaExtraHeaderDto,
   UpdateBiayaExtraHeaderSchema,
 } from './dto/create-biaya-extra-header.dto';
+import { ReportJobService } from 'src/common/report/report-job.service';
 import { ExportJobService } from 'src/common/report/export-job.service';
 import {
   ExportBiayaExtraHeaderDto,
   ExportBiayaExtraHeaderSchema,
 } from './dto/export-biaya-extra-header.dto';
+import {
+  ReportBiayaExtraHeaderDto,
+  ReportBiayaExtraHeaderSchema,
+} from './dto/report-biaya-extra-header.dto';
 
 @Controller('biayaextraheader')
 export class BiayaExtraHeaderController {
   constructor(
     private readonly biayaExtraHeaderService: BiayaExtraHeaderService,
+    private readonly reportJobService: ReportJobService,
     private readonly exportJobService: ExportJobService,
   ) {}
 
@@ -269,6 +275,40 @@ export class BiayaExtraHeaderController {
           .buildExportQuery(queryParams, dbMssql)
           .stream(),
       sheet: this.biayaExtraHeaderService.exportSheet,
+    });
+  }
+
+  /**
+   * POST /biayaextraheader/report
+   *
+   * Cetak bukti biaya extra di background. Request langsung balas { jobId };
+   * progres render dikirim lewat socket namespace `/report` (room = jobId), dan
+   * PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Beda dengan export di atas yang mengambil seluruh baris hasil filter:
+   * LaporanBiayaExtra.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
+   * frontend hanya id baris yang dicentang.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportBiayaExtraHeaderSchema))
+    body: ReportBiayaExtraHeaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an).
+        this.biayaExtraHeaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
     });
   }
 

@@ -13,6 +13,7 @@ import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.mod
 import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module';
 import { PengeluaranemklheaderModule } from '../pengeluaranemklheader/pengeluaranemklheader.module';
 import { PenerimaanemklheaderModule } from '../penerimaanemklheader/penerimaanemklheader.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -27,6 +28,8 @@ import { PenerimaanemklheaderModule } from '../penerimaanemklheader/penerimaanem
     LocksModule,
     StatuspendukungModule,
     PenerimaanemklheaderModule,
+    // Menyediakan ReportJobService + ExportJobService (job background + socket).
+    ReportModule,
     forwardRef(() => PengeluaranemklheaderModule),
   ],
   controllers: [PengeluaranheaderController],

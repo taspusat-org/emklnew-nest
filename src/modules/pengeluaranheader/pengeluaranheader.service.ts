@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -7,7 +8,10 @@ import {
 import { ModuleRef } from '@nestjs/core';
 import { CreatePengeluaranheaderDto } from './dto/create-pengeluaranheader.dto';
 import { UpdatePengeluaranheaderDto } from './dto/update-pengeluaranheader.dto';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
+import {
+  FindAllParams,
+  WriteOptions,
+} from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
 import {
   withUuidV7,
@@ -19,7 +23,8 @@ import {
   formatIndonesianNegative,
   calculateItemIndex,
   getFetchedPages,
- } from 'src/utils/utils.service';
+} from 'src/utils/utils.service';
+import { numberToTerbilang } from 'src/utils/terbilang';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { PengeluarandetailService } from '../pengeluarandetail/pengeluarandetail.service';
@@ -90,14 +95,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     trx: any,
     filters: Record<string, any>,
   ): Promise<void> {
-    // DB tasemkl adalah PostgreSQL (dbMssql cuma nama). Dulu ini memakai
-    // `exec sp_set_session_context` (sintaks SQL Server) sehingga setiap findAll
-    // 500 di Postgres. Port ke GUC Postgres per-transaksi:
-    //   set_config('tas.*', value, true)
-    // is_local=true → otomatis reset di akhir transaksi (findAll dibungkus satu
-    // transaksi di controller) jadi tidak bocor ke request lain lewat koneksi
-    // pool. View vpengeluaranheader membacanya via current_setting('tas.*', true)
-    // dan memperlakukan '' sebagai "tanpa filter" (NULLIF(...,'')).
     if (filters?.tglDari && filters?.tglSampai) {
       const tglDariFormatted = formatDateToSQL(String(filters.tglDari));
       const tglSampaiFormatted = formatDateToSQL(String(filters.tglSampai));
@@ -112,8 +109,6 @@ export class PengeluaranheaderService implements OnModuleInit {
       }
     }
 
-    // bank_id opsional: '' = tanpa filter, di-set eksplisit tiap kali agar tidak
-    // terbawa dari transaksi sebelumnya.
     await trx.raw(`SELECT set_config('tas.bank_id', ?, true)`, [
       filters?.bank_id ? String(filters.bank_id) : '',
     ]);
@@ -178,7 +173,8 @@ export class PengeluaranheaderService implements OnModuleInit {
       }
     });
   }
-  async create(data: any, trx: any) {
+  async create(data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       const { sortBy, sortDirection, filters, search, page, limit, info } =
         data;
@@ -217,11 +213,30 @@ export class PengeluaranheaderService implements OnModuleInit {
         .andWhere('subgrp', 'CABANG')
         .first();
 
+      // Guard HARUS sebelum formatpengeluaran dipakai: bank_id kosong/tidak
+      // terdaftar bikin first() undefined, dan query parameter di bawahnya
+      // melempar TypeError -> user cuma dapat 500 tanpa sebab.
+      if (!insertData.bank_id) {
+        throw new BadRequestException('KAS/BANK WAJIB DIPILIH.');
+      }
+
       const formatpengeluaran = await trx(`bank as b`)
         .select('p.grp', 'p.subgrp', 'b.formatpengeluaran', 'b.coa')
         .leftJoin('parameter as p', 'p.id', 'b.formatpengeluaran')
         .where('b.id', insertData.bank_id)
         .first();
+
+      if (!formatpengeluaran) {
+        throw new BadRequestException(
+          'KAS/BANK YANG DIPILIH TIDAK TERDAFTAR. SILAKAN PILIH ULANG.',
+        );
+      }
+
+      if (!formatpengeluaran.formatpengeluaran) {
+        throw new BadRequestException(
+          'FORMAT PENGELUARAN BELUM DIATUR PADA KAS/BANK YANG DIPILIH.',
+        );
+      }
 
       const parameter = await trx('parameter')
         .select(
@@ -232,13 +247,9 @@ export class PengeluaranheaderService implements OnModuleInit {
         .where('id', formatpengeluaran.formatpengeluaran)
         .first();
 
-      if (!formatpengeluaran) {
-        throw new Error(`Bank dengan id ${insertData.bank_id} tidak ditemukan`);
-      }
-
       if (!parameter) {
-        throw new Error(
-          `Parameter dengan id ${formatpengeluaran.formatpengeluaran} tidak ditemukan`,
+        throw new BadRequestException(
+          'FORMAT PENGELUARAN PADA KAS/BANK YANG DIPILIH TIDAK VALID.',
         );
       }
 
@@ -337,7 +348,7 @@ export class PengeluaranheaderService implements OnModuleInit {
                   .toString();
 
                 return {
-                  id: 0,
+                  id: '0',
                   keterangan: detail.keterangan ?? null,
                   nominal: absoluteNominal ?? null,
                   modifiedby: insertData.modifiedby ?? null,
@@ -426,7 +437,7 @@ export class PengeluaranheaderService implements OnModuleInit {
                   .toString();
 
                 return {
-                  id: 0,
+                  id: '0',
                   keterangan: detail.keterangan ?? null,
                   nominal: absoluteNominal ?? null,
                   modifiedby: insertData.modifiedby ?? null,
@@ -496,7 +507,7 @@ export class PengeluaranheaderService implements OnModuleInit {
       const processDetails = (details) => {
         return details.flatMap((detail) => [
           {
-            id: 0,
+            id: '0',
             coa: detail.coadebet,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -506,7 +517,7 @@ export class PengeluaranheaderService implements OnModuleInit {
             modifiedby: insertData.modifiedby,
           },
           {
-            id: 0,
+            id: '0',
             coa: formatpengeluaran?.coa || null,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -531,91 +542,99 @@ export class PengeluaranheaderService implements OnModuleInit {
         details: result,
       };
 
-      await this.JurnalumumheaderService.create(jurnalPayload, trx);
+      await this.JurnalumumheaderService.create(jurnalPayload, trx, {
+        withGridPosition: false,
+      });
 
       // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
       // Header + detail + jurnal SUDAH ter-insert di atas. Blok ini hanya
-      // menghitung posisi/halaman baris baru untuk grid (query view + findAll).
-      // Kegagalannya (mis. sortBy undefined, atau view/pivot bermasalah) TIDAK
-      // boleh me-rollback simpan yang sudah berhasil. Default posisi bila gagal.
+      // menghitung posisi/halaman baris baru untuk grid (query view + findAll),
+      // jadi dilewati saat dipanggil bersarang dari kas gantung: gridnya ada di
+      // kas gantung, dan return value ini pun dibuang di sana.
+      // Kegagalannya TIDAK boleh me-rollback simpan yang sudah berhasil.
       let pageNumber = 1;
       let fetchedPages: number[] = [1];
-      let pagedData: Record<number, any> = {};
+      const pagedData: Record<number, any> = {};
       let allFetchedData: any[] = [];
       let itemIndex: any = { zeroBasedIndex: 0 };
-      try {
-        const existingData = await trx(this.viewName)
-          .where('id', newItem.id)
-          .modify((qb) => this.applyFilters(qb, filters || {}, search))
-          .first();
-
-        const totalRecords = await trx(this.viewName)
-          .count('id as total')
-          .modify((qb) => this.applyFilters(qb, filters || {}, search))
-          .first();
-        const totalItems = Number(totalRecords?.total ?? 0);
-
-        let posisi: number;
-        if (existingData) {
-          const resultposition = await trx(this.viewName)
-            .count('* as posisi')
-            .where((qb) => {
-              qb.where(
-                sortBy,
-                sortDirection === 'desc' ? '>' : '<',
-                insertData[sortBy],
-              ).orWhere((q) =>
-                q
-                  .where(sortBy, insertData[sortBy])
-                  .andWhere('id', '<=', newItem.id),
-              );
-            })
+      if (withGridPosition) {
+        try {
+          const existingData = await trx(this.viewName)
+            .where('id', newItem.id)
             .modify((qb) => this.applyFilters(qb, filters || {}, search))
             .first();
-          posisi = Number(resultposition?.posisi ?? 0);
-        } else {
-          posisi = 1;
+
+          const totalRecords = await trx(this.viewName)
+            .count('id as total')
+            .modify((qb) => this.applyFilters(qb, filters || {}, search))
+            .first();
+          const totalItems = Number(totalRecords?.total ?? 0);
+
+          let posisi: number;
+          if (existingData) {
+            const resultposition = await trx(this.viewName)
+              .count('* as posisi')
+              .where((qb) => {
+                qb.where(
+                  sortBy,
+                  sortDirection === 'desc' ? '>' : '<',
+                  insertData[sortBy],
+                ).orWhere((q) =>
+                  q
+                    .where(sortBy, insertData[sortBy])
+                    .andWhere('id', '<=', newItem.id),
+                );
+              })
+              .modify((qb) => this.applyFilters(qb, filters || {}, search))
+              .first();
+            posisi = Number(resultposition?.posisi ?? 0);
+          } else {
+            posisi = 1;
+          }
+          pageNumber = Math.ceil(posisi / limit);
+          const totalPages = Math.ceil(totalItems / limit);
+          fetchedPages = getFetchedPages(pageNumber, totalPages);
+          const startPage = fetchedPages[0];
+          const endPage = fetchedPages[fetchedPages.length - 1];
+          const customOffset = (startPage - 1) * limit;
+          const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+          const findAllResult = await this.findAll(
+            {
+              search: search || '',
+              filters: filters || {},
+              pagination: {
+                page: startPage,
+                limit: totalDataNeeded,
+                customOffset: customOffset,
+              },
+              sort: {
+                sortBy: sortBy,
+                sortDirection: sortDirection.toLowerCase(),
+              },
+              isLookUp: false,
+              useCustomOffset: true,
+            },
+            trx,
+          );
+
+          allFetchedData = findAllResult?.data ?? [];
+          let dataIndex = 0;
+          fetchedPages.forEach((pageNum) => {
+            pagedData[pageNum] = allFetchedData.slice(
+              dataIndex,
+              dataIndex + limit,
+            );
+            dataIndex += limit;
+          });
+
+          itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+        } catch (posErr: any) {
+          console.warn(
+            'pengeluaranheader: komputasi posisi pasca-simpan gagal (non-fatal):',
+            posErr?.message,
+          );
         }
-        pageNumber = Math.ceil(posisi / limit);
-        const totalPages = Math.ceil(totalItems / limit);
-        fetchedPages = getFetchedPages(pageNumber, totalPages);
-        const startPage = fetchedPages[0];
-        const endPage = fetchedPages[fetchedPages.length - 1];
-        const customOffset = (startPage - 1) * limit;
-        const totalDataNeeded = (endPage - startPage + 1) * limit;
-
-        const findAllResult = await this.findAll(
-          {
-            search: search || '',
-            filters: filters || {},
-            pagination: {
-              page: startPage,
-              limit: totalDataNeeded,
-              customOffset: customOffset,
-            },
-            sort: {
-              sortBy: sortBy,
-              sortDirection: sortDirection.toLowerCase(),
-            },
-            isLookUp: false,
-            useCustomOffset: true,
-          },
-          trx,
-        );
-
-        allFetchedData = findAllResult?.data ?? [];
-        let dataIndex = 0;
-        fetchedPages.forEach((pageNum) => {
-          pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
-          dataIndex += limit;
-        });
-
-        itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
-      } catch (posErr: any) {
-        console.warn(
-          'pengeluaranheader: komputasi posisi pasca-simpan gagal (non-fatal):',
-          posErr?.message,
-        );
       }
       // ============ END GET POSITION ============
 
@@ -632,10 +651,14 @@ export class PengeluaranheaderService implements OnModuleInit {
         trx,
       );
 
-      await this.redisService.set(
-        `${this.tableName}-page-${pageNumber}`,
-        JSON.stringify(allFetchedData),
-      );
+      // Hanya tulis cache saat window-nya benar-benar dihitung; tanpa guard ini
+      // pemanggilan bersarang menimpa page-1 dengan array kosong.
+      if (withGridPosition) {
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      }
 
       await this.statuspendukungService.create(
         this.tableName,
@@ -779,39 +802,23 @@ export class PengeluaranheaderService implements OnModuleInit {
           'u.daftarbank_id',
           'u.statusformat',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'r.nama as relasi_text',
           'b.nama as bank_text',
           'a.keterangancoa as coakredit_text',
           'c.nama as alatbayar_text',
           'd.nama as daftarbank_text',
         ])
-        .leftJoin(
-          trx.raw('relasi as r'),
-          'u.relasi_id',
-          'r.id',
-        )
-        .leftJoin(
-          trx.raw('bank as b'),
-          'u.bank_id',
-          'b.id',
-        )
-        .leftJoin(
-          trx.raw('akunpusat as a'),
-          'u.coakredit',
-          'a.coa',
-        )
-        .leftJoin(
-          trx.raw('alatbayar as c'),
-          'u.alatbayar_id',
-          'c.id',
-        )
-        .leftJoin(
-          trx.raw('daftarbank as d'),
-          'u.daftarbank_id',
-          'd.id',
-        )
+        .leftJoin(trx.raw('relasi as r'), 'u.relasi_id', 'r.id')
+        .leftJoin(trx.raw('bank as b'), 'u.bank_id', 'b.id')
+        .leftJoin(trx.raw('akunpusat as a'), 'u.coakredit', 'a.coa')
+        .leftJoin(trx.raw('alatbayar as c'), 'u.alatbayar_id', 'c.id')
+        .leftJoin(trx.raw('daftarbank as d'), 'u.daftarbank_id', 'd.id')
         .where('u.id', id);
       const data = await query;
 
@@ -824,7 +831,8 @@ export class PengeluaranheaderService implements OnModuleInit {
     }
   }
 
-  async update(id: any, data: any, trx: any) {
+  async update(id: any, data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       data.tglbukti = formatDateToSQL(String(data?.tglbukti));
       data.tgljatuhtempo = formatDateToSQL(String(data?.tgljatuhtempo));
@@ -893,7 +901,7 @@ export class PengeluaranheaderService implements OnModuleInit {
         const processDetails = (details) => {
           return details.flatMap((detail) => [
             {
-              id: 0,
+              id: '0',
               coa: detail.coadebet,
               nobukti: nobukti,
               tglbukti: formatDateToSQL(updatedData.tglbukti),
@@ -903,7 +911,7 @@ export class PengeluaranheaderService implements OnModuleInit {
               modifiedby: updatedData.modifiedby,
             },
             {
-              id: 0,
+              id: '0',
               coa: formatpengeluaran?.coa || null,
               nobukti: nobukti,
               tglbukti: formatDateToSQL(updatedData.tglbukti),
@@ -937,6 +945,7 @@ export class PengeluaranheaderService implements OnModuleInit {
             existingJurnal.id,
             jurnalUpdatePayload,
             trx,
+            { withGridPosition: false },
           );
         } else {
           const jurnalCreatePayload = {
@@ -951,90 +960,99 @@ export class PengeluaranheaderService implements OnModuleInit {
             details: jurnalDetails,
           };
 
-          await this.JurnalumumheaderService.create(jurnalCreatePayload, trx);
+          await this.JurnalumumheaderService.create(jurnalCreatePayload, trx, {
+            withGridPosition: false,
+          });
         }
       }
 
       // ============ GET POSITION ============
+      // Dilewati saat dipanggil bersarang (kas gantung / pengeluaran emkl):
+      // grid yang menunggu bukan grid pengeluaran, dan payload bersarang tidak
+      // membawa sortBy/limit sehingga query posisi menembak kolom undefined.
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      const pagedData: Record<number, any> = {};
+      let allFetchedData: any[] = [];
+      let itemIndex: any = { zeroBasedIndex: 0 };
 
-      const existingData = await trx(this.tableName)
-        .where('id', id)
-        .modify((qb) => this.applyFilters(qb, filters || {}, search))
-        .first();
-
-      // 3. Hitung posisi & total dengan filter yang sama
-      let posisi: number;
-      let totalItems: number;
-
-      // totalItems selalu dihitung dengan filter — fix bug utama
-      const totalRecords = await trx(this.viewName)
-        .count('id as total')
-        .modify((qb) => this.applyFilters(qb, filters || {}, search))
-        .first();
-      totalItems = Number(totalRecords?.total ?? 0);
-      const LastId = await trx(this.viewName)
-        .select('id')
-        .orderBy('id', 'desc')
-        .first();
-      if (existingData) {
-        const resultposition = await trx(this.viewName) // fix: pakai this.tableName, bukan hardcode 'valatbayar'
-          .count('* as posisi')
-          .where(
-            sortBy,
-            sortDirection === 'desc' ? '>=' : '<=',
-            insertData[sortBy],
-          )
-          .where('id', '<=', LastId.id) // fix: tidak perlu query LastId terpisah
+      if (withGridPosition) {
+        const existingData = await trx(this.tableName)
+          .where('id', id)
           .modify((qb) => this.applyFilters(qb, filters || {}, search))
           .first();
-        posisi = Number(resultposition?.posisi ?? 0);
-      } else {
-        posisi = 1;
+
+        // totalItems selalu dihitung dengan filter — fix bug utama
+        const totalRecords = await trx(this.viewName)
+          .count('id as total')
+          .modify((qb) => this.applyFilters(qb, filters || {}, search))
+          .first();
+        const totalItems = Number(totalRecords?.total ?? 0);
+        const LastId = await trx(this.viewName)
+          .select('id')
+          .orderBy('id', 'desc')
+          .first();
+
+        let posisi: number;
+        if (existingData) {
+          const resultposition = await trx(this.viewName)
+            .count('* as posisi')
+            .where(
+              sortBy,
+              sortDirection === 'desc' ? '>=' : '<=',
+              insertData[sortBy],
+            )
+            .where('id', '<=', LastId.id)
+            .modify((qb) => this.applyFilters(qb, filters || {}, search))
+            .first();
+          posisi = Number(resultposition?.posisi ?? 0);
+        } else {
+          posisi = 1;
+        }
+
+        pageNumber = Math.ceil(posisi / limit);
+        const totalPages = Math.ceil(totalItems / limit);
+
+        fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+        const startPage = fetchedPages[0];
+        const endPage = fetchedPages[fetchedPages.length - 1];
+
+        const customOffset = (startPage - 1) * limit;
+        const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+        const result = await this.findAll(
+          {
+            search: search || '',
+            filters: filters || {},
+            pagination: {
+              page: startPage,
+              limit: totalDataNeeded,
+              customOffset: customOffset,
+            },
+            sort: {
+              sortBy: sortBy,
+              sortDirection: sortDirection.toLowerCase(),
+            },
+            isLookUp: false,
+            useCustomOffset: true,
+          },
+          trx,
+        );
+
+        allFetchedData = result.data;
+
+        let dataIndex = 0;
+        fetchedPages.forEach((pageNum) => {
+          pagedData[pageNum] = allFetchedData.slice(
+            dataIndex,
+            dataIndex + limit,
+          );
+          dataIndex += limit;
+        });
+
+        itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       }
-
-      const pageNumber = Math.ceil(posisi / limit);
-      const totalPages = Math.ceil(totalItems / limit);
-
-      const fetchedPages = getFetchedPages(pageNumber, totalPages);
-
-      const startPage = fetchedPages[0];
-      const endPage = fetchedPages[fetchedPages.length - 1];
-
-      const customOffset = (startPage - 1) * limit;
-      const totalDataNeeded = (endPage - startPage + 1) * limit;
-
-      const result = await this.findAll(
-        {
-          search: search || '',
-          filters: filters || {},
-          pagination: {
-            page: startPage,
-            limit: totalDataNeeded,
-            customOffset: customOffset,
-          },
-          sort: {
-            sortBy: sortBy,
-            sortDirection: sortDirection.toLowerCase(),
-          },
-          isLookUp: false,
-          useCustomOffset: true,
-        },
-        trx,
-      );
-
-      const allFetchedData = result.data;
-
-      const pagedData = {};
-      let dataIndex = 0;
-
-      fetchedPages.forEach((pageNum) => {
-        const pageStartIndex = dataIndex;
-        const pageEndIndex = dataIndex + limit;
-        pagedData[pageNum] = allFetchedData.slice(pageStartIndex, pageEndIndex);
-        dataIndex += limit;
-      });
-
-      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       // ============ END GET POSITION ============
 
       await this.logTrailService.create(
@@ -1050,10 +1068,12 @@ export class PengeluaranheaderService implements OnModuleInit {
         trx,
       );
 
-      await this.redisService.set(
-        `${this.tableName}-page-${pageNumber}`,
-        JSON.stringify(allFetchedData),
-      );
+      if (withGridPosition) {
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      }
 
       return {
         updatedItem: {
@@ -1109,6 +1129,205 @@ export class PengeluaranheaderService implements OnModuleInit {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
+  /**
+   * Data untuk LaporanPengeluaran.mrt: `data` (satu baris header + kolom
+   * tambahan judul/usercetak/tglcetak/terbilang) dan `detail` (rincian coa).
+   * Sebelumnya dirakit di browser sebelum cetak dipindah ke backend.
+   *
+   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
+   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi. findOne
+   * membaca tabel base + JOIN sendiri (bukan vpengeluaranheader), sehingga
+   * tidak bergantung pada GUC periode yang hanya hidup di dalam transaksi.
+   */
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: headerRows } = await this.findOne(id, db);
+
+    if (!headerRows?.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const detailRes = await this.pengeluarandetailService.findAll(
+      { filters: { nobukti: header.nobukti } },
+      db,
+    );
+    const details = detailRes.data ?? [];
+
+    // Dijumlahkan dalam satuan sen lalu dibagi 100: menjumlah float rupiah
+    // langsung meninggalkan sisa pembulatan yang membuat "terbilang" meleset
+    // satu rupiah.
+    const totalNominal =
+      details.reduce(
+        (sum: number, item: any) =>
+          sum + Math.round((Number(item.nominal) || 0) * 100),
+        0,
+      ) / 100;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: [
+        {
+          ...header,
+          judullaporan: judullaporan ?? 'Laporan Pengeluaran',
+          usercetak: username,
+          tglcetak,
+          terbilang: numberToTerbilang(totalNominal),
+          judul: 'Bukti Pengeluaran KAS EMKL',
+        },
+      ],
+      detail: details,
+    };
+  }
+
+  /**
+   * Filter periode/bank untuk jalur TANPA transaksi (export background).
+   *
+   * findAll menurunkan tglDari/tglSampai/bank_id ke view lewat GUC
+   * (`set_config(..., true)`) yang umurnya seumur transaksi. Export tidak
+   * dibungkus transaksi, jadi GUC-nya tidak pernah ter-set dan view akan
+   * memulangkan SELURUH periode. Di sini ketiganya dipasang sebagai predikat
+   * biasa supaya hasil export sama dengan yang terlihat di grid.
+   */
+  private applyPeriodFilters(
+    qb: any,
+    filters: Record<string, any>,
+    alias: string,
+  ): void {
+    const tglDari = filters?.tglDari
+      ? formatDateToSQL(String(filters.tglDari))
+      : null;
+    const tglSampai = filters?.tglSampai
+      ? formatDateToSQL(String(filters.tglSampai))
+      : null;
+
+    if (tglDari && tglSampai) {
+      qb.whereBetween(`${alias}.tglbukti`, [tglDari, tglSampai]);
+    }
+
+    // Cocok PERSIS (bukan LIKE): bank_id adalah identifier, dan di view pun
+    // perbandingannya `=`.
+    if (filters?.bank_id) {
+      qb.andWhere(`${alias}.bank_id`, String(filters.bank_id));
+    }
+  }
+
+  /**
+   * Query dasar export: filter, search, dan sort yang sama dengan findAll,
+   * TANPA paging dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    const safeFilters = filters || {};
+
+    const query = db(`${this.viewName} as u`)
+      .select([
+        'u.nobukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        db.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
+        'u.keterangan',
+        'u.relasi_text',
+        'u.bank_text',
+        'u.coakredit_text',
+        'u.alatbayar_text',
+        'u.nowarkat',
+        'u.dibayarke',
+        'u.modifiedby',
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ])
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search, 'u'))
+      .modify((qb: any) => this.applyPeriodFilters(qb, safeFilters, 'u'));
+
+    // Urutan HARUS deterministik — sama alasannya dengan findAll.
+    query.orderBy(`u.${sortBy}`, sortDirection);
+    if (sortBy !== 'id') {
+      query.orderBy('u.id', 'asc');
+    }
+
+    return query;
+  }
+
+  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const safeFilters = filters || {};
+
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search, 'u'))
+      .modify((qb: any) => this.applyPeriodFilters(qb, safeFilters, 'u'))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN PENGELUARAN',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'TGL JATUH TEMPO',
+      'KETERANGAN',
+      'RELASI',
+      'BANK / KAS',
+      'COA KREDIT',
+      'ALAT BAYAR',
+      'NO WARKAT',
+      'DIBAYAR KE',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.tgljatuhtempo,
+      row.keterangan,
+      row.relasi_text,
+      row.bank_text,
+      row.coakredit_text,
+      row.alatbayar_text,
+      row.nowarkat,
+      row.dibayarke,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
 
   async exportToExcel(data: any[], trx: any) {
     const workbook = new Workbook();

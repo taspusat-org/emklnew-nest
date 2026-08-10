@@ -52,7 +52,7 @@ export class PackinglistdetailService {
       let tempRincian: any = {};
       if (data.rincian && data.rincian.length > 0) {
         tempRincian = {
-          packinglistdetail_id: data.id || 0,
+          packinglistdetail_id: data.id || '0',
           rincian: [...data.rincian], // Copy array rincian
           modifiedby: data.modifiedby,
         };
@@ -67,8 +67,8 @@ export class PackinglistdetailService {
         rincianToProcess.push(tempRincian);
       }
 
-      // Check if the data has an id (existing record)
-      if (data.id) {
+      // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+      if (data.id && String(data.id) !== '0') {
         const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
@@ -241,8 +241,8 @@ export class PackinglistdetailService {
     for (let i = 0; i < rincianToProcess.length; i++) {
       const rincianItem = rincianToProcess[i];
 
-      // Jika packinglistdetail_id adalah 0, ambil ID dari newly inserted
-      if (rincianItem.packinglistdetail_id === 0 && allDetails[i]) {
+      // Jika packinglistdetail_id masih penanda baris baru, ambil ID hasil insert
+      if (String(rincianItem.packinglistdetail_id) === '0' && allDetails[i]) {
         rincianItem.packinglistdetail_id = allDetails[i].id;
       }
 

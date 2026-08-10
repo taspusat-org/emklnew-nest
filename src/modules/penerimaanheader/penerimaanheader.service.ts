@@ -14,7 +14,7 @@ import {
   parseNumberWithSeparators,
   tandatanya,
   UtilsService,
- } from 'src/utils/utils.service';
+} from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
@@ -217,7 +217,7 @@ export class PenerimaanheaderService implements OnModuleInit {
                   .toString();
 
                 return {
-                  id: 0,
+                  id: '0',
                   keterangan: detail.keterangan ?? null,
                   nominal: absoluteNominal ?? null,
                   modifiedby: insertData.modifiedby ?? null,
@@ -313,7 +313,7 @@ export class PenerimaanheaderService implements OnModuleInit {
                   .toString();
 
                 return {
-                  id: 0,
+                  id: '0',
                   keterangan: detail.keterangan ?? null,
                   nominal: absoluteNominal ?? null,
                   modifiedby: insertData.modifiedby ?? null,
@@ -357,7 +357,7 @@ export class PenerimaanheaderService implements OnModuleInit {
         return details.flatMap((detail) => [
           // Debet
           {
-            id: 0,
+            id: '0',
             coa: formatpenerimaan.coa,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -367,7 +367,7 @@ export class PenerimaanheaderService implements OnModuleInit {
           },
           // Kredit (langsung dipasangkan)
           {
-            id: 0,
+            id: '0',
             coa: detail.coa,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -387,7 +387,9 @@ export class PenerimaanheaderService implements OnModuleInit {
         modifiedby: insertData.modifiedby,
         details: result,
       };
-      await this.jurnalumumheaderService.create(dataJurnalumum, trx);
+      await this.jurnalumumheaderService.create(dataJurnalumum, trx, {
+        withGridPosition: false,
+      });
       //c
       const insertedItems = await trx(this.tableName)
         .insert(await withUuidV7(trx, insertData))
@@ -547,8 +549,12 @@ export class PenerimaanheaderService implements OnModuleInit {
           'r.nama as relasi_nama',
           'b.nama as bank_nama',
           'ab.nama as alatbayar_nama',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'tempUrl.link',
         ])
         .leftJoin('akunpusat as ap', 'u.coakasmasuk', 'ap.coa')
@@ -736,7 +742,7 @@ export class PenerimaanheaderService implements OnModuleInit {
         return details.flatMap((detail) => [
           // Debet
           {
-            id: 0,
+            id: '0',
             coa: formatpenerimaan.coa,
             nobukti: existingData.nobukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -746,7 +752,7 @@ export class PenerimaanheaderService implements OnModuleInit {
           },
           // Kredit (langsung dipasangkan)
           {
-            id: 0,
+            id: '0',
             coa: detail.coa,
             nobukti: existingData.nobukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -768,6 +774,7 @@ export class PenerimaanheaderService implements OnModuleInit {
         jurnalUmumData.id,
         requestJurnalUmum,
         trx,
+        { withGridPosition: false },
       );
       // Check each detail, update or set id accordingly
 
@@ -892,8 +899,12 @@ export class PenerimaanheaderService implements OnModuleInit {
           'r.nama as relasi_nama',
           'b.nama as bank_nama',
           'ab.nama as alatbayar_nama',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
         ])
         .leftJoin('relasi as r', 'u.relasi_id', 'r.id')
         .leftJoin('bank as b', 'u.bank_id', 'b.id')

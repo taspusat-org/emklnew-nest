@@ -244,7 +244,7 @@ export class HutangheaderService {
       const processDetails = (rows: any[]) =>
         rows.flatMap((detail: any) => [
           {
-            id: 0,
+            id: '0',
             coa: detail.coa,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -254,7 +254,7 @@ export class HutangheaderService {
             modifiedby: insertData.modifiedby,
           },
           {
-            id: 0,
+            id: '0',
             coa: defaultCoa,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -277,7 +277,9 @@ export class HutangheaderService {
         details: processDetails(details ?? []),
       };
 
-      await this.JurnalumumheaderService.create(jurnalPayload, trx);
+      await this.JurnalumumheaderService.create(jurnalPayload, trx, {
+        withGridPosition: false,
+      });
 
       // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
       // Header + detail + jurnal SUDAH ter-insert di atas. Blok ini hanya
@@ -702,7 +704,7 @@ export class HutangheaderService {
           const processDetails = (rows: any[]) =>
             rows.flatMap((detail: any) => [
               {
-                id: 0,
+                id: '0',
                 coa: detail.coa,
                 nobukti,
                 tglbukti: formatDateToSQL(updatedData.tglbukti),
@@ -712,7 +714,7 @@ export class HutangheaderService {
                 modifiedby: updatedData.modifiedby,
               },
               {
-                id: 0,
+                id: '0',
                 coa: defaultCoa,
                 nobukti,
                 tglbukti: formatDateToSQL(updatedData.tglbukti),
@@ -743,6 +745,7 @@ export class HutangheaderService {
                 details: jurnalDetails,
               },
               trx,
+              { withGridPosition: false },
             );
           } else {
             await this.JurnalumumheaderService.create(
@@ -758,6 +761,7 @@ export class HutangheaderService {
                 details: jurnalDetails,
               },
               trx,
+              { withGridPosition: false },
             );
           }
         }
