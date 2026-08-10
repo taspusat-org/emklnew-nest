@@ -104,7 +104,7 @@ export class BlHeaderService {
                 rincian.rincianbiaya.length > 0
               ) {
                 rincianBiaya = rincian.rincianbiaya.map((rBiaya: any) => ({
-                  id: 0,
+                  id: '0',
                   nobukti: newItem.nobukti,
                   bldetail_id: detail.bldetail_id || 0,
                   bldetail_nobukti: detail.bl_nobukti || '',
@@ -119,7 +119,7 @@ export class BlHeaderService {
               }
 
               return {
-                id: 0,
+                id: '0',
                 nobukti: newItem.nobukti,
                 bldetail_id: detail.bldetail_id || 0,
                 bldetail_nobukti: detail.bl_nobukti || '',
@@ -135,7 +135,7 @@ export class BlHeaderService {
           }
 
           return {
-            id: 0,
+            id: '0',
             nobukti: newItem.nobukti,
             bl_nobukti: detail.bl_nobukti || '',
             bl_id: newItem.id,

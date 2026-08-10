@@ -95,7 +95,7 @@ export class ShippingInstructionService {
             detail.detailsrincian.length > 0
           ) {
             rincianPayload = detail.detailsrincian.map((rincian: any) => ({
-              id: 0,
+              id: '0',
               nobukti: newItem.nobukti,
               shippinginstructiondetail_id: detail.id || 0,
               shippinginstructiondetail_nobukti:
@@ -111,7 +111,7 @@ export class ShippingInstructionService {
           }
 
           return {
-            id: 0,
+            id: '0',
             orderan_id: detail.orderan_id,
             nobukti: newItem.nobukti,
             shippinginstructiondetail_nobukti:

@@ -26,11 +26,23 @@ import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import { AuthGuard } from '../auth/auth.guard';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportPengeluaranheaderDto,
+  ReportPengeluaranheaderSchema,
+} from './dto/report-pengeluaranheader.dto';
+import {
+  ExportPengeluaranheaderDto,
+  ExportPengeluaranheaderSchema,
+} from './dto/export-pengeluaranheader.dto';
 
 @Controller('pengeluaranheader')
 export class PengeluaranheaderController {
   constructor(
     private readonly pengeluaranheaderService: PengeluaranheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -152,6 +164,89 @@ export class PengeluaranheaderController {
       console.error('Error deleting pengeluaran:', error);
       throw new Error(`Error deleting pengeluaran: ${error.message}`);
     }
+  }
+
+  /**
+   * POST /pengeluaranheader/report
+   *
+   * Cetak bukti pengeluaran di background. Request langsung balas { jobId };
+   * progres render dikirim lewat socket namespace `/report` (room = jobId), dan
+   * PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Beda dengan laporan daftar yang mencetak seluruh baris hasil filter grid:
+   * LaporanPengeluaran.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
+   * frontend hanya id baris yang dicentang. Datanya dua tabel — `data` (header)
+   * dan `detail` (rincian) — sesuai datasource template.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportPengeluaranheaderSchema))
+    body: ReportPengeluaranheaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.pengeluaranheaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /pengeluaranheader/export
+   *
+   * Export Excel daftar pengeluaran di background. Request langsung balas
+   * { jobId }; progresnya lewat socket `/report`, file-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris. Jangan disamakan dengan GET /export/:id di
+   * bawah: yang itu mengekspor SATU bukti beserta rinciannya, yang ini seluruh
+   * baris yang lolos filter grid.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportPengeluaranheaderSchema))
+    body: ExportPengeluaranheaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_pengeluaran_${stamp}.xlsx`,
+      countRows: () =>
+        this.pengeluaranheaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.pengeluaranheaderService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.pengeluaranheaderService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

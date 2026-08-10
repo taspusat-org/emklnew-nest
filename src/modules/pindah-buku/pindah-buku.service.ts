@@ -126,7 +126,7 @@ export class PindahBukuService {
         modifiedby: insertData.modifiedby,
         details: [
           {
-            id: 0,
+            id: '0',
             coa: insertData.coadebet,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -135,7 +135,7 @@ export class PindahBukuService {
             nominalkredit: '',
           },
           {
-            id: 0,
+            id: '0',
             coa: insertData.coakredit,
             nobukti: nomorBukti,
             tglbukti: formatDateToSQL(insertData.tglbukti),
@@ -510,7 +510,7 @@ export class PindahBukuService {
         modifiedby: updateData.modifiedby,
         details: [
           {
-            id: 0,
+            id: '0',
             coa: updateData.coadebet,
             nobukti: updateData.nobukti,
             tglbukti: formatDateToSQL(updateData.tglbukti),
@@ -519,7 +519,7 @@ export class PindahBukuService {
             nominalkredit: '',
           },
           {
-            id: 0,
+            id: '0',
             coa: updateData.coakredit,
             nobukti: updateData.nobukti,
             tglbukti: formatDateToSQL(updateData.tglbukti),

@@ -12,7 +12,6 @@ import {
   HttpStatus,
   UsePipes,
   Query,
-  NotFoundException,
   InternalServerErrorException,
   Res,
 } from '@nestjs/common';
@@ -183,17 +182,13 @@ export class GroupbiayaextraController {
         req.user?.user?.username,
       );
 
-      if (result.status === 404) {
-        throw new NotFoundException(result.message);
-      }
-
       await trx.commit();
       return result;
     } catch (error) {
       await trx.rollback();
       console.error('Error deleting Group Biaya Extra in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 
@@ -202,6 +197,40 @@ export class GroupbiayaextraController {
       );
     }
   }
+
+  /**
+   * Pra-cek sebelum EDIT (ambil lock) / DELETE (apakah masih dipakai
+   * transaksi). Penolakan DELETE tetap ditegakkan lagi di service, endpoint ini
+   * hanya supaya frontend bisa memberi tahu user sebelum dialog konfirmasi.
+   */
+  @UseGuards(AuthGuard)
+  @Post('check-validation')
+  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
+    const { aksi, value } = body;
+    const trx = await dbMssql.transaction();
+
+    try {
+      const result = await this.GroupbiayaextraService.checkValidasi(
+        aksi,
+        value,
+        req.user?.user?.username,
+        trx,
+      );
+
+      await trx.commit();
+      return result;
+    } catch (error) {
+      await trx.rollback();
+      console.error('Error checking validation Group Biaya Extra:', error);
+
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new InternalServerErrorException('Failed to check validation');
+    }
+  }
+
   /**
    * POST /groupbiayaextra/report
    *

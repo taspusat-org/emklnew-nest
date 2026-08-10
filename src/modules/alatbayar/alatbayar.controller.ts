@@ -108,18 +108,11 @@ export class AlatbayarController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-
-    try {
-      const result = await this.alatbayarService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
-    }
+    // Endpoint baca: TANPA transaksi. Transaksi menahan satu koneksi pool
+    // selama seluruh request; dengan pool max 30 dan grid yang menembak banyak
+    // lookup sekaligus, pool habis dan semua request lain kena
+    // 'Timeout acquiring a connection'. dbMssql melepas koneksi per query.
+    return this.alatbayarService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)

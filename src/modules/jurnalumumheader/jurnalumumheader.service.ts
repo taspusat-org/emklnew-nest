@@ -3,11 +3,15 @@ import {
   HttpStatus,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { CreateJurnalumumheaderDto } from './dto/create-jurnalumumheader.dto';
 import { UpdateJurnalumumheaderDto } from './dto/update-jurnalumumheader.dto';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
+import {
+  FindAllParams,
+  WriteOptions,
+} from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
 import {
   formatDateToSQL,
@@ -28,6 +32,8 @@ import * as path from 'path';
 import { StatuspendukungService } from '../statuspendukung/statuspendukung.service';
 @Injectable()
 export class JurnalumumheaderService {
+  private readonly logger = new Logger(JurnalumumheaderService.name);
+
   constructor(
     // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'): set/get/del cache
     // jadi best-effort sehingga create/update tidak gagal 500 "Stream isn't
@@ -86,7 +92,9 @@ export class JurnalumumheaderService {
       case 'statuscetak':
         return { orderCol: 'u.statuscetak_text', dir };
       default:
-        return { orderCol: `u.${sortBy}`, dir };
+        // Tanpa fallback, create/update yang dipanggil bersarang (payloadnya
+        // tidak membawa sortBy) menghasilkan kolom 'u.undefined'.
+        return { orderCol: `u.${sortBy || 'nobukti'}`, dir };
     }
   }
   private async resolvePosition(
@@ -330,7 +338,8 @@ export class JurnalumumheaderService {
       pagedData,
     };
   }
-  async create(data: any, trx: any) {
+  async create(data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       // 1. Ekstrak properti non-insert (pagination, search, dll) dari payload utama
       const {
@@ -413,30 +422,48 @@ export class JurnalumumheaderService {
         trx,
       );
 
-      const totalRecords = await trx(`${this.viewName} as u`)
-        .count('u.id as total')
-        .modify((qb) => this.applyFilters(qb, filters, search))
-        .first();
-      const totalItems = Number(totalRecords?.total ?? 0);
-      const posisi = await this.resolvePosition(
-        trx,
-        newItem.id,
-        filters,
-        search,
-        sortBy,
-        sortDirection,
-      );
+      // Posisi/pagination hanya dipakai grid jurnal umum untuk memfokuskan
+      // baris baru. Pemanggilan bersarang mematikannya lewat withGridPosition.
+      // Tetap dibungkus try/catch: header + detail sudah tersimpan, jadi gagal
+      // menghitung posisi tidak boleh me-rollback simpan yang berhasil.
+      let paged: Awaited<ReturnType<typeof this.buildPagedResult>> = {
+        itemIndex: 0,
+        pageNumber: 1,
+        fetchedPages: [1],
+        pagedData: {},
+      };
+      if (withGridPosition) {
+        try {
+          const totalRecords = await trx(`${this.viewName} as u`)
+            .count('u.id as total')
+            .modify((qb) => this.applyFilters(qb, filters, search))
+            .first();
+          const totalItems = Number(totalRecords?.total ?? 0);
+          const posisi = await this.resolvePosition(
+            trx,
+            newItem.id,
+            filters,
+            search,
+            sortBy,
+            sortDirection,
+          );
 
-      const paged = await this.buildPagedResult(
-        trx,
-        posisi,
-        totalItems,
-        limit,
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-      );
+          paged = await this.buildPagedResult(
+            trx,
+            posisi,
+            totalItems,
+            limit,
+            sortBy,
+            sortDirection,
+            filters,
+            search,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Gagal menghitung posisi grid jurnal umum: ${error?.message}`,
+          );
+        }
+      }
       // 8. LOG TRAIL
       await this.logTrailService.create(
         {
@@ -467,11 +494,18 @@ export class JurnalumumheaderService {
     }
   }
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      const { page = 1 } = pagination ?? {};
+      const { page = 1, customOffset } = pagination ?? {};
       let limit = pagination?.limit ?? 0;
 
       const sortBy = sort?.sortBy || 'nobukti';
@@ -507,8 +541,18 @@ export class JurnalumumheaderService {
       const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
       query.orderBy(orderCol, sortDirection);
 
+      // buildPagedResult mengambil BEBERAPA halaman sekaligus (limit =
+      // totalDataNeeded) tapi offsetnya harus tetap dihitung per ukuran halaman.
+      // Tanpa cabang customOffset, offset jadi (startPage-1)*totalDataNeeded —
+      // melewati akhir data begitu startPage > 1, dan window pasca-simpan pulang
+      // kosong.
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
+
       if (limit > 0) {
-        query.offset((page - 1) * limit).limit(limit);
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
@@ -547,7 +591,8 @@ export class JurnalumumheaderService {
     }
   }
 
-  async update(id: any, data: any, trx: any) {
+  async update(id: any, data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       data.tglbukti = formatDateToSQL(String(data?.tglbukti)); // Fungsi untuk format
 
@@ -681,52 +726,62 @@ export class JurnalumumheaderService {
       }));
       await this.jurnalumumdetailService.create(detailsWithNobukti, id, trx);
 
+      // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
+      // walau hasil edit tak lagi cocok dengan filter aktif.
+      const updatedItem = await trx(`${this.viewName} as u`)
+        .select(this.viewColumns(trx))
+        .where('u.id', id)
+        .first();
+
       // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
       // Header + detail jurnal SUDAH ter-update di atas. Blok di bawah hanya
       // menghitung posisi baris di grid; kegagalannya tidak boleh menggagalkan
-      // simpan yang sudah berhasil (pemanggil dari alur pengeluaran mengabaikan
-      // return-nya). Default posisi bila gagal.
-      let pageNumber = 1;
-      let itemIndex = 0;
-      try {
-        const { data: filteredItems } = await this.findAll(
-          {
-            search,
+      // simpan yang sudah berhasil. Pemanggil internal (alur hutang/penerimaan)
+      // mematikannya lewat withGridPosition; default tetap dipertahankan
+      // sebagai pengaman untuk pemanggil yang belum mengirim opsi.
+      const sortColumn = sortBy || 'nobukti';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
+
+      let paged: {
+        itemIndex: number;
+        pageNumber: number;
+        fetchedPages: number[];
+        pagedData: Record<number, any[]>;
+      } = { itemIndex: 0, pageNumber: 1, fetchedPages: [1], pagedData: {} };
+
+      if (withGridPosition) {
+        try {
+          const totalRecords = await trx(`${this.viewName} as u`)
+            .count('u.id as total')
+            .modify((qb) => this.applyFilters(qb, filters, search))
+            .first();
+          const totalItems = Number(totalRecords?.total ?? 0);
+
+          const posisi = await this.resolvePosition(
+            trx,
+            id,
             filters,
-            pagination: { page, limit: 0 },
-            sort: { sortBy, sortDirection },
-            isLookUp: false,
-          },
-          trx,
-        );
+            search,
+            sortColumn,
+            sortDir,
+          );
 
-        // Cari index item di hasil yang sudah difilter. id = UUID string, jadi
-        // Number(item.id) selalu NaN dan tak pernah cocok -> posisi grid selalu
-        // jatuh ke baris 1. Bandingkan sebagai string.
-        itemIndex = filteredItems.findIndex(
-          (item) => String(item.id) === String(id),
-        );
-
-        if (itemIndex === -1) {
-          itemIndex = 0;
+          paged = await this.buildPagedResult(
+            trx,
+            posisi,
+            totalItems,
+            pageLimit,
+            sortColumn,
+            sortDir,
+            filters,
+            search,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Update jurnalumumheader ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung: ${error?.message}`,
+          );
         }
-
-        pageNumber = Math.floor(itemIndex / limit) + 1;
-        const endIndex = pageNumber * limit;
-
-        // Ambil data hingga halaman yang mencakup item
-        const limitedItems = filteredItems.slice(0, endIndex);
-
-        // Simpan ke Redis
-        await this.redisService.set(
-          `${this.tableName}-allItems`,
-          JSON.stringify(limitedItems),
-        );
-      } catch (error) {
-        console.warn(
-          `Update jurnalumumheader ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
-          error?.message,
-        );
       }
 
       await this.logTrailService.create(
@@ -742,14 +797,7 @@ export class JurnalumumheaderService {
         trx,
       );
 
-      return {
-        updatedItem: {
-          id,
-          ...data,
-        },
-        pageNumber,
-        itemIndex,
-      };
+      return { updatedItem, ...paged };
     } catch (error) {
       throw new Error(`${error.message}`);
     }
