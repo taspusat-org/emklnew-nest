@@ -106,16 +106,16 @@ export class AsuransiService {
       nama: dto.nama ? dto.nama.toUpperCase() : null,
       keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null, // Wajib isi
       contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null, // Wajib isi
-      alamat: dto.alamat ?? null,
-      kota: dto.kota ?? null,
-      kodepos: dto.kodepos ?? null,
-      telp: dto.telp ?? null,
-      email: dto.email ?? null,
-      fax: dto.fax ?? null,
-      web: dto.web ?? null,
+      alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
+      kota: dto.kota ? dto.kota.toUpperCase() : null,
+      kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
+      telp: dto.telp ? dto.telp.toUpperCase() : null,
+      email: dto.email ? dto.email.toUpperCase() : null,
+      fax: dto.fax ? dto.fax.toUpperCase() : null,
+      web: dto.web ? dto.web.toUpperCase() : null,
       ratemodal: toNumeric(dto.ratemodal) ?? 0,
       ratejual: toNumeric(dto.ratejual) ?? 0,
-      npwp: dto.npwp ?? null,
+      npwp: dto.npwp ? dto.npwp.toUpperCase() : null,
       nominalasuransi: toNumeric(dto.nominalasuransi) ?? 0,
       rateopendoor: toNumeric(dto.rateopendoor) ?? 0,
       adminbiaya: toNumeric(dto.adminbiaya) ?? 0,
@@ -127,7 +127,7 @@ export class AsuransiService {
       materai2: toNumeric(dto.materai2) ?? 0,
       materai3: toNumeric(dto.materai3) ?? 0,
       statusaktif: dto.statusaktif,
-      info: dto.info ?? null,
+      info: dto.info ? dto.info.toUpperCase() : null,
       modifiedby: dto.modifiedby,
       created_at: dto.created_at || this.utilsService.getTime(),
       updated_at: dto.updated_at || this.utilsService.getTime(),
@@ -272,7 +272,6 @@ export class AsuransiService {
     trx: Knex.Transaction,
   ) {
     try {
-      // error: select count("va"."id") as "total" from "asuransi" as "ab" limit $1 - missing FROM-clause entry for table "va"
       const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
       const sortBy = sort?.sortBy || 'nama';
@@ -280,7 +279,6 @@ export class AsuransiService {
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
 
-      // Count dari tabel BASE (asuransi), bukan view vasuransi.
       const countResult = await trx(`${this.tableName} as va`)
         .count('va.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
@@ -342,7 +340,7 @@ export class AsuransiService {
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .text)
+      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .statusaktif_text)
       if (sortBy === 'statusaktif') {
         query.orderBy('va.statusaktif_nama', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
       } else {
@@ -535,7 +533,6 @@ export class AsuransiService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
   private readonly EXPORT_COLUMNS = [
     'va.nama',
     'va.keterangan',
@@ -562,14 +559,6 @@ export class AsuransiService {
     'va.statusaktif_nama',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
-   * proses kehabisan heap.
-   */
   buildExportQuery(
     {
       search,
@@ -588,7 +577,7 @@ export class AsuransiService {
       .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
     if (sortBy === 'statusaktif') {
-      query.orderBy('va.text', 'asc');
+      query.orderBy('va.statusaktif_text', 'asc');
     } else if (sortBy === 'statusbank') {
       query.orderBy('va.statusbank_text', sortDirection);
     } else if (sortBy === 'statusdefault') {
@@ -602,11 +591,6 @@ export class AsuransiService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
-   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
-   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -619,7 +603,6 @@ export class AsuransiService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
@@ -653,7 +636,6 @@ export class AsuransiService {
       'MATERAI 3',
       'STATUS AKTIF',
     ],
-    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
     columnWidths: [
       5, 25, 50, 17, 30, 20, 10, 12, 25, 15, 25, 15, 15, 15, 15, 15, 15, 15, 15,
       15, 15, 15, 15, 15,
@@ -683,7 +665,6 @@ export class AsuransiService {
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 2
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 3
       { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
-      { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL — Rp1.500.000, otomatis rata kanan
     ],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
