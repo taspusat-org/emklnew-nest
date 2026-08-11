@@ -9,6 +9,7 @@ import { filter } from 'rxjs';
 @Injectable()
 export class JurnalumumdetailService {
   private readonly tableName = 'jurnalumumdetail';
+  private readonly viewName = 'vjurnalumumdetail';
   // Kolom yang ikut disapu kotak SEARCH di grid = kolom yang tampil di grid.
   private static readonly SEARCHABLE_COLUMNS = [
     'tglbukti',
@@ -32,6 +33,16 @@ export class JurnalumumdetailService {
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly logger = new Logger(JurnalumumdetailService.name);
+  private async setSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+  ): Promise<void> {
+    if (filters?.nobukti) {
+      await trx.raw(`SELECT set_config('tas.nobukti', ?, true)`, [
+        filters.nobukti,
+      ]);
+    }
+  }
   async create(details: any, id: any = 0, trx: any = null) {
     // Rewrite Postgres: TANPA temp table + OPENJSON (OPENJSON = fungsi SQL
     // Server, tak ada di PG; jsonExtract memakai jsonb_path_query yang
@@ -51,7 +62,7 @@ export class JurnalumumdetailService {
     for (const data of details) {
       const isNew = !data.id || String(data.id) === '0';
       if (!isNew) {
-        const existingData = await trx(this.tableName)
+        const existingData = await trx(this.viewName)
           .where('id', data.id)
           .first();
         if (existingData) {
@@ -166,7 +177,7 @@ export class JurnalumumdetailService {
         return trx.raw(`TO_CHAR(p.${key}, 'DD-MM-YYYY HH24:MI:SS')`);
       case 'coa_nama':
       case 'keterangancoa':
-        return trx.raw('ap.keterangancoa');
+        return trx.raw('p.keterangancoa');
       case 'nominaldebet':
         return trx.raw(
           '(CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END)::text',
@@ -188,7 +199,7 @@ export class JurnalumumdetailService {
     switch (key) {
       case 'coa_nama':
       case 'keterangancoa':
-        return trx.raw('ap.keterangancoa');
+        return trx.raw('p.keterangancoa');
       case 'nominaldebet':
         return trx.raw('CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END');
       case 'nominalkredit':
@@ -239,6 +250,7 @@ export class JurnalumumdetailService {
     trx: any,
   ) {
     const { page = 1, limit = 0 } = pagination ?? {};
+    await this.setSessionContext(trx, filters || {});
 
     if (!filters?.nobukti) {
       // Bentuk balikan tetap lengkap supaya grid yang membaca
@@ -257,62 +269,35 @@ export class JurnalumumdetailService {
         },
       };
     }
-    const url = 'jurnalumumheader';
 
     try {
       const safeFilters = filters || {};
 
-      const countResult = await trx(`${this.tableName} as p`)
-        .innerJoin(trx.raw('akunpusat as ap'), 'p.coa', 'ap.coa')
-        .where('p.nobukti', safeFilters.nobukti)
+      const countResult = await trx(`${this.viewName} as p`)
         .modify((qb: any) => this.applyFilters(trx, qb, safeFilters, search))
         .count('p.id as total')
         .first();
       const total = Number(countResult?.total ?? 0);
 
       const query = trx
-        .from(trx.raw(`${this.tableName} as p`))
+        .from(trx.raw(`${this.viewName} as p`))
         .select(
           'p.id',
           'p.jurnalumum_id',
-          trx.raw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+          'p.tglbukti',
           'p.nobukti',
           'p.coa',
           'p.keterangan',
-          'ap.keterangancoa as coa_nama',
-
-          // Jika nominal < 0 → nominalkredit = ABS(nominal), selain itu 0
-          trx.raw(
-            'CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END AS nominalkredit',
-          ),
-
-          // Jika nominal > 0 → nominaldebet = nominal, selain itu 0
-          trx.raw(
-            'CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END AS nominaldebet',
-          ),
-
-          trx.raw('ABS(p.nominal) AS nominal'),
+          'p.coa_nama',
+          'p.nominaldebet',
+          'p.nominalkredit',
+          'p.nominal',
           'p.info',
           'p.modifiedby',
-          trx.raw(
-            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          trx.raw(
-            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-          // link dirakit per baris langsung di SELECT, seperti kolom `link` di
-          // view vpengeluarandetail. Postgres menyambung string dengan `||`;
-          // `+` (sintaks SQL Server) memicu "operator does not exist: unknown +
-          // text". Temp table + STRING_AGG tidak diperlukan — satu baris detail
-          // hanya menghasilkan satu link.
-          trx.raw(
-            `'<a target="_blank" className="link-color" href="/dashboard/${url}' || ${tandatanya} || 'nobukti=' || p.nobukti || '">' ||
-             '<HighlightWrapper value="' || p.nobukti || '" />' ||
-             '</a>' AS link`,
-          ),
-        )
-        .innerJoin(trx.raw('akunpusat as ap'), 'p.coa', 'ap.coa')
-        .where('p.nobukti', safeFilters.nobukti);
+          'p.link',
+          'p.created_at',
+          'p.updated_at',
+        );
 
       query.modify((qb: any) =>
         this.applyFilters(trx, qb, safeFilters, search),

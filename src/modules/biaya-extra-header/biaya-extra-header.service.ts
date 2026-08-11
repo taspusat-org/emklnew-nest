@@ -725,11 +725,6 @@ export class BiayaExtraHeaderService {
         },
         trx,
       );
-
-      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
-      // Sama seperti create(): hanya menghitung posisi/halaman baris yang
-      // diedit untuk grid. Kegagalannya TIDAK boleh me-rollback update yang
-      // sudah berhasil.
       let pageNumber = 1;
       let fetchedPages: number[] = [1];
       let pagedData: Record<number, any> = {};
@@ -839,13 +834,6 @@ export class BiayaExtraHeaderService {
           detailServiceDelete = this.biayaExtraMuatanDetailService;
           detailTableName = 'biayaextramuatandetail';
           break;
-        // case getOrderanBongkaranId.id:
-        //   detailServiceDelete = 'test';
-        //   detailTableName = 'biayaextrabongkarandetail';
-        //   break;
-        // case 'EXPORT':
-        //   service = this.hitungmodalexportService;
-        //   break;
         default:
           detailServiceDelete = this.biayaExtraMuatanDetailService;
           detailTableName = 'biayaextramuatandetail';
@@ -891,19 +879,6 @@ export class BiayaExtraHeaderService {
     }
   }
 
-  /**
-   * Data untuk LaporanBiayaExtra.mrt. Sebelumnya dirakit di browser sebelum
-   * cetak dipindah ke backend.
-   *
-   * findOne sudah memulangkan header yang di-JOIN dengan barisan detail-nya,
-   * jadi satu datasource `data` sudah memuat seluruh isi bukti. Datasource
-   * `detail` dan `detail_rincian` di template berasal dari shipping instruction
-   * dan tidak pernah diisi jalur cetak ini — dikirim kosong supaya template
-   * tetap ter-bind tanpa mengarang isi.
-   *
-   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
-   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi.
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },

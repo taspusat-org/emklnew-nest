@@ -34,10 +34,24 @@ import {
   UpdatePindahBukuDto,
   UpdatePindahBukuSchema,
 } from './dto/create-pindah-buku.dto';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportPindahBukuDto,
+  ReportPindahBukuSchema,
+} from './dto/report-pindah-buku.dto';
+import {
+  ExportPindahBukuDto,
+  ExportPindahBukuSchema,
+} from './dto/export-pindah-buku.dto';
 
 @Controller('pindahbuku')
 export class PindahBukuController {
-  constructor(private readonly pindahBukuService: PindahBukuService) {}
+  constructor(
+    private readonly pindahBukuService: PindahBukuService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -79,9 +93,19 @@ export class PindahBukuController {
   @Get()
   //@PINDAH-BUKU
   @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAll(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+  async findAll(@Query() query: any) {
+    // isreload dibuang di sini: sudah tak dipakai sejak findAll baca view,
+    // tapi frontend masih mengirimnya dan tak boleh ikut jadi filter kolom.
+    const {
+      search,
+      page,
+      limit,
+      sortBy,
+      sortDirection,
+      isLookUp,
+      isreload,
+      ...filters
+    } = query;
 
     const sortParams = {
       sortBy: sortBy || 'nobukti',
@@ -224,6 +248,83 @@ export class PindahBukuController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /pindahbuku/report
+   *
+   * Cetak bukti pindah buku di background. Request langsung balas { jobId };
+   * progres render dikirim lewat socket namespace `/report` (event
+   * `report:progress`, room = jobId), dan PDF-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * LaporanPindahBuku.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
+   * frontend hanya id baris yang dicentang.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportPindahBukuSchema))
+    body: ReportPindahBukuDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.pindahBukuService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /pindahbuku/export
+   *
+   * Export Excel SATU bukti pindah buku beserta rinciannya di background —
+   * cakupannya sama dengan cetak bukti, bukan daftar seluruh baris grid.
+   * Request langsung balas { jobId }; progresnya dikirim lewat socket namespace
+   * `/report` (kanal yang sama dengan cetak laporan), dan file-nya diambil di
+   * GET /report/download/:jobId.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportPindahBukuSchema))
+    body: ExportPindahBukuDto,
+  ) {
+    const header = await this.pindahBukuService.loadExportBuktiHeader(
+      body.id,
+      dbMssql,
+    );
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const nobukti = String(header.nobukti ?? '').replace(
+      /[^A-Za-z0-9_-]+/g,
+      '',
+    );
+
+    return this.exportJobService.start({
+      filename: `pindah_buku_${nobukti}_${stamp}.xlsx`,
+      countRows: () =>
+        this.pindahBukuService.countExportBuktiRows(header.nobukti, dbMssql),
+      streamRows: () =>
+        this.pindahBukuService
+          .buildExportBuktiQuery(header.nobukti, dbMssql)
+          .stream(),
+      sheet: this.pindahBukuService.buildExportBuktiSheet(header),
+    });
   }
 
   @Get('/export/:id')

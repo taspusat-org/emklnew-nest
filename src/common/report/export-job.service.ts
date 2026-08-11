@@ -87,10 +87,26 @@ export interface ExportColumnFormat {
   wrapText?: boolean;
 }
 
+export interface ExportInfoLine {
+  label: string;
+  value: string | number | null;
+}
+
 export interface ExportSheetDefinition {
   sheetName?: string;
   /** Baris judul di atas header (di-merge selebar kolom header). */
   titleLines?: string[];
+  /**
+   * Blok label/nilai antara judul dan tabel — dipakai export per transaksi
+   * untuk menaruh data master (no bukti, tanggal, relasi) di atas rinciannya.
+   * Label ditulis di kolom pertama, nilainya di kolom kedua.
+   */
+  infoLines?: ExportInfoLine[];
+  /**
+   * Baris TOTAL di bawah data. `sumColumns` berisi indeks kolom (sejajar
+   * `headers`) yang dijumlahkan sambil baris mengalir — bukan query terpisah.
+   */
+  totalRow?: { label?: string; sumColumns: number[] };
   headers: string[];
   /**
    * Lebar kolom tetap. Boleh dikosongkan seluruhnya, atau per kolom (`null` /
@@ -293,7 +309,7 @@ export class ExportJobService {
   ): Promise<void> {
     const startedAt = Date.now();
     const { sheet } = options;
-    const headerOffset = (sheet.titleLines?.length ?? 0) + 2; // judul + 1 baris kosong + header
+    const headerOffset = this.resolveHeaderOffset(sheet);
 
     // ── Tahap 1: hitung jumlah baris (untuk progres yang nyata) ────────────
     this.gateway.emitProgress(jobId, {
@@ -328,7 +344,8 @@ export class ExportJobService {
       return;
     }
 
-    const maxDataRows = EXCEL_MAX_ROWS - headerOffset;
+    const maxDataRows =
+      EXCEL_MAX_ROWS - headerOffset - (sheet.totalRow ? 1 : 0);
     if (total > maxDataRows) {
       this.logger.warn(
         `[run] baris melebihi batas xlsx → jobId=${jobId}, total=${total}`,
@@ -379,6 +396,8 @@ export class ExportJobService {
       const formats = this.resolveColumnFormats(sheet);
       const widths = this.createWidthMeasurer(sheet, formats);
       const pending: (string | number | null)[][] = [];
+      const sumColumns = sheet.totalRow?.sumColumns ?? [];
+      const totals = new Map<number, number>();
       let headerWritten = false;
       let flushed = 0;
 
@@ -403,6 +422,12 @@ export class ExportJobService {
 
           written += 1;
           const values = sheet.mapRow(row, written);
+          sumColumns.forEach((index) => {
+            const numeric = toNumericCell(values[index]);
+            if (typeof numeric === 'number') {
+              totals.set(index, (totals.get(index) ?? 0) + numeric);
+            }
+          });
 
           if (headerWritten) {
             flushed += 1;
@@ -441,6 +466,16 @@ export class ExportJobService {
       // Data lebih sedikit dari ukuran sample: header + sisa baris belum
       // sempat ditulis di dalam loop.
       flushPending();
+
+      if (sumColumns.length > 0) {
+        this.writeTotalRow(
+          worksheet,
+          sheet,
+          formats,
+          totals,
+          headerOffset + flushed + 1,
+        );
+      }
 
       this.gateway.emitProgress(jobId, {
         step: STEP.finalizing,
@@ -488,6 +523,16 @@ export class ExportJobService {
   }
 
   /**
+   * Nomor baris judul kolom: judul laporan + 1 baris kosong, lalu blok info
+   * (kalau ada) + 1 baris kosong lagi. Data mulai satu baris di bawahnya.
+   */
+  private resolveHeaderOffset(sheet: ExportSheetDefinition): number {
+    const titles = sheet.titleLines?.length ?? 0;
+    const info = sheet.infoLines?.length ?? 0;
+    return titles + 2 + (info > 0 ? info + 1 : 0);
+  }
+
+  /**
    * Menggabungkan format dari pemanggil dengan bawaannya — sekali per export,
    * bukan per sel. Kolom pertama (nomor urut) dan kolom ber-`numFmt` isinya
    * angka, jadi defaultnya rata kanan supaya digitnya sejajar.
@@ -525,6 +570,15 @@ export class ExportJobService {
   ) {
     const fixed = sheet.columnWidths ?? [];
     const longest = sheet.headers.map((header) => String(header ?? '').length);
+
+    // Blok info ditulis di kolom 1 & 2, jadi ikut menentukan lebarnya —
+    // tanpa ini label seperti "PENGELUARAN NO BUKTI" terpotong.
+    (sheet.infoLines ?? []).forEach((info) => {
+      longest[0] = Math.max(longest[0] ?? 0, String(info.label ?? '').length);
+      if (longest.length > 1) {
+        longest[1] = Math.max(longest[1] ?? 0, String(info.value ?? '').length);
+      }
+    });
 
     return {
       add(values: (string | number | null)[]): void {
@@ -582,10 +636,29 @@ export class ExportJobService {
       row.commit();
     });
 
-    // Satu baris kosong pemisah judul dan header.
+    // Satu baris kosong pemisah judul dan blok berikutnya.
     worksheet.getRow(titleLines.length + 1).commit();
 
-    const headerRow = worksheet.getRow(titleLines.length + 2);
+    const infoLines = sheet.infoLines ?? [];
+    infoLines.forEach((info, index) => {
+      const row = worksheet.getRow(titleLines.length + 2 + index);
+      const label = row.getCell(1);
+      label.value = info.label;
+      label.font = { name: 'Tahoma', size: 10, bold: true };
+      label.alignment = { horizontal: 'left', vertical: 'middle' };
+
+      const value = row.getCell(2);
+      value.value = info.value ?? '';
+      value.font = { name: 'Tahoma', size: 10 };
+      value.alignment = { horizontal: 'left', vertical: 'middle' };
+      row.commit();
+    });
+
+    if (infoLines.length > 0) {
+      worksheet.getRow(titleLines.length + infoLines.length + 2).commit();
+    }
+
+    const headerRow = worksheet.getRow(this.resolveHeaderOffset(sheet));
     sheet.headers.forEach((header, index) => {
       const cell = headerRow.getCell(index + 1);
       cell.value = header;
@@ -607,6 +680,51 @@ export class ExportJobService {
       };
     });
     headerRow.commit();
+  }
+
+  /**
+   * Baris TOTAL di bawah data. Label-nya di-merge dari kolom pertama sampai
+   * tepat sebelum kolom angka pertama yang dijumlahkan, meniru bentuk laporan
+   * yang sudah dipakai sebelumnya.
+   */
+  private writeTotalRow(
+    worksheet: any,
+    sheet: ExportSheetDefinition,
+    formats: ResolvedColumnFormat[],
+    totals: Map<number, number>,
+    rowNumber: number,
+  ): void {
+    const border = {
+      top: { style: 'thin' as const },
+      left: { style: 'thin' as const },
+      bottom: { style: 'thin' as const },
+      right: { style: 'thin' as const },
+    };
+    const sumColumns = sheet.totalRow?.sumColumns ?? [];
+    const firstSum = Math.min(...sumColumns);
+    const row = worksheet.getRow(rowNumber);
+
+    const label = row.getCell(1);
+    label.value = sheet.totalRow?.label ?? 'TOTAL';
+    label.font = { name: 'Tahoma', size: 10, bold: true };
+    label.alignment = { horizontal: 'left', vertical: 'middle' };
+    label.border = border;
+
+    sumColumns.forEach((index) => {
+      const cell = row.getCell(index + 1);
+      cell.value = totals.get(index) ?? 0;
+      if (formats[index]?.numFmt) cell.numFmt = formats[index].numFmt;
+      cell.font = { name: 'Tahoma', size: 10, bold: true };
+      cell.alignment = { horizontal: 'right', vertical: 'middle' };
+      cell.border = border;
+    });
+
+    // Merge WAJIB sebelum row.commit(): setelah baris di-flush ke stream,
+    // ExcelJS tidak bisa lagi mengubahnya.
+    if (firstSum > 1) {
+      worksheet.mergeCells(rowNumber, 1, rowNumber, firstSum);
+    }
+    row.commit();
   }
 
   private writeDataRow(

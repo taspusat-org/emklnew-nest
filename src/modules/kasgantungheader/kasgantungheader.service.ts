@@ -23,6 +23,10 @@ import { GlobalService } from '../global/global.service';
 import { LocksService } from '../locks/locks.service';
 import { StatuspendukungService } from '../statuspendukung/statuspendukung.service';
 import { numberToTerbilang } from 'src/utils/terbilang';
+import {
+  EXCEL_FORMAT,
+  ExportSheetDefinition,
+} from 'src/common/report/export-job.service';
 import { Column, Workbook } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -52,13 +56,6 @@ export class KasgantungheaderService {
     'created_at',
     'updated_at',
   ];
-
-  // Kolom grid yang datang dari tabel join, bukan dari kasgantungheader.
-  private static readonly JOINED_COLUMNS: Record<string, string> = {
-    relasi_nama: 'r.nama',
-    bank_nama: 'b.nama',
-    alatbayar_nama: 'ab.nama',
-  };
 
   // Kolom yang ikut disapu kotak SEARCH di grid = kolom yang tampil di grid.
   private static readonly SEARCHABLE_COLUMNS = [
@@ -91,8 +88,10 @@ export class KasgantungheaderService {
     'info',
   ]);
 
+  // relasi_nama/bank_nama/alatbayar_nama sudah ikut di vkasgantungheader, jadi
+  // semua kolom grid diacu lewat alias view yang sama.
   private columnRef(key: string): string {
-    return KasgantungheaderService.JOINED_COLUMNS[key] ?? `u.${key}`;
+    return `u.${key}`;
   }
 
   private async setDateRangeSessionContext(
@@ -203,13 +202,13 @@ export class KasgantungheaderService {
       // uuid tidak berarti apa-apa bagi pemakai.
       case 'relasi_id':
       case 'relasi_nama':
-        return { orderCol: 'r.nama', dir };
+        return { orderCol: 'u.relasi_nama', dir };
       case 'bank_id':
       case 'bank_nama':
-        return { orderCol: 'b.nama', dir };
+        return { orderCol: 'u.bank_nama', dir };
       case 'alatbayar_id':
       case 'alatbayar_nama':
-        return { orderCol: 'ab.nama', dir };
+        return { orderCol: 'u.alatbayar_nama', dir };
       default:
         return {
           orderCol: KasgantungheaderService.FILTERABLE_COLUMNS.has(sortBy)
@@ -1181,111 +1180,95 @@ export class KasgantungheaderService {
   }
 
   /**
-   * Query dasar export daftar: filter & sort yang sama dengan findAll, TANPA
-   * paging dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
+   * Data master satu bukti untuk blok info di atas tabel rincian. Dipakai juga
+   * untuk memberi nama file, jadi diambil SEBELUM job export dimulai supaya
+   * id yang tidak ada langsung balas 404, bukan gagal di tengah job.
    */
-  buildExportQuery(
-    {
-      search,
-      filters,
-      sort,
-    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
-    db: any,
-  ) {
-    const sortBy = sort?.sortBy || 'nobukti';
-    const sortDirection =
-      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
-    const safeFilters = filters || {};
-
-    const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
-
-    const query = this.baseQuery(db)
+  async loadExportBuktiHeader(id: string, db: any) {
+    const header = await this.baseQuery(db)
       .select([
         'u.nobukti',
         db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
         'u.keterangan',
-        'r.nama as relasi_nama',
-        'b.nama as bank_nama',
-        'ab.nama as alatbayar_nama',
+        'u.relasi_nama',
+        'u.bank_nama',
+        'u.alatbayar_nama',
         'u.pengeluaran_nobukti',
         'u.coakaskeluar',
         'u.dibayarke',
         'u.nowarkat',
         db.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
-        'u.modifiedby',
-        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
       ])
-      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+      .where('u.id', String(id))
+      .first();
 
-    // Urutan HARUS deterministik: tanpa tiebreak, dua baris dengan nilai sort
-    // yang sama bisa bertukar posisi antar-batch cursor.
-    query.orderBy(orderCol, sortDirection);
-    query.orderBy('u.id', 'asc');
+    if (!header) {
+      throw new NotFoundException(`Kas gantung dengan id ${id} tidak ditemukan`);
+    }
 
-    return query;
+    return header;
   }
 
-  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
-  async countExportRows(
-    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
-    db: any,
-  ): Promise<number> {
-    const result = await this.baseQuery(db)
-      .count('u.id as total')
-      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+  /**
+   * Rincian satu bukti, urut sesuai urutan input. Dikembalikan sebagai query
+   * (bukan array) supaya ExportJobService bisa men-stream-nya lewat cursor,
+   * sama seperti export daftar.
+   */
+  buildExportBuktiQuery(nobukti: string, db: any) {
+    return db('vkasgantungdetail as d')
+      .select(['d.nobukti', 'd.keterangan', 'd.nominal'])
+      .where('d.nobukti', nobukti)
+      .orderBy('d.id', 'asc');
+  }
+
+  /** Jumlah baris rincian — dipakai untuk progres export yang nyata. */
+  async countExportBuktiRows(nobukti: string, db: any): Promise<number> {
+    const result = await db('vkasgantungdetail as d')
+      .count('d.id as total')
+      .where('d.nobukti', nobukti)
       .first();
 
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
-  readonly exportSheet = {
-    sheetName: 'Data Export',
-    titleLines: [
-      'PT. TRANSPORINDO AGUNG SEJAHTERA',
-      'LAPORAN KAS GANTUNG',
-      'Data Export',
-    ],
-    headers: [
-      'NO.',
-      'NO BUKTI',
-      'TGL BUKTI',
-      'KETERANGAN',
-      'RELASI',
-      'BANK',
-      'ALAT BAYAR',
-      'PENGELUARAN NO BUKTI',
-      'COA KAS KELUAR',
-      'DIBAYAR KE',
-      'NO WARKAT',
-      'TGL JATUH TEMPO',
-      'MODIFIED BY',
-      'CREATED AT',
-      'UPDATED AT',
-    ],
-    mapRow: (row: any, rowNumber: number) => [
-      rowNumber,
-      row.nobukti,
-      row.tglbukti,
-      row.keterangan,
-      row.relasi_nama,
-      row.bank_nama,
-      row.alatbayar_nama,
-      row.pengeluaran_nobukti,
-      row.coakaskeluar,
-      row.dibayarke,
-      row.nowarkat,
-      row.tgljatuhtempo,
-      row.modifiedby,
-      row.created_at,
-      row.updated_at,
-    ],
-  };
+  /** Sheet export per transaksi: blok master di atas, rincian + TOTAL di bawah. */
+  buildExportBuktiSheet(header: any): ExportSheetDefinition {
+    return {
+      sheetName: 'Kas Gantung',
+      titleLines: [
+        'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        'LAPORAN KAS GANTUNG',
+        String(header.nobukti ?? ''),
+      ],
+      infoLines: [
+        { label: 'NO BUKTI', value: header.nobukti },
+        { label: 'TGL BUKTI', value: header.tglbukti },
+        { label: 'KETERANGAN', value: header.keterangan },
+        { label: 'RELASI', value: header.relasi_nama },
+        { label: 'BANK', value: header.bank_nama },
+        { label: 'ALAT BAYAR', value: header.alatbayar_nama },
+        { label: 'PENGELUARAN NO BUKTI', value: header.pengeluaran_nobukti },
+        { label: 'COA KAS KELUAR', value: header.coakaskeluar },
+        { label: 'DIBAYAR KE', value: header.dibayarke },
+        { label: 'NO WARKAT', value: header.nowarkat },
+        { label: 'TGL JATUH TEMPO', value: header.tgljatuhtempo },
+      ],
+      headers: ['NO.', 'NO BUKTI', 'KETERANGAN', 'NOMINAL'],
+      columnFormats: [
+        null,
+        null,
+        null,
+        { numFmt: EXCEL_FORMAT.RUPIAH_DESIMAL },
+      ],
+      totalRow: { sumColumns: [3] },
+      mapRow: (row: any, rowNumber: number) => [
+        rowNumber,
+        row.nobukti,
+        row.keterangan,
+        row.nominal,
+      ],
+    };
+  }
 
   async exportToExcel(data: any[], trx: any) {
     const workbook = new Workbook();
