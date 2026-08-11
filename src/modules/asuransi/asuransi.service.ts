@@ -272,7 +272,6 @@ export class AsuransiService {
     trx: Knex.Transaction,
   ) {
     try {
-      // error: select count("va"."id") as "total" from "asuransi" as "ab" limit $1 - missing FROM-clause entry for table "va"
       const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
       const sortBy = sort?.sortBy || 'nama';
@@ -280,7 +279,6 @@ export class AsuransiService {
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
 
-      // Count dari tabel BASE (asuransi), bukan view vasuransi.
       const countResult = await trx(`${this.tableName} as va`)
         .count('va.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
@@ -535,7 +533,6 @@ export class AsuransiService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
   private readonly EXPORT_COLUMNS = [
     'va.nama',
     'va.keterangan',
@@ -562,14 +559,6 @@ export class AsuransiService {
     'va.statusaktif_nama',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
-   * proses kehabisan heap.
-   */
   buildExportQuery(
     {
       search,
@@ -602,11 +591,6 @@ export class AsuransiService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
-   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
-   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -619,7 +603,6 @@ export class AsuransiService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
@@ -653,7 +636,6 @@ export class AsuransiService {
       'MATERAI 3',
       'STATUS AKTIF',
     ],
-    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
     columnWidths: [
       5, 25, 50, 17, 30, 20, 10, 12, 25, 15, 25, 15, 15, 15, 15, 15, 15, 15, 15,
       15, 15, 15, 15, 15,

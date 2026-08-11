@@ -115,8 +115,8 @@ export class AsuransiController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
 
+    const trx = await dbMssql.transaction();
     try {
       const result = await this.asuransiService.findAll(params, trx);
       trx.commit();
@@ -125,7 +125,7 @@ export class AsuransiController {
     } catch (error) {
       trx.rollback();
       console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
+      throw error;
     }
   }
 
@@ -138,16 +138,9 @@ export class AsuransiController {
     data: UpdateAsuransiDto,
     @Req() req,
   ) {
-    console.log(
-      `${new Date().toISOString()} [ctrl id=${id}] before dbMssql.transaction()`,
-    );
     const trx = await dbMssql.transaction();
-    console.log(
-      `${new Date().toISOString()} [ctrl id=${id}] after  dbMssql.transaction()`,
-    );
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
-
       const result = await this.asuransiService.update(id, data, trx);
 
       await trx.commit();
@@ -227,16 +220,10 @@ export class AsuransiController {
     return this.reportJobService.start({
       mrtName,
       loadData: async () => {
-        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
-        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
-        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
-        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
-        // karena hanya memakai API baca (from/raw/count).
         const result = await this.asuransiService.findAll(
           {
             search,
             filters: (filters ?? {}) as Record<string, string | number>,
-            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
             pagination: { page: 1, limit: 0 },
             sort: {
               sortBy: sortBy || 'nama',
@@ -255,7 +242,6 @@ export class AsuransiController {
           `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 
-        // Kolom tambahan di bawah dipakai header template .mrt.
         return rows.map((row: any) => ({
           ...row,
           judullaporan: judullaporan ?? 'Laporan Asuransi',
