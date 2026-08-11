@@ -16,7 +16,6 @@ import {
   tandatanya,
   UtilsService,
 } from 'src/utils/utils.service';
-} from 'src/utils/utils.service';
 import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -24,6 +23,23 @@ import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { dbMssql } from 'src/common/utils/db';
 import { StatuspendukungService } from '../statuspendukung/statuspendukung.service';
+
+function parseNominal(value: any): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  const cleanValue = String(value).replace(/[^0-9.-]/g, '');
+  if (cleanValue === '' || cleanValue === '-') {
+    return null;
+  }
+
+  const parsed = parseFloat(cleanValue);
+  return isNaN(parsed) ? null : parsed;
+}
 
 @Injectable()
 export class BookingOrderanMuatanService {
@@ -36,8 +52,7 @@ export class BookingOrderanMuatanService {
     private readonly globalService: GlobalService,
     private readonly logTrailService: LogtrailService,
     private readonly statuspendukungService: StatuspendukungService,
-  ) { }
-  ) { }
+  ) {}
 
   async create(createData: any, trx: any) {
     try {
@@ -85,12 +100,6 @@ export class BookingOrderanMuatanService {
         ...insertData
       } = createData;
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
       [
         'nobukti',
         'keterangan',
@@ -106,6 +115,8 @@ export class BookingOrderanMuatanService {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
+
+      insertData.nominalstuffing = parseNominal(insertData.nominalstuffing);
 
       insertData.updated_at = this.utilsService.getTime();
       insertData.created_at = this.utilsService.getTime();
@@ -171,31 +182,25 @@ export class BookingOrderanMuatanService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
-
-      await trx.schema.createTable(tempUrl, (t) => {
-        t.integer('id').nullable();
-        t.string('orderan_nobukti').nullable();
-        t.text('link').nullable();
-      });
+      const tempUrl = `temp_url_${Math.random().toString(36).substring(2, 8)}`;
       const url = 'orderanmuatan';
 
-      await trx(tempUrl).insert(
-        trx
-          .select(
-            'u.id',
-            'u.orderan_nobukti',
-            trx.raw(`
-                    STRING_AGG(
-                      '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'orderan_nobukti=' + u.orderan_nobukti + '">' +
-                      '<HighlightWrapper value="' + u.orderan_nobukti + '" />' +
-                      '</a>', ','
-                    ) AS link
-                  `),
-          )
-          .from('bookingorderanheader as u')
-          .groupBy('u.id', 'u.orderan_nobukti'),
-      );
+      await trx.raw(`
+        CREATE TEMP TABLE "${tempUrl}"
+        ON COMMIT DROP
+        AS
+        SELECT
+          u.id::text AS id,
+          u.orderan_nobukti,
+          STRING_AGG(
+            '<a target="_blank" className="link-color" href="/dashboard/${url}'
+              || ${tandatanya} || 'orderan_nobukti=' || u.orderan_nobukti || '">'
+              || '<HighlightWrapper value="' || u.orderan_nobukti || '" />'
+              || '</a>', ','
+          ) AS link
+        FROM bookingorderanheader u
+        GROUP BY u.id, u.orderan_nobukti
+      `);
 
       const fieldTempHasil = [
         // 'nobukti',
@@ -259,9 +264,6 @@ export class BookingOrderanMuatanService {
           'u.noseal',
           'u.lokasistuffing',
           'u.nominalstuffing',
-          // Kolom fisiknya bernama emkl_id (lihat migration
-          // bookingorderanmuatan), tapi FE/DTO memakai nama emkl_id ->
-          // alias, jangan diubah nama outputnya.
           'u.emkl_id',
           'u.asalmuatan',
           'u.daftarbl_id',
@@ -333,7 +335,7 @@ export class BookingOrderanMuatanService {
           'header.nobukti',
         )
         .leftJoin(
-          trx.raw(`${tempUrl} as tempUrl`),
+          trx.raw(`"${tempUrl}" as "tempUrl"`),
           'header.orderan_nobukti',
           'tempUrl.orderan_nobukti',
         )
@@ -351,11 +353,6 @@ export class BookingOrderanMuatanService {
 
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        // u.lokasistuffing bertipe bigint, hargatrucking.id bertipe varchar —
-        // cast eksplisit ke text supaya join tidak error "operator does not
-        // exist: bigint = text". Ini bug lama yang selama ini tersamar
-        // karena query ini selalu gagal duluan di step PIVOT (MSSQL) sebelum
-        // pernah sampai mengeksekusi join ini.
         .leftJoin(
           'hargatrucking',
           trx.raw('u.lokasistuffing::text'),
@@ -923,6 +920,12 @@ export class BookingOrderanMuatanService {
         }
       });
 
+      if ('nominalstuffing' in bookingOrderanData) {
+        bookingOrderanData.nominalstuffing = parseNominal(
+          bookingOrderanData.nominalstuffing,
+        );
+      }
+
       const hasChanges = this.utilsService.hasChanges(
         bookingOrderanData,
         existingData,
@@ -1064,9 +1067,6 @@ export class BookingOrderanMuatanService {
           'u.noseal',
           'u.lokasistuffing',
           'u.nominalstuffing',
-          // Kolom fisiknya bernama emkl_id (lihat migration
-          // bookingorderanmuatan), tapi FE/DTO memakai nama emkl_id ->
-          // alias, jangan diubah nama outputnya.
           'u.emkl_id as emkl_id',
           'u.asalmuatan',
           'u.daftarbl_id',
@@ -1117,11 +1117,6 @@ export class BookingOrderanMuatanService {
         .leftJoin('pelayaran', 'u.pelayarancontainer_id', 'pelayaran.id')
         .leftJoin('jenismuatan', 'u.jenismuatan_id', 'jenismuatan.id')
         .leftJoin('sandarkapal', 'u.sandarkapal_id', 'sandarkapal.id')
-        // u.lokasistuffing bertipe bigint, hargatrucking.id bertipe varchar —
-        // cast eksplisit ke text supaya join tidak error "operator does not
-        // exist: bigint = text". Ini bug lama yang selama ini tersamar
-        // karena query ini selalu gagal duluan di step PIVOT (MSSQL) sebelum
-        // pernah sampai mengeksekusi join ini.
         .leftJoin(
           'hargatrucking',
           trx.raw('u.lokasistuffing::text'),

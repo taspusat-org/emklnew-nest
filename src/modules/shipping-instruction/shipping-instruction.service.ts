@@ -24,9 +24,6 @@ import { dbMssql } from 'src/common/utils/db';
 
 @Injectable()
 export class ShippingInstructionService {
-  // tableName = target TULIS (insert/update/delete). viewName = sumber BACA,
-  // sudah memuat kolom turunan hasil join (pelayaran_nama, kapal_nama,
-  // tujuankapal_nama, voyberangkat, tglberangkat). Pola sama dgn alatbayar.
   private readonly tableName: string = 'shippinginstructionheader';
   private readonly viewName: string = 'vshippinginstructionheader';
 
@@ -43,10 +40,6 @@ export class ShippingInstructionService {
 
   async create(data: any, trx: any) {
     try {
-      // Blanket-uppercase dihapus: schedule_id (FK), statusformat (status),
-      // dan id adalah UUID bertipe text (case-sensitive) yang rusak bila
-      // di-uppercase; tglbukti diformat eksplisit di bawah dan header ini tak
-      // punya kolom teks manusiawi.
 
       const formattedTglBukti = formatDateToSQL(data.tglbukti);
       const updated_at = this.utilsService.getTime();
@@ -99,7 +92,7 @@ export class ShippingInstructionService {
             detail.detailsrincian.length > 0
           ) {
             rincianPayload = detail.detailsrincian.map((rincian: any) => ({
-              id: 0,
+              id: '0',
               nobukti: newItem.nobukti,
               shippinginstructiondetail_id: detail.id || 0,
               shippinginstructiondetail_nobukti:
@@ -115,7 +108,7 @@ export class ShippingInstructionService {
           }
 
           return {
-            id: 0,
+            id: '0',
             orderan_id: detail.orderan_id,
             nobukti: newItem.nobukti,
             shippinginstructiondetail_nobukti:
@@ -203,17 +196,6 @@ export class ShippingInstructionService {
     }
   }
 
-  /**
-   * Kirim rentang tanggal ke view lewat session context Postgres.
-   *
-   * vshippinginstructionheader membacanya via current_setting('tas.si_*', true)
-   * dan menyaring di dalam view, jadi filter tanggal TIDAK lagi dirakit di
-   * applyFilters. is_local=true → GUC otomatis hilang begitu transaksi selesai
-   * sehingga tidak bocor ke request lain lewat connection pool.
-   *
-   * Selalu di-set (termasuk ke '') supaya tidak ada nilai sisa yang terbawa,
-   * sama seperti PengeluaranheaderService.setDateRangeSessionContext.
-   */
   private async setDateRangeSessionContext(
     trx: any,
     filters: Record<string, any> | undefined,
@@ -235,20 +217,6 @@ export class ShippingInstructionService {
     ]);
   }
 
-  /**
-   * Filter + search untuk vshippinginstructionheader. Dipakai BERSAMA oleh query
-   * count dan query data (pola applyFilters di AlatbayarService) supaya total
-   * halaman tidak pernah lagi beda dengan isi grid — versi lama menghitung
-   * `count(*)` tanpa filter apa pun, jadi totalPages selalu memakai jumlah
-   * seluruh tabel.
-   *
-   * tglDari/tglSampai TIDAK ditangani di sini — keduanya sudah disaring di dalam
-   * view lewat session context (setDateRangeSessionContext).
-   *
-   * Semua referensi kolom memakai alias `u` = view, jadi tidak ada lagi kolom
-   * dari tabel join (pel.nama / kapal.nama / tujuankapal.nama); kolom turunan
-   * sudah ikut di view sebagai *_nama.
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any> | undefined,
@@ -259,11 +227,6 @@ export class ShippingInstructionService {
       (k) => !excludeSearchKeys.includes(k),
     );
 
-    // ilike, bukan like: data disimpan uppercase sedangkan user mengetik apa
-    // saja di kotak filter grid — dengan `like` (case-sensitive di Postgres)
-    // pencarian huruf kecil tidak pernah ketemu. Sama seperti alatbayar.
-    // Escape '[' ala MSSQL juga dibuang; di Postgres '[' bukan metakarakter LIKE
-    // sehingga '[[]' justru membuat pencarian yang memuat '[' gagal.
     if (search) {
       const sanitized = String(search).trim();
       qb.where((inner: any) => {
@@ -337,15 +300,8 @@ export class ShippingInstructionService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      // HARUS sebelum query apa pun ke view: rentang tanggal disaring di dalam
-      // view lewat GUC ini. Kalau tidak di-set, view memulangkan semua periode.
       await this.setDateRangeSessionContext(trx, filters);
 
-      // Count DARI VIEW, bukan tabel base seperti di alatbayar: filter di sini
-      // ikut menyentuh kolom hasil join (pelayaran_text/kapal_text/
-      // tujuankapal_text/voyberangkat/tglberangkat) yang tidak ada di
-      // shippinginstructionheader. LEFT JOIN tidak menambah baris, jadi
-      // count(view) == count(base) untuk filter yang sama.
       const countResult = await trx(`${this.viewName} as u`)
         .count('u.id as total')
         .modify((qb: any) => this.applyFilters(qb, filters, search))
@@ -372,7 +328,6 @@ export class ShippingInstructionService {
 
       query.modify((qb: any) => this.applyFilters(qb, filters, search));
 
-      // Kolom *_text di grid diurutkan berdasarkan teksnya, bukan id-nya.
       if (sortBy === 'pelayaran_text') {
         query.orderBy('u.pelayaran_nama', sortDirection);
       } else if (sortBy === 'kapal_text') {
@@ -410,14 +365,8 @@ export class ShippingInstructionService {
 
   async findOne(id: string, trx: any) {
     try {
-      // Kosongkan dulu rentang tanggal di session context. findOne mencari SATU
-      // record by id dan tidak boleh ikut tersaring periode — kalau transaksi ini
-      // sebelumnya sempat memanggil findAll (mis. lewat create/update), GUC-nya
-      // masih terisi dan record di luar periode itu akan balik kosong.
       await this.setDateRangeSessionContext(trx, undefined);
 
-      // Baca dari view juga — kolom tglberangkat/kapal_id/kapal_nama sudah ada
-      // di sana, jadi dua LEFT JOIN di sini tidak diperlukan lagi.
       const query = trx(`${this.viewName} as u`)
         .select([
           'u.id',
@@ -484,9 +433,6 @@ export class ShippingInstructionService {
       let updatedData;
       const updated_at = this.utilsService.getTime();
 
-      // Hanya format tanggal DD-MM-YYYY. TIDAK blanket-uppercase: schedule_id
-      // (FK), id, dan status* adalah UUID bertipe text (case-sensitive) yang
-      // rusak bila di-uppercase; header ini tak punya kolom teks manusiawi.
       Object.keys(data).forEach((key) => {
         if (typeof data[key] === 'string') {
           const value = data[key];
@@ -879,6 +825,129 @@ export class ShippingInstructionService {
 
   //   return tempFilePath;
   // }
+
+  private readonly EXPORT_COLUMNS = [
+    'u.nobukti',
+    'u.voyberangkat',
+    'u.pelayaran_nama',
+    'u.kapal_nama',
+    'u.tujuankapal_nama',
+    'u.modifiedby',
+  ];
+
+  /**
+   * Query baris export. Filter tanggal ditulis eksplisit di sini, TIDAK lewat
+   * setDateRangeSessionContext: set_config(..., true) itu transaction-local,
+   * sedangkan export mengalirkan baris lewat cursor di luar transaksi. Tanpa
+   * session context, guard di view `vshippinginstructionheader` bernilai true
+   * sehingga view mengembalikan semua baris — periode-nya dibatasi di sini.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const query = db(`${this.viewName} as u`)
+      .select([
+        ...this.EXPORT_COLUMNS,
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        db.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+        db.raw(
+          "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        db.raw(
+          "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ])
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search));
+
+    if (sortBy === 'pelayaran_text') {
+      query.orderBy('u.pelayaran_nama', sortDirection);
+    } else if (sortBy === 'kapal_text') {
+      query.orderBy('u.kapal_nama', sortDirection);
+    } else if (sortBy === 'tujuankapal_text') {
+      query.orderBy('u.tujuankapal_nama', sortDirection);
+    } else {
+      query.orderBy(`u.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  /** Periode grid (tglDari/tglSampai) — lihat catatan di buildExportQuery. */
+  private applyDateRange(
+    qb: any,
+    filters: Record<string, any> | undefined,
+  ): void {
+    if (!filters?.tglDari || !filters?.tglSampai) return;
+
+    qb.whereBetween('u.tglbukti', [
+      formatDateToSQL(String(filters.tglDari)),
+      formatDateToSQL(String(filters.tglSampai)),
+    ]);
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
+   * sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN SHIPPING INSTRUCTION',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'VOY BERANGKAT',
+      'PELAYARAN',
+      'KAPAL',
+      'TGL BERANGKAT',
+      'TUJUAN KAPAL',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    columnWidths: [5, 25, 15, 20, 25, 25, 15, 25, 20, 22, 22],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.voyberangkat,
+      row.pelayaran_nama,
+      row.kapal_nama,
+      row.tglberangkat,
+      row.tujuankapal_nama,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
 
   async exportToExcel(data: any, id: any) {
     const workbook = new Workbook();

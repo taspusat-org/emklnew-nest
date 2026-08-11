@@ -618,7 +618,6 @@ export class UtilsService {
         class: 'acos.class',
       })
       .distinct('acos.id');
-    console.log('userAbilities', userAbilities);
     const roleAbilities = await trx('acl')
       .join('acos', 'acl.aco_id', 'acos.id')
       .whereIn('acl.role_id', roles)
@@ -654,7 +653,9 @@ export class UtilsService {
     };
   }
   async fetchUserRolesAndUserAcl(
-    userId: number,
+    // Sama seperti fetchUserRolesAndAbilities: user id kini varchar (uuid v7),
+    // jadi nilainya dipakai apa adanya di WHERE — jangan dipaksa ke number.
+    userId: string | number,
     trx: any,
   ): Promise<UserRoleAbilities> {
     const roles = await trx('userrole')
@@ -1210,45 +1211,100 @@ export function splitDataByPages(
 
   return paged;
 }
-export async function uuidV7(trx: any): Promise<string> {
-  // 1. Ambil kode cabang dari parameter. Kolom `memo` bertipe text berisi JSON,
-  //    jadi diekstrak dengan operator jsonb (`memo::jsonb ->> 'KODE CABANG'`).
+// Kode cabang dari parameter. Kolom `memo` bertipe text berisi JSON, jadi
+// diekstrak dengan operator jsonb (`memo::jsonb ->> 'KODE CABANG'`).
+async function getKodeCabang(trx: any): Promise<string> {
   const parameter = await trx('parameter')
     .where('grp', 'CABANG')
     .andWhere('subgrp', 'CABANG')
     .select('*', trx.raw(`(memo::jsonb ->> 'KODE CABANG') as kode_cabang`))
     .first();
 
-  const kodeCabang = parameter?.kode_cabang ?? '00';
+  return parameter?.kode_cabang ?? '00';
+}
 
-  // 2. Generate UUIDv7 lewat fungsi Postgres public.get_uuid_v7().
+// Generate `count` uuid v7 (berprefix kode cabang) dalam SATU query lewat
+// fungsi Postgres public.get_uuid_v7().
+async function generateUuidV7Rows(
+  trx: any,
+  kodeCabang: string,
+  count: number,
+): Promise<string[]> {
   const result = await trx.raw(
-    `SELECT ? || '-' || public.get_uuid_v7()::text AS uuid`,
-    [kodeCabang],
+    `SELECT ? || '-' || public.get_uuid_v7()::text AS uuid
+       FROM generate_series(1, ?) AS g(i)`,
+    [kodeCabang, count],
   );
 
-  // knex-pg mengembalikan { rows: [...] }; knex-mssql array langsung. Dukung
-  // keduanya agar aman lintas driver.
-  const row = result?.rows?.[0] ?? result?.[0];
-  const uuid = row?.uuid ?? null;
+  // knex-pg mengembalikan { rows: [...] }; driver lain array langsung.
+  const rows = result?.rows ?? result ?? [];
 
-  return uuid;
+  // Postgres selalu merender tipe uuid ke teks huruf kecil. Uppercase di sini,
+  // bukan di uuidV7(), supaya jalur batch (insert massal detail) menghasilkan
+  // id dengan format yang sama seperti jalur satu baris (header).
+  return rows.map((row: any) => row?.uuid?.toUpperCase()).filter(Boolean);
+}
+
+export async function uuidV7(trx: any): Promise<string> {
+  const kodeCabang = await getKodeCabang(trx);
+  const [uuid] = await generateUuidV7Rows(trx, kodeCabang, 1);
+  return uuid ?? null;
+}
+
+/**
+ * Generate banyak uuid v7 sekaligus dengan 2 query saja (kode cabang + batch),
+ * BUKAN 2 query per baris.
+ *
+ * Sebelumnya insert massal memanggil uuidV7() per baris: 591 baris ACL = 1.182
+ * round-trip DB berurutan, yang membuat PUT /roleacl kena timeout.
+ */
+export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
+  if (count <= 0) return [];
+
+  const kodeCabang = await getKodeCabang(trx);
+  const uuids = await generateUuidV7Rows(trx, kodeCabang, count);
+
+  // Batch path mengandalkan get_uuid_v7() dievaluasi per baris (VOLATILE).
+  // Kalau ternyata di-fold jadi satu nilai konstan, hasilnya duplikat dan akan
+  // bentrok primary key — deteksi di sini lalu jatuh ke jalur per-baris.
+  if (uuids.length === count && new Set(uuids).size === count) {
+    return uuids;
+  }
+
+  const fallback: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const [uuid] = await generateUuidV7Rows(trx, kodeCabang, 1);
+    fallback.push(uuid);
+  }
+  return fallback;
 }
 
 /**
  * Attaches a freshly generated uuidV7 to the `id` field before insert.
  * - For a single object: returns a copy with `id` set.
- * - For an array of rows: sets `id` on each row sequentially and returns it.
+ * - For an array of rows: sets `id` on each row and returns it.
  *
- * Sequential (not Promise.all) on purpose: a knex transaction uses a single
- * connection and cannot run concurrent queries.
+ * Satu statement untuk seluruh array (bukan Promise.all): transaksi knex
+ * memakai satu koneksi dan tidak bisa menjalankan query paralel.
  */
 export async function withUuidV7(trx: any, data: any): Promise<any> {
   if (Array.isArray(data)) {
-    for (const row of data) {
-      row.id = await uuidV7(trx);
-    }
+    const uuids = await uuidV7Many(trx, data.length);
+    data.forEach((row: any, index: number) => {
+      row.id = uuids[index];
+    });
     return data;
   }
   return { ...data, id: await uuidV7(trx) };
 }
+
+// estimasi/nominal/nominaltagih bertipe money->numeric. Grid mengirimnya
+// lewat InputCurrency sebagai string ter-format ("100,000.00"); koma
+// ribuan ditolak PG dengan 22P02 invalid input syntax for type numeric.
+// Kosong -> null (kolom nullable).
+export const toNumeric = (value: any): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+  return Number.isNaN(parsed) ? null : parsed;
+};

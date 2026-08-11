@@ -54,10 +54,6 @@ export class ScheduleDetailService {
     for (data of fixDetail) {
       let isDataChanged = false;
 
-      // Tetap format tanggal DD-MM-YYYY. Uppercase hanya kolom teks manusiawi:
-      // pelayaran_id/kapal_id/tujuankapal_id/schedule_id (FK) dan id adalah
-      // UUID bertipe text (case-sensitive) yang rusak bila di-uppercase
-      // (mis. bikin lookup schedulekapal meleset).
       const upperFields = ['keterangan', 'voyberangkat', 'voytiba'];
       Object.keys(data).forEach((key) => {
         if (typeof data[key] === 'string') {
@@ -111,8 +107,8 @@ export class ScheduleDetailService {
         }
       }
 
-      if (data.id) {
-        // Check if the data has an id (existing record)
+      // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+      if (data.id && String(data.id) !== '0') {
         const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
@@ -200,11 +196,6 @@ export class ScheduleDetailService {
 
     await trx(tempTableName).insert(openJson);
 
-    // WAJIB raw. knex-pg MEMBUANG join pada .update() tanpa error apa pun —
-    // yang keluar cuma `update "scheduledetail" set ... = temp_x.kolom`, tanpa
-    // FROM/WHERE, sehingga Postgres menolak dengan
-    // 42P01 "missing FROM-clause entry for table temp_x".
-    // Padanan UPDATE ... JOIN di Postgres adalah UPDATE ... FROM ... WHERE.
     const updatedResult = await trx
       .raw(
         `update ${this.tableName} as t set
@@ -310,11 +301,6 @@ export class ScheduleDetailService {
 
     const finalData = logData.concat(pushToLogWithAction);
 
-    // leftJoin + whereNull TIDAK bisa dipakai pada .del() di Postgres: knex
-    // menerjemahkannya jadi `delete ... using "temp" where "temp"."id" is null
-    // and "scheduledetail"."id" = "temp"."id"`. USING itu inner join, jadi
-    // `temp.id is null` tidak pernah benar — hasilnya NOL baris terhapus, tanpa
-    // error. Padanan yang benar: NOT EXISTS.
     const deletedData = await trx(`${this.tableName} as u`)
       .where('u.schedule_id', id)
       .whereNotExists(function (this: any) {

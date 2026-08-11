@@ -5,20 +5,16 @@ import { isRecordExist } from 'src/utils/utils.service';
 // 1. BASE FIELDS
 // ------------------------
 const baseFields = {
-  nobukti: z.string().nullable(),
+  nobukti: z.string().nullable().optional(),
 
   tglbukti: z
     .string({ message: 'TGL BUKTI WAJIB DIISI' })
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
-  bankdari_id: z
-    .string()
-    .min(1, { message: 'BANK DARI' }),
+  bankdari_id: z.string().min(1, { message: 'BANK DARI' }),
   bankdari_nama: z.string().nullable().optional(),
 
-  bankke_id: z
-    .string()
-    .min(1, { message: 'BANK KE WAJIB DISI' }),
+  bankke_id: z.string().min(1, { message: 'BANK KE WAJIB DISI' }),
   bankke_nama: z.string().nullable().optional(),
 
   alatbayar_id: z

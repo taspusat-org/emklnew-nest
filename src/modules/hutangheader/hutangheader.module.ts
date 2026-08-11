@@ -11,6 +11,7 @@ import { GlobalModule } from '../global/global.module';
 import { LocksModule } from '../locks/locks.module';
 import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.module';
 import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module
     GlobalModule,
     LocksModule,
     StatuspendukungModule,
+    ReportModule,
   ],
   controllers: [HutangheaderController],
   providers: [HutangheaderService],

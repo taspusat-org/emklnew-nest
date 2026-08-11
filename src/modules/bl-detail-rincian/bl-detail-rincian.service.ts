@@ -28,7 +28,10 @@ export class BlDetailRincianService {
       const logData: any[] = [];
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      // Tanpa prefiks '##' (global temp ala MSSQL): '#' bukan identifier valid
+      // di Postgres saat direferensikan mentah, mis. trx.raw(`${temp}.kolom`).
+      // Sama seperti ShippingInstructionDetailService.
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -66,8 +69,11 @@ export class BlDetailRincianService {
           allRincianBiaya.push(tempRincianBiaya);
         }
 
-        // Check if the data has an id (existing record)
-        if (rincianWithOutBiaya.id) {
+        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+        if (
+          rincianWithOutBiaya.id &&
+          String(rincianWithOutBiaya.id) !== '0'
+        ) {
           const existingData = await trx(this.tableName)
             .where('id', rincianWithOutBiaya.id)
             .first();
@@ -112,19 +118,15 @@ export class BlDetailRincianService {
 
       await trx.raw(tableTemp);
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
-
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
+      // OPENJSON + jsonExtract adalah bentuk SQL Server. Padanannya di Postgres
+      // jsonb_populate_recordset(null::<tabel>, ...): satu baris per elemen
+      // array, kolom & tipenya mengikuti tabel base (temp dibuat dari
+      // `SELECT * ... WHERE 1=0` sehingga bentuknya identik). Pola ini sudah
+      // dipakai ShippingInstructionDetailService.
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
       // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
       const updatedData = await trx(this.tableName)
@@ -267,179 +269,80 @@ export class BlDetailRincianService {
     }
   }
 
+  /**
+   * Nama kolom pivot untuk satu biaya EMKL. WAJIB dipakai di dua tempat —
+   * pembuatan temp table di tempPivotBiaya() dan daftar select di findAll() —
+   * supaya keduanya tidak pernah bergeser sendiri-sendiri.
+   */
+  private pivotColumnAlias(nama: string): string {
+    const alias = String(nama)
+      .replace(/\s+/g, '')
+      .replace(/[^a-zA-Z0-9_]/g, '')
+      .toLowerCase();
+
+    return alias.startsWith('biaya') ? alias : `biaya${alias}`;
+  }
+
+  /**
+   * Satu baris per (bldetail_id, orderanmuatan_nobukti) dengan SATU KOLOM per
+   * biaya EMKL yang statusbiayabl = YA — dipakai findAll() sebagai sumber kolom
+   * biaya di grid rincian.
+   *
+   * Versi lama memakai PIVOT + JSON_VALUE(A.[kolom], '$.nominal') + tiga temp
+   * table ber-prefiks '##'. Ketiganya khusus SQL Server:
+   *   - PIVOT tidak ada di Postgres,
+   *   - JSON_VALUE dan kurung siku sebagai pembatas identifier juga tidak ada,
+   *   - '##' bukan identifier valid saat direferensikan mentah.
+   * Padanannya di Postgres adalah conditional aggregation
+   * (MAX(CASE WHEN ... THEN ... END)), yang sekaligus menghapus kebutuhan
+   * merakit lalu membongkar JSON: nominalnya diambil langsung dari kolomnya.
+   *
+   * Nama biaya EMKL ikut ke dalam SQL sebagai NILAI BIND (bukan literal yang
+   * dirangkai), jadi tidak ada jalur injeksi lewat data master. Yang dirangkai
+   * hanya nama kolom hasil, dan itu sudah dibersihkan pivotColumnAlias().
+   */
   async tempPivotBiaya(trx: any) {
     try {
-      const tempRincianBiaya = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-      const tempData = `##temp_data${Math.random().toString(36).substring(2, 15)}`;
-      const tempHasil = `##temp_hasil${Math.random().toString(36).substring(2, 15)}`;
+      const tempHasil = `temp_pivotbiaya_${Math.random()
+        .toString(36)
+        .substring(2, 15)}`;
+
       const getIdStatusYa = await trx('parameter')
         .select('id')
         .where('grp', 'STATUS NILAI')
         .where('text', 'YA')
         .first();
+
       const getBiayaEmkl = await trx('biayaemkl')
         .select('nama')
-        .where('statusbiayabl', getIdStatusYa.id);
+        .where('statusbiayabl', getIdStatusYa?.id ?? null);
 
-      await trx.schema.createTable(tempRincianBiaya, (t) => {
-        // Create tempRincianBiaya table
-        t.bigInteger('id').nullable();
-        t.string('nobukti').nullable();
-        t.bigInteger('bldetail_id').nullable();
-        t.string('bldetail_nobukti').nullable();
-        t.string('orderanmuatan_nobukti').nullable();
-        t.string('nominal').nullable();
-        t.bigInteger('biayaemkl_id').nullable();
-        t.string('modifiedby').nullable();
-        t.string('updated_at').nullable();
-        t.string('created_at').nullable();
-      });
+      // Tidak ada biaya EMKL bertanda YA: tetap buat temp table (findAll
+      // meng-LEFT JOIN-nya) dengan kolom kunci saja, tanpa kolom biaya.
+      const kolomBiaya = getBiayaEmkl
+        .map(
+          (item: any) =>
+            `MAX(CASE WHEN c.nama = ? THEN rb.nominal END) AS "${this.pivotColumnAlias(
+              item.nama,
+            )}"`,
+        )
+        .join(',\n               ');
 
-      await trx.schema.createTable(tempData, (t) => {
-        // Create tempData table (DATA YG AKAN JADI KOLOM)
-        t.bigInteger('id').nullable();
-        t.bigInteger('bldetail_id').nullable();
-        t.string('orderanmuatan_nobukti').nullable();
-        t.string('keterangan').nullable();
-        t.string('judul').nullable();
-      });
+      const bindNama = getBiayaEmkl.map((item: any) => item.nama);
 
-      await trx.schema.createTable(tempHasil, (t) => {
-        t.string('bldetail_id').nullable();
-        t.string('orderanmuatan_nobukti').nullable();
-        // LOOPING GET BIAYA EMKL BIAR FIELD TEMP HASIL NGIKUT OTOMATIS DARI NAMA BIAYA EMKL
-        // Dan dibuat supaya dia lowercase dan cek kalo gak dimulai dari kata biaya maka tambahkan awalnya dengan kata 'biaya'
-        getBiayaEmkl.forEach((item) => {
-          let columnFields = item.nama.replace(/\s+/g, '').toLowerCase();
-          if (!columnFields.startsWith('biaya')) {
-            columnFields = 'biaya' + columnFields;
-          }
-          t.text(columnFields).nullable();
-        });
-        // t.text('biayatruckingmuat').nullable();
-        // t.text('biayadokumenbl').nullable();
-        // t.text('biayaoperationalpelabuhan').nullable();
-        // t.text('biayaseal').nullable();
-      });
-
-      await trx(tempRincianBiaya).insert(
-        trx
-          .select(
-            'a.id',
-            'a.nobukti',
-            'a.bldetail_id',
-            'a.bldetail_nobukti',
-            'a.orderanmuatan_nobukti',
-            'a.nominal',
-            'a.biayaemkl_id',
-            'a.modifiedby',
-            'a.updated_at',
-            'a.created_at',
-          )
-          .from(`${this.tableNameRincianBiaya} as a`)
-          .innerJoin('biayaemkl as b', 'a.biayaemkl_id', 'b.id')
-          .where('b.statusbiayabl', getIdStatusYa.id),
+      await trx.raw(
+        `CREATE TEMP TABLE "${tempHasil}" AS
+         SELECT a.bldetail_id,
+                a.orderanmuatan_nobukti${kolomBiaya ? ',\n                ' + kolomBiaya : ''}
+           FROM ${this.tableName} a
+           LEFT JOIN ${this.tableNameRincianBiaya} rb
+                  ON rb.orderanmuatan_nobukti = a.orderanmuatan_nobukti
+           LEFT JOIN biayaemkl c
+                  ON rb.biayaemkl_id = c.id
+                 AND c.statusbiayabl = ?
+          GROUP BY a.bldetail_id, a.orderanmuatan_nobukti`,
+        [...bindNama, getIdStatusYa?.id ?? null],
       );
-      // console.log('SELECT TEMP', await trx(tempRincianBiaya).select('*'));
-
-      await trx(tempData).insert(
-        trx
-          .select(
-            'a.id',
-            'a.bldetail_id',
-            'a.orderanmuatan_nobukti',
-            trx.raw(
-              `CONCAT(
-                '{"nominal":"',
-                b.nominal,
-                '","biayaemkl_id":',
-                b.biayaemkl_id,
-                ',"biayaemkl_nama":"',
-                c.nama,
-                '"}'
-              ) AS keterangan`,
-            ),
-            trx.raw(`c.nama AS judul`),
-          )
-          .from(`${this.tableName} as a`)
-          // .innerJoin(`${tempRincianBiaya} as b`, 'a.orderanmuatan_nobukti', 'b.orderanmuatan_nobukti')
-          // .innerJoin('biayaemkl as c', 'b.biayaemkl_id', 'c.id')
-
-          .crossJoin('biayaemkl as c') // UNTUK AMBIL SEMUA DATA BIAYA EMKL
-          // leftjoin dengan TEMPRINCIANBIAYA BERDASARKAN a.orderanmuatan_nobukti = b.orderanmuatan_nobukti dan BERDASARKAN b.biayaemkl_id = c.id (Kalau ga ada biayaemkl_id yg cocok dengan biayaemkl(c) id akan dibuat null)
-          .leftJoin(`${tempRincianBiaya} as b`, function () {
-            this.on(
-              'a.orderanmuatan_nobukti',
-              '=',
-              'b.orderanmuatan_nobukti',
-            ).andOn('b.biayaemkl_id', '=', 'c.id');
-          })
-          .where('c.statusbiayabl', getIdStatusYa.id), // Kondisikan berdasarkan biaya emkl dgn statusbiaya bl YA biar yg dibutuhkan aja yg diambil
-      );
-      // console.log('SELECT TEMP DATA', await trx(tempData).select('*'));
-
-      const columnsResult = await trx
-        .select('judul')
-        .from(tempData)
-        .groupBy('judul');
-
-      let columns = '';
-      columnsResult.forEach((row, index) => {
-        if (index === 0) {
-          columns = `[${row.judul}]`;
-        } else {
-          columns += `, [${row.judul}]`;
-        }
-      });
-
-      if (!columns) {
-        throw new Error('No columns generated for PIVOT');
-      }
-
-      // BIKIN LOOPING DARI SEMUA NAMA BIAYA EMKL UNTUK SELECT INSERT TO TEMPHASIL
-      const biayaColumns = getBiayaEmkl.map((item) => {
-        const original = item.nama;
-        const alias = item.nama.replace(/\s+/g, '').toLowerCase();
-
-        return trx.raw(`JSON_VALUE(A.[${original}], '$.nominal') as ${alias}`);
-      });
-
-      const pivotSubqueryRaw = `
-        (
-          SELECT bldetail_id, orderanmuatan_nobukti, ${columns}
-          FROM (
-            SELECT bldetail_id, orderanmuatan_nobukti, judul, keterangan
-            FROM ${tempData}
-          ) AS SourceTable
-          PIVOT (
-            MAX(keterangan)
-            FOR judul IN (${columns})
-          ) AS PivotTable
-        ) AS A
-      `;
-
-      await trx(tempHasil).insert(
-        trx
-          .select([
-            'A.bldetail_id',
-            'A.orderanmuatan_nobukti',
-            ...biayaColumns, // PAKE HASIL LOOPING BIAYACOLUMNS
-            // trx.raw(
-            //   "JSON_VALUE(A.[BIAYA TRUCKING MUAT], '$.nominal') as biayatruckingmuat",
-            // ),
-            // trx.raw(
-            //   "JSON_VALUE(A.[DOKUMEN BL], '$.nominal') as dokumenbl",
-            // ),
-            // trx.raw(
-            //   "JSON_VALUE(A.[OPERATIONAL PELABUHAN], '$.nominal') as operationalpelabuhan",
-            // ),
-            // trx.raw(
-            //   "JSON_VALUE(A.[SEAL], '$.nominal') as seal",
-            // ),
-          ])
-          .from(trx.raw(pivotSubqueryRaw)),
-      );
-      // console.log('SELECT TEMP HASIL', await trx(tempHasil).select('*'));
 
       return tempHasil;
     } catch (error) {
@@ -483,13 +386,12 @@ export class BlDetailRincianService {
       const dataTempPivotBiaya = await this.tempPivotBiaya(trx);
 
       // BIKIN LOOPING DARI SEMUA NAMA BIAYA EMKL UNTUK SELECT HASIL JOIN DATATEMPPIVOTBIAYA
-      const selectColumnPivotBiaya = getBiayaEmkl.map((item) => {
-        let column = item.nama.replace(/\s+/g, '').toLowerCase();
-        if (!column.startsWith('biaya')) {
-          column = 'biaya' + column;
-        }
-        return `p.${column}`;
-      });
+      // Nama kolom dihitung lewat helper yang SAMA dengan yang dipakai
+      // tempPivotBiaya(), supaya select di sini tidak pernah menyimpang dari
+      // kolom yang benar-benar dibuat di temp table.
+      const selectColumnPivotBiaya = getBiayaEmkl.map(
+        (item) => `p.${this.pivotColumnAlias(item.nama)}`,
+      );
       // HAPUS TANDA p. didepan supaya sisa nama field kolom pivot tanpa "p." untuk dimanfaatkan buat kondisi search/filters/sorting
       const pivotFields = selectColumnPivotBiaya.map((c) =>
         c.replace('p.', ''),

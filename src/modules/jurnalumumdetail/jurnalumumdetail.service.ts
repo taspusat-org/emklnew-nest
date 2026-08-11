@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { CreateJurnalumumdetailDto } from './dto/create-jurnalumumdetail.dto';
 import { UpdateJurnalumumdetailDto } from './dto/update-jurnalumumdetail.dto';
-import { withUuidV7, tandatanya, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, tandatanya, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { filter } from 'rxjs';
@@ -9,11 +9,40 @@ import { filter } from 'rxjs';
 @Injectable()
 export class JurnalumumdetailService {
   private readonly tableName = 'jurnalumumdetail';
+  private readonly viewName = 'vjurnalumumdetail';
+  // Kolom yang ikut disapu kotak SEARCH di grid = kolom yang tampil di grid.
+  private static readonly SEARCHABLE_COLUMNS = [
+    'tglbukti',
+    'keterangan',
+    'coa_nama',
+    'nominaldebet',
+    'nominalkredit',
+    'modifiedby',
+    'created_at',
+    'updated_at',
+  ];
+  private static readonly FILTERABLE_COLUMNS = new Set([
+    ...JurnalumumdetailService.SEARCHABLE_COLUMNS,
+    'coa',
+    'keterangancoa',
+    'nominal',
+    'info',
+  ]);
   constructor(
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly logger = new Logger(JurnalumumdetailService.name);
+  private async setSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+  ): Promise<void> {
+    if (filters?.nobukti) {
+      await trx.raw(`SELECT set_config('tas.nobukti', ?, true)`, [
+        filters.nobukti,
+      ]);
+    }
+  }
   async create(details: any, id: any = 0, trx: any = null) {
     // Rewrite Postgres: TANPA temp table + OPENJSON (OPENJSON = fungsi SQL
     // Server, tak ada di PG; jsonExtract memakai jsonb_path_query yang
@@ -33,7 +62,7 @@ export class JurnalumumdetailService {
     for (const data of details) {
       const isNew = !data.id || String(data.id) === '0';
       if (!isNew) {
-        const existingData = await trx(this.tableName)
+        const existingData = await trx(this.viewName)
           .where('id', data.id)
           .first();
         if (existingData) {
@@ -135,148 +164,185 @@ export class JurnalumumdetailService {
     return updatedData || insertedData;
   }
 
-  async findAll({ search, filters, sort }: FindAllParams, trx: any) {
+  // Ekspresi SQL per kolom grid. Sebagian kolom yang tampil bukan kolom base:
+  // coa_nama datang dari akunpusat, nominaldebet/nominalkredit diturunkan dari
+  // tanda p.nominal. Filter, search, dan sort harus memakai ekspresi yang sama
+  // dengan yang di-select supaya hasilnya cocok dengan yang dilihat user.
+  private filterExpression(trx: any, key: string) {
+    switch (key) {
+      case 'tglbukti':
+        return trx.raw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY')");
+      case 'created_at':
+      case 'updated_at':
+        return trx.raw(`TO_CHAR(p.${key}, 'DD-MM-YYYY HH24:MI:SS')`);
+      case 'coa_nama':
+      case 'keterangancoa':
+        return trx.raw('p.keterangancoa');
+      case 'nominaldebet':
+        return trx.raw(
+          '(CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END)::text',
+        );
+      case 'nominalkredit':
+        return trx.raw(
+          '(CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END)::text',
+        );
+      case 'nominal':
+        return trx.raw('ABS(p.nominal)::text');
+      default:
+        return trx.raw(`p.${key}`);
+    }
+  }
+
+  // Sort dari grid dipakai sebagai primary order, jadi ekspresinya harus
+  // ekspresi asli (bukan ::text) supaya numerik/tanggal terurut benar.
+  private sortExpression(trx: any, key: string) {
+    switch (key) {
+      case 'coa_nama':
+      case 'keterangancoa':
+        return trx.raw('p.keterangancoa');
+      case 'nominaldebet':
+        return trx.raw('CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END');
+      case 'nominalkredit':
+        return trx.raw(
+          'CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END',
+        );
+      case 'nominal':
+        return trx.raw('ABS(p.nominal)');
+      default:
+        return trx.raw(`p.${key}`);
+    }
+  }
+
+  private applyFilters(
+    trx: any,
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    if (search) {
+      const sanitized = String(search).replace(/\[/g, '[[]').trim();
+
+      qb.where((builder: any) => {
+        JurnalumumdetailService.SEARCHABLE_COLUMNS.forEach((field) => {
+          builder.orWhere(
+            this.filterExpression(trx, field),
+            'ilike',
+            `%${sanitized}%`,
+          );
+        });
+      });
+    }
+
+    for (const [key, value] of Object.entries(filters || {})) {
+      // nobukti diurus terpisah (exact match) oleh pemanggil; key di luar
+      // whitelist (consignee_id, tglDari/tglSampai, *_nobukti) bukan kolom
+      // tabel ini dan akan membuat query gagal kalau diteruskan apa adanya.
+      if (!JurnalumumdetailService.FILTERABLE_COLUMNS.has(key)) continue;
+      if (value === null || value === undefined || value === '') continue;
+
+      const sanitized = String(value).replace(/\[/g, '[[]');
+      qb.andWhere(this.filterExpression(trx, key), 'ilike', `%${sanitized}%`);
+    }
+  }
+
+  async findAll(
+    { search, filters, pagination, sort }: FindAllParams,
+    trx: any,
+  ) {
+    const { page = 1, limit = 0 } = pagination ?? {};
+    await this.setSessionContext(trx, filters || {});
+
     if (!filters?.nobukti) {
+      // Bentuk balikan tetap lengkap supaya grid yang membaca
+      // pagination.totalItems saat header belum dipilih tidak menemukan
+      // undefined lalu menghitung totalPages = NaN.
       return {
+        status: false,
+        message: 'No data found',
         data: [],
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
       };
     }
-    const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
-
-    await trx.schema.createTable(tempUrl, (t) => {
-      t.integer('id').nullable();
-      t.string('nobukti').nullable();
-      t.text('link').nullable();
-    });
-    const url = 'jurnalumumheader';
-
-    await trx(tempUrl).insert(
-      trx
-        .select(
-          'u.id',
-          'u.nobukti',
-          trx.raw(`
-            STRING_AGG(
-              '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'nobukti=' + u.nobukti + '">' +
-              '<HighlightWrapper value="' + u.nobukti + '" />' +
-              '</a>', ','
-            ) AS link
-          `),
-        )
-        .from(this.tableName + ' as u')
-        .groupBy('u.id', 'u.nobukti'),
-    );
 
     try {
-      if (!filters?.nobukti) {
-        return {
-          status: true,
-          message: 'Jurnal umum Detail failed to fetch',
-          data: [],
-        };
-      }
+      const safeFilters = filters || {};
+
+      const countResult = await trx(`${this.viewName} as p`)
+        .modify((qb: any) => this.applyFilters(trx, qb, safeFilters, search))
+        .count('p.id as total')
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
       const query = trx
-        .from(trx.raw(`${this.tableName} as p`))
+        .from(trx.raw(`${this.viewName} as p`))
         .select(
           'p.id',
           'p.jurnalumum_id',
-          trx.raw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+          'p.tglbukti',
           'p.nobukti',
           'p.coa',
           'p.keterangan',
-          'ap.keterangancoa as coa_nama',
-
-          // Jika nominal < 0 → nominalkredit = ABS(nominal), selain itu 0
-          trx.raw(
-            'CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END AS nominalkredit',
-          ),
-
-          // Jika nominal > 0 → nominaldebet = nominal, selain itu 0
-          trx.raw(
-            'CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END AS nominaldebet',
-          ),
-
-          trx.raw('ABS(p.nominal) AS nominal'),
+          'p.coa_nama',
+          'p.nominaldebet',
+          'p.nominalkredit',
+          'p.nominal',
           'p.info',
           'p.modifiedby',
-          trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'tempUrl.link',
-        )
-        .innerJoin(trx.raw(`${tempUrl} as tempUrl`), 'p.id', 'tempUrl.id')
-        .innerJoin(
-          trx.raw('akunpusat as ap'),
-          'p.coa',
-          'ap.coa',
-        )
-        .orderBy('p.created_at', 'desc');
+          'p.link',
+          'p.created_at',
+          'p.updated_at',
+        );
 
-      if (filters?.nobukti) {
-        query.where('p.nobukti', filters?.nobukti);
-      }
-      const excludeSearchKeys = ['tglDari', 'tglSampai', 'nobukti'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k) && filters![k],
+      query.modify((qb: any) =>
+        this.applyFilters(trx, qb, safeFilters, search),
       );
-      if (search) {
-        console.log(search, 'search');
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
 
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            qb.orWhere(`p.${field}`, 'like', `%${sanitized}%`);
-          });
-        });
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda (atau melewatkan baris) saat
+      // grid menggeser window. Sort dari grid jadi primary, created_at lalu id
+      // (PK, unik) sebagai tiebreaker supaya urutan total dan stabil.
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+      query.orderBy(this.sortExpression(trx, sortBy), sortDirection);
+      if (sortBy !== 'created_at') {
+        query.orderBy('p.created_at', 'asc');
       }
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (key === 'pengeluaran_nobukti') {
-            continue;
-          }
-          if (!value) continue;
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-          switch (key) {
-            case 'coa_nama':
-              query.andWhere('ap.keterangancoa', 'like', `%${sanitizedValue}%`);
-              break;
-
-            case 'tglbukti':
-              query.andWhereRaw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY') LIKE ?", [
-                `%${sanitizedValue}%`,
-              ]);
-              break;
-
-            case 'nominaldebet':
-              query.andWhere(
-                trx.raw('CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END'),
-                'like',
-                `%${sanitizedValue}%`,
-              );
-              break;
-
-            case 'nominalkredit':
-              query.andWhere(
-                trx.raw(
-                  'CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END',
-                ),
-                'like',
-                `%${sanitizedValue}%`,
-              );
-              break;
-
-            default:
-              query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
-          }
-        }
+      if (sortBy !== 'id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
+      // limit 0/undefined = ambil semua. Dipakai pemanggil non-grid yang butuh
+      // seluruh detail satu bukti sekaligus (FormJurnalUmum, exportToExcel).
+      if (Number(limit) > 0) {
+        query.offset((Number(page) - 1) * Number(limit)).limit(Number(limit));
       }
+
       const result = await query;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+
       return {
+        status: result.length > 0,
+        message:
+          result.length > 0
+            ? 'Jurnal Umum Detail data fetched successfully'
+            : 'No data found',
         data: result,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error('Error in findAll Kas Gantung Detail', error);

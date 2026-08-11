@@ -1,35 +1,43 @@
 import {
-  Inject,
+  HttpException,
+  HttpStatus,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
-import { CreateKasgantungheaderDto } from './dto/create-kasgantungheader.dto';
-import { UpdateKasgantungheaderDto } from './dto/update-kasgantungheader.dto';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
 import {
-  withUuidV7,
   formatDateToSQL,
   UtilsService,
+  calculateItemIndex,
+  getFetchedPages,
+  uuidV7,
   tandatanya,
- } from 'src/utils/utils.service';
+} from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
-import { PengembaliankasgantungdetailService } from '../pengembaliankasgantungdetail/pengembaliankasgantungdetail.service';
 import { KasgantungdetailService } from '../kasgantungdetail/kasgantungdetail.service';
-import { GlobalService } from '../global/global.service';
 import { PengeluaranheaderService } from '../pengeluaranheader/pengeluaranheader.service';
+import { GlobalService } from '../global/global.service';
 import { LocksService } from '../locks/locks.service';
+import { StatuspendukungService } from '../statuspendukung/statuspendukung.service';
+import { numberToTerbilang } from 'src/utils/terbilang';
+import {
+  EXCEL_FORMAT,
+  ExportSheetDefinition,
+} from 'src/common/report/export-job.service';
 import { Column, Workbook } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
-import { StatuspendukungService } from '../statuspendukung/statuspendukung.service';
 
 @Injectable()
 export class KasgantungheaderService {
   constructor(
-    @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
+    // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'): set/get/del cache
+    // jadi best-effort sehingga create/update tidak gagal 500 "Stream isn't
+    // writeable" saat Redis mati. Lihat pengeluaranheader.service.ts.
+    private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
     private readonly runningNumberService: RunningNumberService,
@@ -40,11 +48,336 @@ export class KasgantungheaderService {
     private readonly globalService: GlobalService,
   ) {}
   private readonly tableName = 'kasgantungheader';
+  private readonly viewName = 'vkasgantungheader';
+
+  private readonly dateFields = [
+    'tglbukti',
+    'tgljatuhtempo',
+    'created_at',
+    'updated_at',
+  ];
+
+  // Kolom yang ikut disapu kotak SEARCH di grid = kolom yang tampil di grid.
+  private static readonly SEARCHABLE_COLUMNS = [
+    'nobukti',
+    'tglbukti',
+    'keterangan',
+    'relasi_nama',
+    'bank_nama',
+    'alatbayar_nama',
+    'pengeluaran_nobukti',
+    'coakaskeluar',
+    'dibayarke',
+    'nowarkat',
+    'tgljatuhtempo',
+    'gantungorderan_nobukti',
+    'modifiedby',
+    'created_at',
+    'updated_at',
+  ];
+
+  // Key di luar daftar ini bukan kolom tabel/join (mis. `nominal` dan `sisa`
+  // yang ikut dikirim state filter frontend) dan akan membuat query gagal
+  // kalau diteruskan apa adanya.
+  private static readonly FILTERABLE_COLUMNS = new Set([
+    ...KasgantungheaderService.SEARCHABLE_COLUMNS,
+    'relasi_id',
+    'bank_id',
+    'alatbayar_id',
+    'statusformat',
+    'info',
+  ]);
+
+  // relasi_nama/bank_nama/alatbayar_nama sudah ikut di vkasgantungheader, jadi
+  // semua kolom grid diacu lewat alias view yang sama.
+  private columnRef(key: string): string {
+    return `u.${key}`;
+  }
+
+  private async setDateRangeSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+  ): Promise<void> {
+    if (filters?.tglDari && filters?.tglSampai) {
+      const tglDariFormatted = formatDateToSQL(String(filters.tglDari));
+      const tglSampaiFormatted = formatDateToSQL(String(filters.tglSampai));
+
+      if (tglDariFormatted && tglSampaiFormatted) {
+        await trx.raw(`SELECT set_config('tas.tgldari', ?, true)`, [
+          tglDariFormatted,
+        ]);
+        await trx.raw(`SELECT set_config('tas.tglsampai', ?, true)`, [
+          tglSampaiFormatted,
+        ]);
+      }
+    }
+  }
+
+  private baseQuery(trx: any) {
+    return trx(`${this.viewName} as u`);
+  }
+
+  private buildInsertData(
+    uuid: string | undefined,
+    dto: any,
+  ): Record<string, any> {
+    return {
+      // id TIDAK di-uppercase: uuid v7 huruf kecil, mengubahnya menulis id
+      // yang tidak pernah ada.
+      id: uuid ? uuid : dto.id ? String(dto.id) : null,
+      nobukti: dto.nobukti ? String(dto.nobukti).toUpperCase() : '',
+      tglbukti: dto.tglbukti ? formatDateToSQL(String(dto.tglbukti)) : null,
+      keterangan: dto.keterangan ? String(dto.keterangan).toUpperCase() : null,
+      relasi_id: dto.relasi_id ?? null,
+      bank_id: dto.bank_id ?? null,
+      alatbayar_id: dto.alatbayar_id ?? null,
+      pengeluaran_nobukti: dto.pengeluaran_nobukti
+        ? String(dto.pengeluaran_nobukti).toUpperCase()
+        : null,
+      coakaskeluar: dto.coakaskeluar ?? null,
+      dibayarke: dto.dibayarke ? String(dto.dibayarke).toUpperCase() : null,
+      nowarkat: dto.nowarkat ? String(dto.nowarkat).toUpperCase() : null,
+      tgljatuhtempo: dto.tgljatuhtempo
+        ? formatDateToSQL(String(dto.tgljatuhtempo))
+        : null,
+      gantungorderan_nobukti: dto.gantungorderan_nobukti ?? '',
+      statusformat: dto.statusformat ?? null,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby ? String(dto.modifiedby).toUpperCase() : '',
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  private parseCurrency(value: any): number {
+    if (value === null || value === undefined || value === '') return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const cleanValue = value.replace(/[^0-9.-]/g, '');
+      const parsed = parseFloat(cleanValue);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  private buildDetailsData(details: any[]): any[] {
+    if (!details || details.length === 0) {
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.BAD_REQUEST,
+          message: 'Detail kas gantung tidak boleh kosong',
+          error: 'Bad Request',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    return details.map((detail: any, index: number) => {
+      // InputCurrency mengirim string ber-koma ribuan ('1,000,000.00'); kolom
+      // nominal-nya numerik, jadi harus dibersihkan sebelum masuk query.
+      const nominal = this.parseCurrency(detail.nominal);
+
+      if (nominal <= 0) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.BAD_REQUEST,
+            message: `Line ${index + 1}: Nominal harus diisi`,
+            error: 'Bad Request',
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+
+      return { ...detail, nominal };
+    });
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { orderCol: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      // Kolom relasi/bank/alatbayar tampil sebagai nama; mengurutkannya per
+      // uuid tidak berarti apa-apa bagi pemakai.
+      case 'relasi_id':
+      case 'relasi_nama':
+        return { orderCol: 'u.relasi_nama', dir };
+      case 'bank_id':
+      case 'bank_nama':
+        return { orderCol: 'u.bank_nama', dir };
+      case 'alatbayar_id':
+      case 'alatbayar_nama':
+        return { orderCol: 'u.alatbayar_nama', dir };
+      default:
+        return {
+          orderCol: KasgantungheaderService.FILTERABLE_COLUMNS.has(sortBy)
+            ? `u.${sortBy}`
+            : 'u.nobukti',
+          dir,
+        };
+    }
+  }
+
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    const existingData = await this.baseQuery(trx)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await this.baseQuery(trx)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    if (filters?.tglDari && filters?.tglSampai) {
+      qb.whereBetween('u.tglbukti', [
+        formatDateToSQL(String(filters.tglDari)),
+        formatDateToSQL(String(filters.tglSampai)),
+      ]);
+    }
+
+    if (search) {
+      const sanitized = String(search).trim();
+      qb.where((query) => {
+        KasgantungheaderService.SEARCHABLE_COLUMNS.forEach((field) => {
+          if (this.dateFields.includes(field)) {
+            query.orWhereRaw("TO_CHAR(??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+              this.columnRef(field),
+              `%${sanitized}%`,
+            ]);
+          } else {
+            query.orWhere(this.columnRef(field), 'ilike', `%${sanitized}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (key === 'tglDari' || key === 'tglSampai') return;
+      if (!KasgantungheaderService.FILTERABLE_COLUMNS.has(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (this.dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          this.columnRef(key),
+          `%${sanitizedValue}%`,
+        ]);
+      } else {
+        qb.andWhere(this.columnRef(key), 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private selectColumns(trx: any) {
+    const url = 'pengeluaran';
+
+    return [
+      'u.id',
+      'u.nobukti',
+      trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+      'u.keterangan',
+      'u.relasi_id',
+      'u.bank_id',
+      'u.alatbayar_id',
+      'u.pengeluaran_nobukti',
+      'u.coakaskeluar',
+      'u.dibayarke',
+      'u.nowarkat',
+      trx.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
+      'u.gantungorderan_nobukti',
+      'u.statusformat',
+      'u.info',
+      'u.modifiedby',
+      'u.relasi_nama',
+      'u.bank_nama',
+      'u.alatbayar_nama',
+      'u.link',
+      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+    ];
+  }
+
+  private async buildPagedResult(
+    trx: any,
+    posisi: number,
+    totalItems: number,
+    limit: number,
+    sortBy: string,
+    sortDirection: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+  ) {
+    const pageNumber = Math.ceil(posisi / limit);
+    const totalPages = Math.ceil(totalItems / limit);
+    const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+    const startPage = fetchedPages[0];
+    const endPage = fetchedPages[fetchedPages.length - 1];
+    const customOffset = (startPage - 1) * limit;
+    const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+    const result = await this.findAll(
+      {
+        search: search || '',
+        filters: filters || {},
+        pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+        sort: { sortBy, sortDirection: sortDirection as 'asc' | 'desc' },
+        isLookUp: false,
+        useCustomOffset: true,
+      },
+      trx,
+    );
+
+    const allFetchedData = result?.data ?? [];
+    const pagedData: Record<number, any[]> = {};
+    let dataIndex = 0;
+    fetchedPages.forEach((pageNum) => {
+      pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+      dataIndex += limit;
+    });
+
+    const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+    await this.redisService.set(
+      `${this.tableName}-page-${pageNumber}`,
+      JSON.stringify(allFetchedData),
+    );
+
+    return {
+      itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
+      pageNumber,
+      fetchedPages,
+      pagedData,
+    };
+  }
+
   async create(data: any, trx: any) {
     try {
-      console.log('[KASGANTUNG] Starting create process...');
-      const startTime = Date.now();
-
+      // 1. Ekstrak properti non-insert (pagination, search, dll) dari payload utama
       const {
         sortBy,
         sortDirection,
@@ -53,27 +386,20 @@ export class KasgantungheaderService {
         page,
         limit,
         relasi_nama,
-        alatbayar_nama,
         bank_nama,
+        alatbayar_nama,
         details,
-        ...insertData
+        isreload,
+        ...dto
       } = data;
-      insertData.updated_at = this.utilsService.getTime();
-      insertData.created_at = this.utilsService.getTime();
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['nobukti', 'keterangan', 'dibayarke', 'nowarkat'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
-      insertData.tglbukti = formatDateToSQL(String(insertData?.tglbukti));
+      const uuid = await uuidV7(trx);
 
-      const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)'; // penting: TEXT/NTEXT -> text
+      // 2. Validasi dan bangun data untuk Details
+      const processedDetails = this.buildDetailsData(details);
+
+      // 3. Generate Nomor Bukti Kas Gantung — formatnya menempel di bank yang
+      //    dipilih, bukan di parameter global.
+      const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
 
       const parameterCabang = await trx('parameter')
         .select(trx.raw(`JSON_VALUE(${memoExpr}, '$.CABANG_ID') AS cabang_id`))
@@ -81,11 +407,22 @@ export class KasgantungheaderService {
         .andWhere('subgrp', 'CABANG')
         .first();
 
-      const formatpengeluarangantung = await trx(`bank as b`)
+      const formatpengeluarangantung = await trx('bank as b')
         .select('p.grp', 'p.subgrp', 'b.formatpengeluarangantung')
         .leftJoin('parameter as p', 'p.id', 'b.formatpengeluarangantung')
-        .where('b.id', insertData.bank_id)
+        .where('b.id', dto.bank_id)
         .first();
+
+      if (!formatpengeluarangantung?.grp || !formatpengeluarangantung?.subgrp) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.BAD_REQUEST,
+            message: 'Format nomor kas gantung (grp/subgrp) tidak ditemukan',
+            error: 'Bad Request',
+          },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
 
       const parameter = await trx('parameter')
         .select(
@@ -97,41 +434,26 @@ export class KasgantungheaderService {
         .where('id', formatpengeluarangantung.formatpengeluarangantung)
         .first();
 
-      const grp = formatpengeluarangantung.grp;
-      const subgrp = formatpengeluarangantung.subgrp;
-      const cabangId = parameterCabang.cabang_id;
-
-      if (!grp || !subgrp) {
-        throw new Error(
-          'Format nomor kas gantung (grp/subgrp) tidak ditemukan',
-        );
-      }
+      const tglBukti =
+        formatDateToSQL(String(dto?.tglbukti || new Date())) ||
+        String(dto?.tglbukti || new Date());
 
       const nomorBuktiKasGantung =
         await this.runningNumberService.generateRunningNumber(
           trx,
-          grp,
-          subgrp,
+          formatpengeluarangantung.grp,
+          formatpengeluarangantung.subgrp,
           this.tableName,
-          insertData.tglbukti,
-          cabangId,
+          tglBukti,
+          parameterCabang?.cabang_id,
         );
 
-      const pengeluaranHeaderData = {
-        tglbukti: data.tglbukti,
-        keterangan: insertData.keterangan,
-        relasi_id: insertData.relasi_id,
-        bank_id: insertData.bank_id,
-        alatbayar_id: insertData.alatbayar_id,
-        modifiedby: insertData.modifiedby,
-      };
-
-      console.log('pengeluaranHeaderData', pengeluaranHeaderData);
-      console.log('nomorBuktiKasGantung', nomorBuktiKasGantung);
-
-      const pengeluaranDetails = details.map((detail: any) => ({
-        id: 0,
-        coadebet: parameter.coa_nama ?? null,
+      // 4. PENGELUARAN DULU: detail kas gantung menyimpan pengeluarandetail_id,
+      //    jadi nomor bukti + id detail pengeluaran harus sudah terbentuk.
+      const pengeluaranDetails = processedDetails.map((detail: any) => ({
+        // '0' = baris baru; pengeluarandetail.create membandingkannya sebagai string.
+        id: '0',
+        coadebet: parameter?.coa_nama ?? null,
         keterangan: detail.keterangan ?? null,
         nominal: detail.nominal ?? null,
         dpp: detail.dpp ?? 0,
@@ -146,31 +468,36 @@ export class KasgantungheaderService {
         penerimaanemklheader_nobukti:
           detail.penerimaanemklheader_nobukti ?? null,
         info: detail.info ?? null,
-        modifiedby: insertData.modifiedby ?? null,
+        modifiedby: dto.modifiedby ?? null,
         kasgantung_nobukti: nomorBuktiKasGantung ?? null,
       }));
 
-      const pengeluaranData = {
-        ...pengeluaranHeaderData,
-        details: pengeluaranDetails,
-      };
-
-      console.log('[KASGANTUNG] Creating pengeluaran header...');
-      const pengeluaranStartTime = Date.now();
       const pengeluaranResult = await this.pengeluaranheaderService.create(
-        pengeluaranData,
+        {
+          tglbukti: dto.tglbukti,
+          keterangan: dto.keterangan,
+          relasi_id: dto.relasi_id,
+          bank_id: dto.bank_id,
+          alatbayar_id: dto.alatbayar_id,
+          modifiedby: dto.modifiedby,
+          details: pengeluaranDetails,
+        },
         trx,
-      );
-      console.log(
-        '[KASGANTUNG] Pengeluaran created in',
-        Date.now() - pengeluaranStartTime,
-        'ms',
+        // Grid yang menunggu adalah grid kas gantung; posisi baris pengeluaran
+        // (dan jurnal umum di bawahnya) tidak dipakai siapa pun di sini.
+        { withGridPosition: false },
       );
 
       const pengeluaranNoBukti = pengeluaranResult?.newItem?.nobukti;
-
       if (!pengeluaranNoBukti) {
-        throw new Error('Gagal membuat pengeluaran: nobukti tidak terbentuk');
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+            message: 'Gagal membuat pengeluaran: nobukti tidak terbentuk',
+            error: 'Internal Server Error',
+          },
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
 
       const pengeluaranDetailItems = await trx('pengeluarandetail')
@@ -178,83 +505,49 @@ export class KasgantungheaderService {
         .where('nobukti', pengeluaranNoBukti)
         .orderBy('id');
 
-      if (pengeluaranDetailItems.length !== details.length) {
-        throw new Error('Jumlah detail pengeluaran tidak sesuai dengan input');
+      if (pengeluaranDetailItems.length !== processedDetails.length) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+            message: 'Jumlah detail pengeluaran tidak sesuai dengan input',
+            error: 'Internal Server Error',
+          },
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
 
-      insertData.nobukti = nomorBuktiKasGantung;
-      insertData.pengeluaran_nobukti = pengeluaranNoBukti;
+      // 5. INSERT KE TABLE UTAMA (Header)
+      // insertPayload sudah membawa uuid dari langkah 1; membungkusnya lagi
+      // dengan withUuidV7 akan menimpanya dengan uuid baru, sehingga id yang
+      // dipakai menghitung posisi grid di bawah bukan id yang benar-benar
+      // tersimpan.
+      const insertPayload = this.buildInsertData(uuid, {
+        ...dto,
+        nobukti: nomorBuktiKasGantung,
+        pengeluaran_nobukti: pengeluaranNoBukti,
+        statusformat: formatpengeluarangantung.formatpengeluarangantung ?? null,
+      });
 
-      // Insert data ke kas gantung header
-      const insertedKasGantungItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
+      const insertedItems = await trx(this.tableName)
+        .insert(insertPayload)
         .returning('*');
 
-      const newHeaderId = insertedKasGantungItems?.[0]?.id;
-      if (!newHeaderId) {
-        throw new Error('Insert kas gantung header gagal');
-      }
+      const newItem = insertedItems[0];
 
-      if ((details || []).length > 0) {
-        const detailsWithNobukti = details.map(
-          (detail: any, index: number) => ({
-            ...detail,
-            nobukti: nomorBuktiKasGantung,
-            modifiedby: detail.modifiedby ?? insertData.modifiedby,
-            pengeluarandetail_id: pengeluaranDetailItems[index]?.id ?? null,
-          }),
-        );
-
-        await this.kasgantungdetailService.create(
-          detailsWithNobukti,
-          newHeaderId,
-          trx,
-        );
-      }
-
-      console.log('[KASGANTUNG] Starting findAll for Redis update...');
-      const { data: filteredItems } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: limit || 10 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
+      // 6. INSERT KE TABLE DETAILS
+      const detailsWithNobukti = processedDetails.map(
+        (detail: any, index: number) => ({
+          ...detail,
+          nobukti: newItem.nobukti,
+          modifiedby: detail.modifiedby ?? newItem.modifiedby,
+          pengeluarandetail_id: pengeluaranDetailItems[index]?.id ?? null,
+        }),
+      );
+      await this.kasgantungdetailService.create(
+        detailsWithNobukti,
+        newItem.id,
         trx,
       );
-      console.log(
-        '[KASGANTUNG] FindAll completed, items:',
-        filteredItems.length,
-      );
-
-      // Skip Redis update jika data terlalu besar (optimasi performance)
-      let itemIndex = 0;
-      let pageNumber = 1;
-
-      if (filteredItems.length <= 1000) {
-        // Cari index item baru di hasil yang sudah difilter
-        itemIndex = filteredItems.findIndex(
-          (item) => String(item.id) === String(newHeaderId),
-        );
-        if (itemIndex === -1) itemIndex = 0;
-
-        pageNumber = Math.floor(itemIndex / (limit || 10)) + 1;
-        const endIndex = pageNumber * (limit || 10);
-        const limitedItems = filteredItems.slice(0, endIndex);
-
-        // Simpan ke Redis
-        console.log('[KASGANTUNG] Saving to Redis...');
-        await this.redisService.set(
-          `${this.tableName}-allItems`,
-          JSON.stringify(limitedItems),
-        );
-        console.log('[KASGANTUNG] Redis save completed');
-      } else {
-        console.log('[KASGANTUNG] Skipping Redis update - dataset too large');
-      }
-
-      const newItem = insertedKasGantungItems[0];
 
       await this.statuspendukungService.create(
         this.tableName,
@@ -263,209 +556,140 @@ export class KasgantungheaderService {
         trx,
       );
 
-      // Log trail untuk kas gantung
+      // 7. POSISI/PAGINATION BARIS BARU DI GRID
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
+
+      const totalRecords = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
+
+      const posisi = await this.resolvePosition(
+        trx,
+        newItem.id,
+        filters,
+        search,
+        sortBy,
+        sortDirection,
+      );
+
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortBy,
+        sortDirection,
+        filters,
+        search,
+      );
+
+      // 8. LOG TRAIL
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: `ADD KAS GANTUNG HEADER`,
-          idtrans: newHeaderId,
-          nobuktitrans: newHeaderId,
+          idtrans: newItem.id,
+          nobuktitrans: newItem.id,
           aksi: 'ADD',
-          datajson: JSON.stringify(insertedKasGantungItems[0]),
-          modifiedby: insertedKasGantungItems[0]?.modifiedby,
+          datajson: JSON.stringify(newItem),
+          modifiedby: newItem.modifiedby,
         },
         trx,
       );
 
-      console.log(
-        '[KASGANTUNG] Total execution time:',
-        Date.now() - startTime,
-        'ms',
-      );
-
       return {
-        newItem: {
-          ...insertedKasGantungItems[0],
-          pengeluaran_data: pengeluaranResult.newItem,
-        },
-        pageNumber,
-        itemIndex,
+        newItem: { ...newItem, pengeluaran_data: pengeluaranResult.newItem },
+        ...paged,
         pengeluaran_nobukti: pengeluaranNoBukti,
         kasgantung_nobukti: nomorBuktiKasGantung,
       };
     } catch (error) {
-      console.error('Error in kas gantung create:', error);
-      throw new Error(`Error: ${error.message}`);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
+      const { page = 1, customOffset } = pagination ?? {};
+      await this.setDateRangeSessionContext(trx, filters || {});
 
-      page = page ?? 1;
-      limit = limit ?? 0;
+      let limit = pagination?.limit ?? 0;
+
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const safeFilters = filters || {};
+
+      const countResult = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
       if (isLookUp) {
-        const acoCountResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const acoCount = acoCountResult?.total || 0;
-
-        if (Number(acoCount) > 500) {
-          return { data: { type: 'json' } };
-        } else {
-          limit = 0;
+        if (total > 500) {
+          return {
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
+            },
+          };
         }
+        limit = 0;
       }
 
-      const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
+      const query = this.baseQuery(trx).select(this.selectColumns(trx));
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      await trx.schema.createTable(tempUrl, (t) => {
-        t.integer('id').nullable();
-        t.string('pengeluaran_nobukti').nullable();
-        t.text('link').nullable();
-      });
-      const url = 'pengeluaran';
+      const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+      query.orderBy(orderCol, sortDirection);
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
-      await trx(tempUrl).insert(
-        trx
-          .select(
-            'u.id',
-            'u.pengeluaran_nobukti',
-            trx.raw(`
-                    STRING_AGG(
-                      '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'nobukti=' + u.pengeluaran_nobukti + '">' +
-                      '<HighlightWrapper value="' + u.pengeluaran_nobukti + '" />' +
-                      '</a>', ','
-                    ) AS link
-                  `),
-          )
-          .from(this.tableName + ' as u')
-          .groupBy('u.id', 'u.pengeluaran_nobukti'),
-      );
-
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.nobukti', // nobukti (nvarchar(100))
-          trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
-          'u.keterangan', // keterangan (text)
-          'u.relasi_id', // relasi_id (integer)
-          'u.bank_id', // bank_id (integer)
-          'u.pengeluaran_nobukti', // pengeluaran_nobukti (nvarchar(100))
-          'u.coakaskeluar', // coakaskeluar (nvarchar(100))
-          'u.dibayarke', // dibayarke (text)
-          'u.alatbayar_id', // alatbayar_id (integer)
-          'u.nowarkat', // nowarkat (nvarchar(100))
-          'u.tgljatuhtempo', // tgljatuhtempo (date)
-          'u.gantungorderan_nobukti', // gantungorderan_nobukti (nvarchar(100))
-          'u.info', // info (text)
-          'u.modifiedby', // modifiedby (varchar(200))
-          'u.editing_by', // editing_by (varchar(200))
-          'r.nama as relasi_nama', // relasi_nama (varchar(200))
-          'b.nama as bank_nama', // bank_nama (varchar(200))
-          'ab.nama as alatbayar_nama', // alatbayar_nama (varchar(200))
-          trx.raw("TO_CHAR(u.editing_at, 'DD-MM-YYYY HH24:MI:SS') as editing_at"), // editing_at (datetime)
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"), // created_at (datetime)
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"), // updated_at (datetime)
-          'tempUrl.link',
-        ])
-        .innerJoin(
-          trx.raw(`${tempUrl} as tempUrl`),
-          'u.pengeluaran_nobukti',
-          'tempUrl.pengeluaran_nobukti',
-        )
-        .leftJoin('relasi as r', 'u.relasi_id', 'r.id')
-        .leftJoin('bank as b', 'u.bank_id', 'b.id')
-        .leftJoin('alatbayar as ab', 'u.alatbayar_id', 'ab.id');
-
-      if (filters?.tglDari && filters?.tglSampai) {
-        // Mengonversi tglDari dan tglSampai ke format yang diterima SQL (YYYY-MM-DD)
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari)); // Fungsi untuk format
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
-
-        // Menggunakan whereBetween dengan tanggal yang sudah diformat
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
-        ]);
-      }
-      const excludeSearchKeys = ['tglDari', 'tglSampai'];
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
-      }
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k) && filters![k],
-      );
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-          // Menambahkan pengecualian untuk 'tglDari' dan 'tglSampai'
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue; // Lewati filter jika key adalah 'tglDari' atau 'tglSampai'
-          }
-
-          if (value) {
-            if (
-              key === 'created_at' ||
-              key === 'updated_at' ||
-              key === 'editing_at' ||
-              key === 'tglbukti' ||
-              key === 'tgljatuhtempo'
-            ) {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'relasi_nama') {
-              query.andWhere('r.nama', 'like', `%${sanitizedValue}%`);
-            } else if (key === 'bank_nama') {
-              query.andWhere('b.nama', 'like', `%${sanitizedValue}%`);
-            } else if (key === 'alatbayar_nama') {
-              query.andWhere('ab.nama', 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
-
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
@@ -475,39 +699,12 @@ export class KasgantungheaderService {
       throw new Error('Failed to fetch data');
     }
   }
+
   async findOne(id: string, trx: any) {
     try {
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.nobukti', // nobukti (nvarchar(100))
-          trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
-          'u.keterangan', // keterangan (text)
-          'u.relasi_id', // relasi_id (integer)
-          'u.bank_id', // bank_id (integer)
-          'u.pengeluaran_nobukti', // pengeluaran_nobukti (nvarchar(100))
-          'u.coakaskeluar', // coakaskeluar (nvarchar(100))
-          'u.dibayarke', // dibayarke (text)
-          'u.alatbayar_id', // alatbayar_id (integer)
-          'u.nowarkat', // nowarkat (nvarchar(100))
-          'u.tgljatuhtempo', // tgljatuhtempo (date)
-          'u.gantungorderan_nobukti', // gantungorderan_nobukti (nvarchar(100))
-          'u.info', // info (text)
-          'u.modifiedby', // modifiedby (varchar(200))
-          'u.editing_by', // editing_by (varchar(200))
-          'r.nama as relasi_nama', // relasi_nama (varchar(200))
-          'b.nama as bank_nama', // bank_nama (varchar(200))
-          'ab.nama as alatbayar_nama', // alatbayar_nama (varchar(200))
-          trx.raw("TO_CHAR(u.editing_at, 'DD-MM-YYYY HH24:MI:SS') as editing_at"), // editing_at (datetime)
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"), // created_at (datetime)
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"), // updated_at (datetime)
-        ])
-        .leftJoin('relasi as r', 'u.relasi_id', 'r.id')
-        .leftJoin('bank as b', 'u.bank_id', 'b.id')
-        .leftJoin('alatbayar as ab', 'u.alatbayar_id', 'ab.id')
+      const data = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
         .where('u.id', id);
-
-      const data = await query;
 
       return {
         data: data,
@@ -518,259 +715,8 @@ export class KasgantungheaderService {
     }
   }
 
-  async getKasGantung(dari: any, sampai: any, trx: any) {
-    try {
-      const tglDariFormatted = formatDateToSQL(dari);
-      const tglSampaiFormatted = formatDateToSQL(sampai);
-      const temp = '##temp_' + Math.random().toString(36).substring(2, 8);
-      await trx.schema.createTable(temp, (t) => {
-        t.string('nobukti');
-        t.date('tglbukti');
-        t.bigInteger('sisa').nullable();
-        t.text('keterangan').nullable();
-      });
-      await trx(temp).insert(
-        trx
-          .select(
-            'kd.nobukti',
-            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
-            trx.raw(`
-              (SELECT (sum(kd.nominal) - COALESCE(SUM(pgd.nominal), 0)) 
-               FROM pengembaliankasgantungdetail as pgd 
-               WHERE pgd.kasgantung_nobukti = kd.nobukti) AS sisa, 
-              MAX(kd.keterangan)
-            `),
-          )
-          .from('kasgantungdetail as kd')
-          .leftJoin('kasgantungheader as kg', 'kg.id', 'kd.kasgantung_id')
-          .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
-          .groupBy('kd.nobukti', 'kg.tglbukti')
-          .orderBy('kg.tglbukti', 'asc')
-          .orderBy('kd.nobukti', 'asc'),
-      );
-      const result = trx
-        .select(
-          trx.raw(`row_number() OVER (ORDER BY ??) as id`, [`${temp}.nobukti`]),
-          trx.raw(`FORMAT([${temp}].[tglbukti], 'dd-MM-yyyy') as tglbukti`),
-          `${temp}.nobukti`,
-          `${temp}.sisa`,
-          `${temp}.keterangan as keterangan`,
-        )
-
-        .from(`${temp}`)
-        .where(function () {
-          this.whereRaw(`${temp}.sisa != 0`).orWhereRaw(`${temp}.sisa is null`);
-        });
-
-      return result;
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
-    }
-  }
-  async getPengembalian(id: any, dari: any, sampai: any, trx: any) {
-    try {
-      // Create temporary tables
-      const tempPribadi = await this.createTempPengembalianKasGantung(
-        id,
-        dari,
-        sampai,
-        trx,
-      );
-      const tempAll = await this.createTempPengembalian(id, dari, sampai, trx);
-
-      const temp = '##tempGet' + Math.random().toString(36).substring(2, 8);
-      // Fetch data from the personal temporary table
-      const pengembalian = trx(tempPribadi).select(
-        'pengembaliankasgantungheader_id',
-        'nobukti',
-        'tglbukti',
-        'keterangan',
-        'coa',
-        'sisa',
-        'bayar',
-        'penerimaandetail_id',
-      );
-
-      // Create a new temporary table
-      await trx.schema.createTable(temp, (t) => {
-        t.bigInteger('pengembaliankasgantungheader_id').nullable();
-        t.string('nobukti');
-        t.date('tglbukti').nullable();
-        t.string('keterangan').nullable();
-        t.string('coa').nullable();
-        t.bigInteger('sisa').nullable();
-        t.bigInteger('bayar').nullable();
-        t.string('penerimaandetail_id').nullable();
-      });
-
-      // Insert fetched data into the new table
-      await trx(temp).insert(pengembalian);
-
-      // Fetch data from the second temporary table (tempAll)
-      const pinjaman = trx(tempAll)
-        .select(
-          trx.raw('null as pengembaliankasgantungheader_id'),
-          'nobukti',
-          'tglbukti',
-          'keterangan',
-          trx.raw('null as coa'),
-          'sisa',
-          trx.raw('0 as bayar'),
-          trx.raw('null as penerimaandetail_id'),
-        )
-        .where(function () {
-          this.whereRaw(`${tempAll}.sisa != 0`).orWhereRaw(
-            `${tempAll}.sisa is null`,
-          );
-        });
-
-      // Insert data from tempAll into the new temporary table
-      await trx(temp).insert(pinjaman);
-
-      // Final data query with row numbering
-      const data = await trx
-        .select(
-          trx.raw(`row_number() OVER (ORDER BY ??) as id`, [`${temp}.nobukti`]),
-          `${temp}.pengembaliankasgantungheader_id`,
-          `${temp}.nobukti`,
-          trx.raw(`TO_CHAR(${temp}.tglbukti, 'DD-MM-YYYY') as tglbukti`),
-          `${temp}.keterangan as keterangan`,
-          `${temp}.coa as coadetail`,
-          `${temp}.sisa`,
-          `${temp}.bayar as nominal`,
-          `${temp}.penerimaandetail_id`,
-        )
-        .from(`${temp}`)
-        .where(function () {
-          this.whereRaw(`${temp}.sisa != 0`).orWhereRaw(`${temp}.sisa is null`);
-        });
-
-      return data;
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
-    }
-  }
-
-  async createTempPengembalian(id: any, dari: any, sampai: any, trx: any) {
-    try {
-      const tglDariFormatted = formatDateToSQL(dari);
-      const tglSampaiFormatted = formatDateToSQL(sampai);
-      const temp = '##temp_' + Math.random().toString(36).substring(2, 8);
-
-      // Create temp table for 'pengembalian'
-      await trx.schema.createTable(temp, (t) => {
-        t.string('nobukti');
-        t.date('tglbukti');
-        t.bigInteger('sisa').nullable();
-        t.text('keterangan').nullable();
-      });
-
-      // Insert data into temp table for 'pengembalian'
-      await trx(temp).insert(
-        trx
-          .select(
-            'kd.nobukti',
-            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
-            trx.raw(`
-              (SELECT (sum(kd.nominal) - COALESCE(SUM(pgd.nominal), 0)) 
-               FROM pengembaliankasgantungdetail as pgd 
-               WHERE pgd.kasgantung_nobukti = kd.nobukti) AS sisa, 
-              MAX(kd.keterangan)
-            `),
-          )
-          .from('kasgantungdetail as kd')
-          .leftJoin('kasgantungheader as kg', 'kg.nobukti', 'kd.nobukti')
-          .whereRaw(
-            'kg.nobukti not in (select kasgantung_nobukti from pengembaliankasgantungdetail where pengembaliankasgantung_id=?)',
-            [id],
-          )
-          .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
-          .groupBy('kd.nobukti', 'kg.tglbukti'),
-      );
-      return temp;
-    } catch (error) {
-      console.error('Error creating tempPengembalianKasGantung:', error);
-      throw new Error('Failed to create tempPengembalianKasGantung');
-    }
-  }
-  async createTempPengembalianKasGantung(
-    id: any,
-    dari: any,
-    sampai: any,
-    trx: any,
-  ) {
-    try {
-      const tglDariFormatted = formatDateToSQL(dari);
-      const tglSampaiFormatted = formatDateToSQL(sampai);
-      const temp = '##temp_' + Math.random().toString(36).substring(2, 8);
-
-      // Create temp table for 'pengembalian2'
-      await trx.schema.createTable(temp, (t) => {
-        t.bigInteger('pengembaliankasgantungheader_id').nullable();
-        t.string('nobukti');
-        t.date('tglbukti');
-        t.bigInteger('bayar').nullable();
-        t.string('keterangan').nullable();
-        t.string('coa').nullable();
-        t.bigInteger('sisa').nullable();
-        t.string('penerimaandetail_id').nullable();
-      });
-
-      // Insert data into temp table for 'pengembalian2'
-      await trx(temp).insert(
-        trx
-          .select(
-            'pgd.pengembaliankasgantung_id as pengembaliankasgantungheader_id',
-            'kd.nobukti',
-            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
-            trx.raw(`
-              pgd.nominal as bayar,
-              pgd.keterangan as keterangan,
-              pgh.coakasmasuk as coa,
-              (SELECT (sum(kd.nominal) - COALESCE(SUM(pgd.nominal), 0)) 
-               FROM pengembaliankasgantungdetail as pgd 
-               WHERE pgd.kasgantung_nobukti = kd.nobukti) AS sisa,
-              pgd.penerimaandetail_id
-            `),
-          )
-          .from('kasgantungdetail as kd')
-          .leftJoin('kasgantungheader as kg', 'kg.id', 'kd.kasgantung_id')
-          .leftJoin(
-            'pengembaliankasgantungdetail as pgd',
-            'pgd.kasgantung_nobukti',
-            'kd.nobukti',
-          )
-          .leftJoin(
-            'pengembaliankasgantungheader as pgh',
-            'pgh.id',
-            'pgd.pengembaliankasgantung_id',
-          )
-          .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
-          .where('pgd.pengembaliankasgantung_id', id)
-          .groupBy(
-            'pgd.pengembaliankasgantung_id',
-            'kd.nobukti',
-            'kg.tglbukti',
-            'pgd.nominal',
-            'pgd.keterangan',
-            'pgh.coakasmasuk',
-            'pgd.penerimaandetail_id',
-          ),
-      );
-
-      return temp;
-    } catch (error) {
-      console.error('Error creating tempPengembalian:', error);
-      throw new Error('Failed to create tempPengembalian');
-    }
-  }
-
   async update(id: any, data: any, trx: any) {
     try {
-      data.tglbukti = formatDateToSQL(String(data?.tglbukti));
-
       const {
         sortBy,
         sortDirection,
@@ -782,24 +728,39 @@ export class KasgantungheaderService {
         bank_nama,
         alatbayar_nama,
         details,
-        ...insertData
+        isreload,
+        ...dto
       } = data;
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['nobukti', 'keterangan', 'dibayarke', 'nowarkat'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
+      const existingData = await trx(this.tableName).where('id', id).first();
+      if (!existingData) {
+        throw new NotFoundException(`Kas gantung ${id} tidak ditemukan`);
+      }
+
+      const processedDetails = this.buildDetailsData(details);
+
+      // id sengaja dibuang dari payload update: nomor bukti & PK tidak boleh
+      // ikut berubah lewat form.
+      const { id: _id, ...insertData } = this.buildInsertData(undefined, {
+        ...dto,
+        id,
+        nobukti: existingData.nobukti,
+        pengeluaran_nobukti: existingData.pengeluaran_nobukti,
+        created_at: existingData.created_at,
+        updated_at: existingData.updated_at,
       });
 
+      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
+      if (hasChanges) {
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
+      }
+
+      // Pengeluaran pasangannya ikut diperbarui: detailnya dicocokkan lewat
+      // pengeluarandetail_id yang disimpan di detail kas gantung.
       const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
 
-      const formatpengeluarangantung = await trx(`bank as b`)
+      const formatpengeluarangantung = await trx('bank as b')
         .select('p.grp', 'p.subgrp', 'b.formatpengeluarangantung')
         .leftJoin('parameter as p', 'p.id', 'b.formatpengeluarangantung')
         .where('b.id', insertData.bank_id)
@@ -812,113 +773,114 @@ export class KasgantungheaderService {
           trx.raw(`JSON_VALUE(${memoExpr}, '$.MEMO') AS memo_nama`),
           trx.raw(`JSON_VALUE(${memoExpr}, '$.COA') AS coa_nama`),
         )
-        .where('id', formatpengeluarangantung.formatpengeluarangantung)
+        .where('id', formatpengeluarangantung?.formatpengeluarangantung)
         .first();
 
-      const existingData = await trx(this.tableName).where('id', id).first();
       const pengeluaranData = await trx('pengeluaranheader')
-        .where('nobukti', insertData.pengeluaran_nobukti)
+        .where('nobukti', existingData.pengeluaran_nobukti)
         .first();
 
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
-
-      if (hasChanges) {
-        insertData.updated_at = this.utilsService.getTime();
-        await trx(this.tableName).where('id', id).update(insertData);
-      }
-
-      const detailPengeluaran = details.map((detail: any) => {
-        const { pengeluarandetail_id, ...rest } = detail;
-
-        return {
-          ...rest,
-          id: pengeluarandetail_id,
-          coadebet: parameter.coa_nama ?? null,
-          keterangan: detail.keterangan ?? null,
-          nominal: detail.nominal ?? null,
-          dpp: detail.dpp ?? 0,
-          modifiedby: insertData.modifiedby ?? null,
-          kasgantung_nobukti: insertData.nobukti ?? null,
-        };
-      });
-
-      // Update pengeluaran header dan detail
-      const dataPengeluaran = {
-        tglbukti: data.tglbukti,
-        relasi_id: insertData.relasi_id,
-        keterangan: insertData.keterangan,
-        bank_id: insertData.bank_id,
-        alatbayar_id: insertData.alatbayar_id,
-        modifiedby: insertData.modifiedby,
-        details: detailPengeluaran,
-      };
-      console.log(dataPengeluaran, 'cek');
-      const updatedPengeluaran = await this.pengeluaranheaderService.update(
-        pengeluaranData.id,
-        dataPengeluaran,
-        trx,
-      );
-
-      // Handle kas gantung detail - hanya field yang dibutuhkan
-      if (details && details.length > 0) {
-        const existingDetails = await trx('kasgantungdetail').where(
-          'kasgantung_id',
-          id,
-        );
-
-        const updatedDetails = details.map((detail: any) => {
-          const existingDetail = existingDetails.find(
-            (existing: any) => existing.nobukti === detail.nobukti,
-          );
+      let updatedPengeluaran: any = null;
+      if (pengeluaranData) {
+        const detailPengeluaran = processedDetails.map((detail: any) => {
+          const { pengeluarandetail_id, ...rest } = detail;
 
           return {
-            id: existingDetail ? existingDetail.id : 0,
-            kasgantung_id: id,
-            nobukti: existingData.nobukti,
-            keterangan: detail.keterangan,
-            nominal: detail.nominal,
-            modifiedby: insertData.modifiedby,
-            created_at: existingDetail
-              ? existingDetail.created_at
-              : this.utilsService.getTime(),
-            updated_at: this.utilsService.getTime(),
+            ...rest,
+            id: pengeluarandetail_id ? String(pengeluarandetail_id) : '0',
+            coadebet: parameter?.coa_nama ?? null,
+            keterangan: detail.keterangan ?? null,
+            nominal: detail.nominal ?? null,
+            dpp: detail.dpp ?? 0,
+            modifiedby: insertData.modifiedby ?? null,
+            kasgantung_nobukti: existingData.nobukti ?? null,
           };
         });
 
-        await this.kasgantungdetailService.create(updatedDetails, id, trx);
+        updatedPengeluaran = await this.pengeluaranheaderService.update(
+          pengeluaranData.id,
+          {
+            tglbukti: insertData.tglbukti,
+            relasi_id: insertData.relasi_id,
+            keterangan: insertData.keterangan,
+            bank_id: insertData.bank_id,
+            alatbayar_id: insertData.alatbayar_id,
+            modifiedby: insertData.modifiedby,
+            details: detailPengeluaran,
+          },
+          trx,
+          { withGridPosition: false },
+        );
       }
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
+      const detailsWithNobukti = processedDetails.map((detail: any) => ({
+        ...detail,
+        nobukti: existingData.nobukti,
+        modifiedby: insertData.modifiedby,
+      }));
+      await this.kasgantungdetailService.create(detailsWithNobukti, id, trx);
+
+      // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
+      // walau hasil edit tak lagi cocok dengan filter aktif.
+      const updatedItem = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', id)
+        .first();
+
+      const dataDetail = await this.kasgantungdetailService.findAll(
+        { filters: { nobukti: existingData.nobukti } },
         trx,
       );
 
-      const dataDetail = await this.kasgantungdetailService.findAll(id, trx);
+      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
+      // Header + detail + pengeluaran SUDAH ter-update di atas. Blok di bawah
+      // hanya menghitung posisi baris di grid; kegagalannya tidak boleh
+      // menggagalkan simpan yang sudah berhasil. Pemanggil internal tidak
+      // mengirim sortBy/filters/limit sama sekali, jadi semua parameter grid
+      // harus punya nilai default.
+      const sortColumn = sortBy || 'nobukti';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
-      // Cari index item di hasil yang sudah difilter
-      let itemIndex = filteredItems.findIndex((item) => Number(item.id) === id);
+      let paged: {
+        itemIndex: number;
+        pageNumber: number;
+        fetchedPages: number[];
+        pagedData: Record<number, any[]>;
+      } = { itemIndex: 0, pageNumber: 1, fetchedPages: [1], pagedData: {} };
 
-      if (itemIndex === -1) {
-        itemIndex = 0;
+      try {
+        const totalRecords = await this.baseQuery(trx)
+          .count('u.id as total')
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+        const totalItems = Number(totalRecords?.total ?? 0);
+
+        const posisi = await this.resolvePosition(
+          trx,
+          id,
+          filters,
+          search,
+          sortColumn,
+          sortDir,
+        );
+
+        paged = await this.buildPagedResult(
+          trx,
+          posisi,
+          totalItems,
+          pageLimit,
+          sortColumn,
+          sortDir,
+          filters,
+          search,
+        );
+      } catch (error) {
+        console.warn(
+          `Update kasgantungheader ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
+          error?.message,
+        );
       }
-
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      const endIndex = pageNumber * limit;
-
-      // Ambil data hingga halaman yang mencakup item
-      const limitedItems = filteredItems.slice(0, endIndex);
-
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
 
       await this.logTrailService.create(
         {
@@ -935,35 +897,45 @@ export class KasgantungheaderService {
 
       return {
         updatedItem: {
-          id,
-          ...insertData,
+          ...updatedItem,
           pengeluaran_data: updatedPengeluaran,
         },
-        pageNumber,
-        itemIndex,
+        ...paged,
         dataDetail,
       };
     } catch (error) {
-      throw new Error(`Error: ${error.message}`);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilsService.lockAndDestroy(
-        id,
-        this.tableName,
-        'id',
-        trx,
-      );
+      // detail & statuspendukung wajib dihapus lebih dulu, header dipegang FK
+      // kasgantungdetail.kasgantung_id
       const deletedDataDetail = await this.utilsService.lockAndDestroy(
         id,
         'kasgantungdetail',
         'kasgantung_id',
         trx,
       );
-
       await this.statuspendukungService.remove(id, modifiedby, trx);
+
+      const deletedData = await this.utilsService.lockAndDestroy(
+        id,
+        this.tableName,
+        'id',
+        trx,
+      );
 
       await this.logTrailService.create(
         {
@@ -987,31 +959,315 @@ export class KasgantungheaderService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
-  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
+
+  /**
+   * Daftar kas gantung yang sisanya belum nol dalam rentang tanggal — dipakai
+   * lookup di layar Pengembalian Kas Gantung.
+   */
+  async getKasGantung(dari: any, sampai: any, trx: any) {
     try {
-      if (aksi === 'EDIT') {
-        const forceEdit = await this.locksService.forceEdit(
-          this.tableName,
-          value,
-          editedby,
-          trx,
-        );
+      const tglDariFormatted = formatDateToSQL(dari);
+      const tglSampaiFormatted = formatDateToSQL(sampai);
 
-        return forceEdit;
-      } else if (aksi === 'DELETE') {
-        const validasi = await this.globalService.checkUsed(
-          'pengembaliankasgantungdetail',
-          'kasgantung_nobukti',
-          value,
-          trx,
-        );
-
-        return validasi;
-      }
+      // Rewrite Postgres: global temp table (##temp) dan FORMAT() adalah
+      // sintaks SQL Server. Agregatnya dipertahankan apa adanya, hanya
+      // dipindah ke CTE.
+      return await trx
+        .with('kasgantung_sisa', (qb: any) => {
+          qb.select(
+            'kd.nobukti',
+            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
+            // ::numeric wajib: kolom nominal bertipe money di sebagian
+            // database, dan money tidak bisa dipadukan dengan integer 0 di
+            // COALESCE.
+            trx.raw(`SUM(kd.nominal::numeric) - COALESCE((
+                SELECT SUM(pgd.nominal::numeric)
+                FROM pengembaliankasgantungdetail AS pgd
+                WHERE pgd.kasgantung_nobukti = kd.nobukti
+              ), 0) AS sisa`),
+            trx.raw('MAX(kd.keterangan) AS keterangan'),
+          )
+            .from('kasgantungdetail as kd')
+            .leftJoin('kasgantungheader as kg', 'kg.id', 'kd.kasgantung_id')
+            .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
+            .groupBy('kd.nobukti', 'kg.tglbukti');
+        })
+        .select(
+          trx.raw('ROW_NUMBER() OVER (ORDER BY nobukti) as id'),
+          trx.raw("TO_CHAR(tglbukti, 'DD-MM-YYYY') as tglbukti"),
+          'nobukti',
+          'sisa',
+          'keterangan',
+        )
+        .from('kasgantung_sisa')
+        .where((qb: any) => {
+          qb.whereRaw('sisa <> 0').orWhereRaw('sisa IS NULL');
+        })
+        .orderBy('nobukti', 'asc');
     } catch (error) {
-      console.error('Error di checkValidasi:', error);
-      throw new InternalServerErrorException('Failed to check validation');
+      console.error('Error fetching data:', error);
+      throw new Error('Failed to fetch data');
     }
+  }
+
+  /**
+   * Baris kas gantung untuk satu pengembalian: yang SUDAH tercatat di
+   * pengembalian tersebut (bayar terisi) digabung dengan yang belum pernah
+   * dikembalikan sama sekali (bayar 0).
+   */
+  async getPengembalian(id: any, dari: any, sampai: any, trx: any) {
+    try {
+      const tglDariFormatted = formatDateToSQL(dari);
+      const tglSampaiFormatted = formatDateToSQL(sampai);
+
+      // ::numeric wajib: kolom nominal bertipe money di sebagian database, dan
+      // money tidak bisa dipadukan dengan integer 0 di COALESCE maupun dengan
+      // `0 AS bayar` di UNION.
+      const sisaExpr = `SUM(kd.nominal::numeric) - COALESCE((
+          SELECT SUM(pgd2.nominal::numeric)
+          FROM pengembaliankasgantungdetail AS pgd2
+          WHERE pgd2.kasgantung_nobukti = kd.nobukti
+        ), 0)`;
+
+      // Rewrite Postgres: dua global temp table + UNION lewat INSERT diganti
+      // dua CTE. Join-nya sengaja berbeda seperti aslinya — baris "pribadi"
+      // lewat kd.kasgantung_id, baris "belum dikembalikan" lewat nobukti.
+      return await trx
+        .with('pengembalian_pribadi', (qb: any) => {
+          qb.select(
+            'pgd.pengembaliankasgantung_id as pengembaliankasgantungheader_id',
+            'kd.nobukti',
+            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
+            trx.raw('pgd.keterangan AS keterangan'),
+            trx.raw('pgh.coakasmasuk AS coa'),
+            trx.raw(`${sisaExpr} AS sisa`),
+            trx.raw('pgd.nominal::numeric AS bayar'),
+            'pgd.penerimaandetail_id',
+          )
+            .from('kasgantungdetail as kd')
+            .leftJoin('kasgantungheader as kg', 'kg.id', 'kd.kasgantung_id')
+            .leftJoin(
+              'pengembaliankasgantungdetail as pgd',
+              'pgd.kasgantung_nobukti',
+              'kd.nobukti',
+            )
+            .leftJoin(
+              'pengembaliankasgantungheader as pgh',
+              'pgh.id',
+              'pgd.pengembaliankasgantung_id',
+            )
+            .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
+            .where('pgd.pengembaliankasgantung_id', id)
+            .groupBy(
+              'pgd.pengembaliankasgantung_id',
+              'kd.nobukti',
+              'kg.tglbukti',
+              'pgd.nominal',
+              'pgd.keterangan',
+              'pgh.coakasmasuk',
+              'pgd.penerimaandetail_id',
+            );
+        })
+        .with('pengembalian_baru', (qb: any) => {
+          qb.select(
+            trx.raw('NULL::text AS pengembaliankasgantungheader_id'),
+            'kd.nobukti',
+            trx.raw('CAST(kg.tglbukti AS DATE) AS tglbukti'),
+            trx.raw('MAX(kd.keterangan) AS keterangan'),
+            trx.raw('NULL::text AS coa'),
+            trx.raw(`${sisaExpr} AS sisa`),
+            trx.raw('0::numeric AS bayar'),
+            trx.raw('NULL::text AS penerimaandetail_id'),
+          )
+            .from('kasgantungdetail as kd')
+            .leftJoin('kasgantungheader as kg', 'kg.nobukti', 'kd.nobukti')
+            .whereRaw(
+              `kg.nobukti NOT IN (
+                SELECT kasgantung_nobukti
+                FROM pengembaliankasgantungdetail
+                WHERE pengembaliankasgantung_id = ?
+              )`,
+              [id],
+            )
+            .whereBetween('kg.tglbukti', [tglDariFormatted, tglSampaiFormatted])
+            .groupBy('kd.nobukti', 'kg.tglbukti');
+        })
+        .with('pengembalian_gabungan', (qb: any) => {
+          qb.select('*')
+            .from('pengembalian_pribadi')
+            .unionAll((u: any) => {
+              u.select('*')
+                .from('pengembalian_baru')
+                .where((w: any) => {
+                  w.whereRaw('sisa <> 0').orWhereRaw('sisa IS NULL');
+                });
+            });
+        })
+        .select(
+          trx.raw('ROW_NUMBER() OVER (ORDER BY nobukti) as id'),
+          'pengembaliankasgantungheader_id',
+          'nobukti',
+          trx.raw("TO_CHAR(tglbukti, 'DD-MM-YYYY') as tglbukti"),
+          'keterangan',
+          'coa as coadetail',
+          'sisa',
+          'bayar as nominal',
+          'penerimaandetail_id',
+        )
+        .from('pengembalian_gabungan')
+        .where((qb: any) => {
+          qb.whereRaw('sisa <> 0').orWhereRaw('sisa IS NULL');
+        })
+        .orderBy('nobukti', 'asc');
+    } catch (error) {
+      console.error('Error fetching data:', error);
+      throw new Error('Failed to fetch data');
+    }
+  }
+
+  /**
+   * Data untuk cetak bukti kas gantung di background: satu header beserta
+   * rinciannya, dipetakan ke dua datasource LaporanKasGantung.mrt — `data`
+   * (header) dan `detail` (rincian nominal).
+   */
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: headerRows } = await this.findOne(id, db);
+
+    if (!headerRows?.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const detailRes = await this.kasgantungdetailService.findAll(
+      { filters: { nobukti: header.nobukti } },
+      db,
+    );
+    const details = detailRes.data ?? [];
+
+    // Dijumlahkan dalam satuan sen lalu dibagi 100 supaya sisa pembulatan
+    // float tidak menggeser terbilang satu rupiah.
+    const totalNominal =
+      details.reduce(
+        (sum: number, item: any) =>
+          sum + Math.round((Number(item.nominal) || 0) * 100),
+        0,
+      ) / 100;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: [
+        {
+          ...header,
+          judullaporan: judullaporan ?? 'Laporan Kas Gantung',
+          usercetak: username,
+          tglcetak,
+          terbilang: numberToTerbilang(totalNominal),
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        },
+      ],
+      detail: details,
+    };
+  }
+
+  /**
+   * Data master satu bukti untuk blok info di atas tabel rincian. Dipakai juga
+   * untuk memberi nama file, jadi diambil SEBELUM job export dimulai supaya
+   * id yang tidak ada langsung balas 404, bukan gagal di tengah job.
+   */
+  async loadExportBuktiHeader(id: string, db: any) {
+    const header = await this.baseQuery(db)
+      .select([
+        'u.nobukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        'u.keterangan',
+        'u.relasi_nama',
+        'u.bank_nama',
+        'u.alatbayar_nama',
+        'u.pengeluaran_nobukti',
+        'u.coakaskeluar',
+        'u.dibayarke',
+        'u.nowarkat',
+        db.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
+      ])
+      .where('u.id', String(id))
+      .first();
+
+    if (!header) {
+      throw new NotFoundException(`Kas gantung dengan id ${id} tidak ditemukan`);
+    }
+
+    return header;
+  }
+
+  /**
+   * Rincian satu bukti, urut sesuai urutan input. Dikembalikan sebagai query
+   * (bukan array) supaya ExportJobService bisa men-stream-nya lewat cursor,
+   * sama seperti export daftar.
+   */
+  buildExportBuktiQuery(nobukti: string, db: any) {
+    return db('vkasgantungdetail as d')
+      .select(['d.nobukti', 'd.keterangan', 'd.nominal'])
+      .where('d.nobukti', nobukti)
+      .orderBy('d.id', 'asc');
+  }
+
+  /** Jumlah baris rincian — dipakai untuk progres export yang nyata. */
+  async countExportBuktiRows(nobukti: string, db: any): Promise<number> {
+    const result = await db('vkasgantungdetail as d')
+      .count('d.id as total')
+      .where('d.nobukti', nobukti)
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Sheet export per transaksi: blok master di atas, rincian + TOTAL di bawah. */
+  buildExportBuktiSheet(header: any): ExportSheetDefinition {
+    return {
+      sheetName: 'Kas Gantung',
+      titleLines: [
+        'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        'LAPORAN KAS GANTUNG',
+        String(header.nobukti ?? ''),
+      ],
+      infoLines: [
+        { label: 'NO BUKTI', value: header.nobukti },
+        { label: 'TGL BUKTI', value: header.tglbukti },
+        { label: 'KETERANGAN', value: header.keterangan },
+        { label: 'RELASI', value: header.relasi_nama },
+        { label: 'BANK', value: header.bank_nama },
+        { label: 'ALAT BAYAR', value: header.alatbayar_nama },
+        { label: 'PENGELUARAN NO BUKTI', value: header.pengeluaran_nobukti },
+        { label: 'COA KAS KELUAR', value: header.coakaskeluar },
+        { label: 'DIBAYAR KE', value: header.dibayarke },
+        { label: 'NO WARKAT', value: header.nowarkat },
+        { label: 'TGL JATUH TEMPO', value: header.tgljatuhtempo },
+      ],
+      headers: ['NO.', 'NO BUKTI', 'KETERANGAN', 'NOMINAL'],
+      columnFormats: [
+        null,
+        null,
+        null,
+        { numFmt: EXCEL_FORMAT.RUPIAH_DESIMAL },
+      ],
+      totalRow: { sumColumns: [3] },
+      mapRow: (row: any, rowNumber: number) => [
+        rowNumber,
+        row.nobukti,
+        row.keterangan,
+        row.nominal,
+      ],
+    };
   }
 
   async exportToExcel(data: any[], trx: any) {
@@ -1195,5 +1451,32 @@ export class KasgantungheaderService {
     await workbook.xlsx.writeFile(tempFilePath);
 
     return tempFilePath;
+  }
+
+  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
+    try {
+      if (aksi === 'EDIT') {
+        const forceEdit = await this.locksService.forceEdit(
+          this.tableName,
+          value,
+          editedby,
+          trx,
+        );
+
+        return forceEdit;
+      } else if (aksi === 'DELETE') {
+        const validasi = await this.globalService.checkUsed(
+          'pengembaliankasgantungdetail',
+          'kasgantung_nobukti',
+          value,
+          trx,
+        );
+
+        return validasi;
+      }
+    } catch (error) {
+      console.error('Error di checkValidasi:', error);
+      throw new InternalServerErrorException('Failed to check validation');
+    }
   }
 }

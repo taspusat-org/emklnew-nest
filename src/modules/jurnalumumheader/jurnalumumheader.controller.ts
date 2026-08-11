@@ -30,10 +30,22 @@ import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import { AuthGuard } from '../auth/auth.guard';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportJurnalumumheaderDto,
+  ReportJurnalumumheaderSchema,
+} from './dto/report-jurnalumumheader.dto';
+import {
+  ExportJurnalumumheaderDto,
+  ExportJurnalumumheaderSchema,
+} from './dto/export-jurnalumumheader.dto';
 @Controller('jurnalumumheader')
 export class JurnalumumheaderController {
   constructor(
     private readonly jurnalumumheaderService: JurnalumumheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -68,7 +80,9 @@ export class JurnalumumheaderController {
   @Get()
   //@JURNAL-UMUM
   @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAll(@Query() query: any, @Req() req) {
+  async findAll(@Query() query: any) {
+    // isreload dibuang di sini: sudah tak dipakai sejak findAll baca view,
+    // tapi frontend masih mengirimnya dan tak boleh ikut jadi filter kolom.
     const {
       search,
       page,
@@ -98,14 +112,8 @@ export class JurnalumumheaderController {
       isLookUp: isLookUp === 'true',
     };
     const trx = await dbMssql.transaction();
-    const modifiedby = req.user?.user?.username || 'unknown';
     try {
-      const result = await this.jurnalumumheaderService.findAll(
-        params,
-        trx,
-        isreload,
-        modifiedby,
-      );
+      const result = await this.jurnalumumheaderService.findAll(params, trx);
       trx.commit();
 
       return result;
@@ -188,6 +196,91 @@ export class JurnalumumheaderController {
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
+  /**
+   * POST /jurnalumumheader/report
+   *
+   * Cetak bukti jurnal umum di background. Request langsung balas { jobId };
+   * progres render dikirim lewat socket namespace `/report` (event
+   * `report:progress`, room = jobId), dan PDF-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * Beda dengan laporan daftar (mis. Group Biaya Extra) yang mencetak seluruh
+   * baris hasil filter grid: LaporanJurnalUmum.mrt adalah bukti PER TRANSAKSI,
+   * jadi yang dikirim frontend hanya id baris yang dicentang. Datanya dua tabel
+   * — `data` (header) dan `detail` (rincian) — sesuai datasource template.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportJurnalumumheaderSchema))
+    body: ReportJurnalumumheaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.jurnalumumheaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /jurnalumumheader/export
+   *
+   * Export Excel daftar jurnal umum di background. Request langsung balas
+   * { jobId }; progresnya dikirim lewat socket namespace `/report` (kanal yang
+   * sama dengan cetak laporan), dan file-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris. Jangan disamakan dengan GET /export/:id di
+   * bawah: yang itu mengekspor SATU bukti beserta rinciannya, yang ini seluruh
+   * baris yang lolos filter grid.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportJurnalumumheaderSchema))
+    body: ExportJurnalumumheaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_jurnal_umum_${stamp}.xlsx`,
+      countRows: () =>
+        this.jurnalumumheaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.jurnalumumheaderService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.jurnalumumheaderService.exportSheet,
+    });
+  }
+
   @Get('/export/:id')
   async exportToExcel(@Param('id') id: string, @Res() res: Response) {
     try {

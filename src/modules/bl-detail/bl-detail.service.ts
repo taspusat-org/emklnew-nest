@@ -27,7 +27,10 @@ export class BlDetailService {
       const logData: any[] = [];
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      // Tanpa prefiks '##' (global temp ala MSSQL): '#' bukan identifier valid
+      // di Postgres saat direferensikan mentah, mis. trx.raw(`${temp}.kolom`).
+      // Sama seperti ShippingInstructionDetailService.
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -66,8 +69,12 @@ export class BlDetailService {
           allRincian.push(tempRincian);
         }
 
-        if (detailsWithoutRincian.id) {
-          const existingData = await trx(this.tableName) // Check if the data has an id (existing record)
+        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
+        if (
+          detailsWithoutRincian.id &&
+          String(detailsWithoutRincian.id) !== '0'
+        ) {
+          const existingData = await trx(this.tableName)
             .where('id', detailsWithoutRincian.id)
             .first();
 
@@ -111,19 +118,16 @@ export class BlDetailService {
       await trx.raw(tableTemp);
 
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
+      // OPENJSON + jsonExtract adalah bentuk SQL Server. Padanannya di Postgres
+      // jsonb_populate_recordset(null::<tabel>, ...): satu baris per elemen
+      // array, kolom & tipenya mengikuti tabel base (temp dibuat dari
+      // `SELECT * ... WHERE 1=0` sehingga bentuknya identik). Pola ini sudah
+      // dipakai ShippingInstructionDetailService.
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
       const updatedData = await trx(this.tableName)
         .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)

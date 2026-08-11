@@ -22,6 +22,14 @@ export class GlobalService {
   ) {}
 
   async checkData(data: any, trx: any) {
+    // tableName datang dari parameter.subgrp yang HURUF BESAR
+    // ("BOOKINGORDERANMUATAN"), sedangkan seluruh tabel di Postgres bernama
+    // huruf kecil. Knex mengutip nama tabel, dan identifier terkutip di
+    // Postgres bersifat case-sensitive -> 'relation "BOOKINGORDERANMUATAN"
+    // does not exist'. Di SQL Server dulu tidak masalah karena tidak
+    // case-sensitive.
+    data.tableName = String(data.tableName ?? '').toLowerCase();
+
     // Validasi 1: Cek jika transaksi_id adalah array
     if (!Array.isArray(data.transaksi_id) || data.transaksi_id.length === 0) {
       return {
@@ -131,6 +139,9 @@ export class GlobalService {
   async approval(data: any, trx: any) {
     const created_at = this.utilsService.getTime();
     const updated_at = this.utilsService.getTime();
+
+    // Sama seperti di checkData(): nama tabel Postgres huruf kecil.
+    data.tableName = String(data.tableName ?? '').toLowerCase();
 
     // Cek jika transaksi_id adalah array
     if (!Array.isArray(data.transaksi_id) || data.transaksi_id.length === 0) {
@@ -247,6 +258,9 @@ export class GlobalService {
   async nonApproval(data: any, trx: any) {
     const created_at = this.utilsService.getTime();
     const updated_at = this.utilsService.getTime();
+
+    // Sama seperti di checkData(): nama tabel Postgres huruf kecil.
+    data.tableName = String(data.tableName ?? '').toLowerCase();
 
     // Cek jika transaksi_id adalah array
     if (!Array.isArray(data.transaksi_id) || data.transaksi_id.length === 0) {

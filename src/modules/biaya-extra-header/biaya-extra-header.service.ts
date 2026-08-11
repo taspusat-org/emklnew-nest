@@ -229,12 +229,108 @@ export class BiayaExtraHeaderService {
     }
   }
 
+  /**
+   * Jenis order yang sedang dilihat grid. Kalau frontend tidak mengirim
+   * filter `jenisOrderan`, default-nya MUATAN — sama seperti tampilan awal
+   * grid. Dipakai findAll maupun export supaya keduanya melihat dataset yang
+   * PERSIS sama.
+   */
+  async resolveJenisOrderId(filters: any, trx: any): Promise<string> {
+    if (
+      filters?.jenisOrderan &&
+      filters?.jenisOrderan !== null &&
+      filters?.jenisOrderan !== 'null'
+    ) {
+      return filters.jenisOrderan;
+    }
+
+    const orderanMuatan = await trx
+      .from(trx.raw(`jenisorder as u`))
+      .select('id')
+      .where('nama', 'MUATAN')
+      .first();
+
+    return orderanMuatan.id;
+  }
+
+  /**
+   * Search global + filter per kolom + rentang tanggal. Dipisah dari findAll
+   * supaya export memakai penyaringan yang sama persis dengan yang tampil di
+   * grid — kalau disalin, keduanya pasti berbeda begitu salah satu diubah.
+   */
+  private applyListFilters(
+    query: any,
+    filters: Record<string, any> | undefined,
+    search: string | undefined,
+  ): void {
+    if (filters?.tglDari && filters?.tglSampai) {
+      const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
+      const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
+
+      query.whereBetween('u.tglbukti', [tglDariFormatted, tglSampaiFormatted]);
+    }
+
+    const excludeSearchKeys = ['tglDari', 'tglSampai', 'jenisOrderan'];
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search) {
+      const sanitized = String(search).replace(/\[/g, '[[]').trim();
+      query.where((qb) => {
+        searchFields.forEach((field) => {
+          if (field === 'jenisorder_text') {
+            qb.orWhere(`p.nama`, 'like', `%${sanitized}%`);
+          } else if (field === 'biayaemkl_text') {
+            qb.orWhere(`q.nama`, 'like', `%${sanitized}%`);
+          } else if (field === 'tglbukti') {
+            qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
+              `%${sanitized}%`,
+            ]);
+          } else if (field === 'created_at' || field === 'updated_at') {
+            qb.orWhereRaw(
+              `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
+              [`%${sanitized}%`],
+            );
+          } else {
+            qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
+          }
+        });
+      });
+    }
+
+    if (filters) {
+      Object.entries(filters)
+        .filter(([key, value]) => !excludeSearchKeys.includes(key) && value)
+        .forEach(([key, value]) => {
+          const sanitizedValue = String(value).replace(/\[/g, '[[]');
+
+          if (key === 'created_at' || key === 'updated_at') {
+            query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
+              key,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (key === 'tglbukti') {
+            query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
+              key,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (key === 'jenisorder_text') {
+            query.andWhere(`p.nama`, 'like', `%${sanitizedValue}%`);
+          } else if (key === 'biayaemkl_text') {
+            query.andWhere(`q.nama`, 'like', `%${sanitizedValue}%`);
+          } else {
+            query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+          }
+        });
+    }
+  }
+
   async findAll(
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
     trx: any,
   ) {
     try {
-      let filtersJenisOrderan;
       let { page, limit } = pagination ?? {};
       page = page ?? 1;
       limit = limit ?? 0;
@@ -255,20 +351,7 @@ export class BiayaExtraHeaderService {
         }
       }
 
-      const getOrderanMuatanId = await trx
-        .from(trx.raw(`jenisorder as u`))
-        .select('id')
-        .where('nama', 'MUATAN')
-        .first();
-      if (
-        filters?.jenisOrderan &&
-        filters?.jenisOrderan !== null &&
-        filters?.jenisOrderan !== 'null'
-      ) {
-        filtersJenisOrderan = filters.jenisOrderan;
-      } else {
-        filtersJenisOrderan = getOrderanMuatanId.id;
-      }
+      const filtersJenisOrderan = await this.resolveJenisOrderId(filters, trx);
 
       const query = trx
         .from(trx.raw(`${this.tableName} as u`))
@@ -280,8 +363,12 @@ export class BiayaExtraHeaderService {
           'u.biayaemkl_id',
           'u.keterangan',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
 
           'p.nama as jenisorder_nama',
           'q.nama as biayaemkl_nama',
@@ -290,70 +377,7 @@ export class BiayaExtraHeaderService {
         .leftJoin('biayaemkl as q', 'u.biayaemkl_id', 'q.id')
         .where('u.jenisorder_id', filtersJenisOrderan);
 
-      if (filters?.tglDari && filters?.tglSampai) {
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
-
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
-        ]);
-      }
-
-      const excludeSearchKeys = ['tglDari', 'tglSampai', 'jenisOrderan'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'jenisorder_text') {
-              qb.orWhere(`p.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'biayaemkl_text') {
-              qb.orWhere(`q.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'tglbukti') {
-              qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        Object.entries(filters)
-          .filter(([key, value]) => !excludeSearchKeys.includes(key) && value)
-          .forEach(([key, value]) => {
-            const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'tglbukti') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'jenisorder_text') {
-              query.andWhere(`p.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'biayaemkl_text') {
-              query.andWhere(`q.nama`, 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          });
-      }
+      this.applyListFilters(query, filters, search);
 
       if (limit > 0) {
         const offset = (page - 1) * limit;
@@ -374,7 +398,6 @@ export class BiayaExtraHeaderService {
       const total = result?.total as number;
       const totalPages = Math.ceil(total / limit);
       const data = await query;
-      console.log('data', data);
       const responseType = Number(total) > 500 ? 'json' : 'local';
 
       return {
@@ -458,7 +481,11 @@ export class BiayaExtraHeaderService {
           'parameter.text as statustagih_nama',
           'q.keterangan as groupbiayaextra_nama',
         ])
-        .leftJoin('jenisorder as jenisorderan', 'u.jenisorder_id', 'jenisorderan.id')
+        .leftJoin(
+          'jenisorder as jenisorderan',
+          'u.jenisorder_id',
+          'jenisorderan.id',
+        )
         .leftJoin('biayaemkl as p', 'u.biayaemkl_id', 'p.id')
         .leftJoin(
           `${detailTableName} as detail`,
@@ -698,11 +725,6 @@ export class BiayaExtraHeaderService {
         },
         trx,
       );
-
-      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
-      // Sama seperti create(): hanya menghitung posisi/halaman baris yang
-      // diedit untuk grid. Kegagalannya TIDAK boleh me-rollback update yang
-      // sudah berhasil.
       let pageNumber = 1;
       let fetchedPages: number[] = [1];
       let pagedData: Record<number, any> = {};
@@ -812,13 +834,6 @@ export class BiayaExtraHeaderService {
           detailServiceDelete = this.biayaExtraMuatanDetailService;
           detailTableName = 'biayaextramuatandetail';
           break;
-        // case getOrderanBongkaranId.id:
-        //   detailServiceDelete = 'test';
-        //   detailTableName = 'biayaextrabongkarandetail';
-        //   break;
-        // case 'EXPORT':
-        //   service = this.hitungmodalexportService;
-        //   break;
         default:
           detailServiceDelete = this.biayaExtraMuatanDetailService;
           detailTableName = 'biayaextramuatandetail';
@@ -864,6 +879,36 @@ export class BiayaExtraHeaderService {
     }
   }
 
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: rows } = await this.findOne(id, db);
+
+    if (!rows?.length) {
+      return { data: [], detail: [], detail_rincian: [] };
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: rows.map((row: any) => ({
+        ...row,
+        judullaporan: judullaporan ?? 'Laporan Biaya Extra',
+        usercetak: username,
+        tglcetak,
+        judul: 'Bukti Biaya Extra EMKL',
+      })),
+      detail: [],
+      detail_rincian: [],
+    };
+  }
+
   async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
     try {
       if (aksi === 'EDIT') {
@@ -894,6 +939,120 @@ export class BiayaExtraHeaderService {
       throw new InternalServerErrorException('Failed to check validation');
     }
   }
+
+  /**
+   * Query dasar export daftar Biaya Extra: filter, jenis order, dan sort yang
+   * sama dengan findAll, TANPA paging dan hanya kolom yang dipakai file Excel.
+   *
+   * `jenisorderId` sudah diresolusi di controller (lewat resolveJenisOrderId)
+   * karena ExportJobService meminta stream secara sinkron.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+      jenisorderId,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'> & {
+      jenisorderId: string;
+    },
+    db: any,
+  ) {
+    const query = db
+      .from(db.raw(`${this.tableName} as u`))
+      .select([
+        'u.nobukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        'p.nama as jenisorder_nama',
+        'u.keterangan',
+        'q.nama as biayaemkl_nama',
+        'u.modifiedby',
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ])
+      .leftJoin('jenisorder as p', 'u.jenisorder_id', 'p.id')
+      .leftJoin('biayaemkl as q', 'u.biayaemkl_id', 'q.id')
+      .where('u.jenisorder_id', jenisorderId);
+
+    this.applyListFilters(query, filters, search);
+
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    if (sortBy === 'jenisorder_text') {
+      query.orderBy('p.nama', sortDirection);
+    } else if (sortBy === 'biayaemkl_text') {
+      query.orderBy('q.nama', sortDirection);
+    } else {
+      query.orderBy(sortBy, sortDirection);
+    }
+
+    return query;
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
+   * sebenarnya. JOIN-nya tetap dipakai karena filter menyaring lewat kolom
+   * turunan (p.nama, q.nama).
+   */
+  async countExportRows(
+    {
+      search,
+      filters,
+      jenisorderId,
+    }: Pick<FindAllParams, 'search' | 'filters'> & { jenisorderId: string },
+    db: any,
+  ): Promise<number> {
+    const query = db
+      .from(db.raw(`${this.tableName} as u`))
+      .count('u.id as total')
+      .leftJoin('jenisorder as p', 'u.jenisorder_id', 'p.id')
+      .leftJoin('biayaemkl as q', 'u.biayaemkl_id', 'q.id')
+      .where('u.jenisorder_id', jenisorderId);
+
+    this.applyListFilters(query, filters, search);
+
+    const result = await query.first();
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN BIAYA EXTRA',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'JENIS ORDER',
+      'KETERANGAN',
+      'BIAYA EMKL',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.jenisorder_nama,
+      row.keterangan,
+      row.biayaemkl_nama,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
 
   async exportToExcel(data: any) {
     const dataHeader = data.data[0];

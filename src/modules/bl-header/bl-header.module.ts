@@ -8,6 +8,7 @@ import { LocksModule } from '../locks/locks.module';
 import { UtilsModule } from 'src/utils/utils.module';
 import { GlobalModule } from '../global/global.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
+import { ReportModule } from 'src/common/report/report.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { BlDetailModule } from '../bl-detail/bl-detail.module';
 import { BlDetailRincianModule } from '../bl-detail-rincian/bl-detail-rincian.module';
@@ -24,6 +25,7 @@ import { BlDetailRincianBiayaModule } from '../bl-detail-rincian-biaya/bl-detail
     UtilsModule,
     GlobalModule,
     LogtrailModule,
+    ReportModule,
     RunningNumberModule,
     BlDetailModule,
     BlDetailRincianModule,

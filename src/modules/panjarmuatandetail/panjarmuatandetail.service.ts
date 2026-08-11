@@ -1,205 +1,176 @@
 import {
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { CreatePanjarmuatandetailDto } from './dto/create-panjarmuatandetail.dto';
-import { UpdatePanjarmuatandetailDto } from './dto/update-panjarmuatandetail.dto';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 
 @Injectable()
 export class PanjarmuatandetailService {
   private readonly tableName: string = 'panjarmuatandetail';
+  // Baca lewat view (lihat create-vpanjar-pg.sql), tulis lewat tabel base —
+  // pola yang sama dengan pengeluarandetail (vpengeluarandetail) dan shipping
+  // instruction detail (vshippinginstructiondetail).
+  private readonly viewName: string = 'vpanjarmuatandetail';
+
+  private readonly logger = new Logger(PanjarmuatandetailService.name);
 
   constructor(
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
   ) {}
 
+  /**
+   * estimasi & nominal bertipe numeric. Grid mengirimnya lewat InputCurrency
+   * sebagai string ter-format ("100,000.00"); koma ribuan ditolak Postgres
+   * dengan 22P02 invalid input syntax for type numeric. Kosong -> null.
+   */
+  private toNumeric(value: any): number | null {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  /**
+   * Upsert seluruh detail milik satu panjar sekaligus: baris yang dikirim
+   * dengan id nyata di-UPDATE, yang id-nya kosong/'0' di-INSERT, dan baris di DB
+   * yang TIDAK lagi dikirim dihapus.
+   *
+   * Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
+   * Server (tidak ada di PG) dan `jsonExtract` knex memakai jsonb_path_query
+   * yang mengembalikan jsonb ber-quote sehingga nilainya korup. Kalaupun mau
+   * tetap lewat temp table, padanan PG-nya adalah jsonb_populate_recordset
+   * (lihat shipping-instruction-detail). Di sini dipakai bentuk yang lebih
+   * sederhana & sudah terbukti di pengeluarandetail: upsert langsung dari array
+   * JS, nilainya diambil apa adanya dari objek.
+   */
   async create(details: any, id: any = 0, trx: any = null) {
     try {
-      let insertedData = null;
-      const logData: any[] = [];
-      const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-      const tableTemp = await this.utilsService.createTempTable(
-        this.tableName,
-        trx,
-        tempTableName,
-      );
+      const logData: any[] = [];
 
-      if (details.length === 0) {
+      if (!details || details.length === 0) {
         await trx(this.tableName).delete().where('panjar_id', id);
         return;
       }
 
+      const existingRows: any[] = []; // baris dgn id nyata (bukan '0'/kosong)
+      const newRows: any[] = [];
+
       for (const data of details) {
-        let isDataChanged = false;
-
-        // Uppercase hanya kolom teks manusiawi. id (PK), panjar_id (FK), dan
-        // orderanmuatan_nobukti adalah UUID/kunci bertipe text (case-sensitive);
+        // Uppercase HANYA kolom teks manusiawi. id (PK), panjar_id (FK), dan
+        // orderanmuatan_nobukti adalah kunci bertipe text (case-sensitive);
         // blanket uppercase meng-corrupt id sehingga lookup-by-id gagal.
-        ['keterangan'].forEach((field) => {
-          if (typeof data[field] === 'string') {
-            data[field] = data[field].toUpperCase();
-          }
-        });
+        if (typeof data.keterangan === 'string') {
+          data.keterangan = data.keterangan.toUpperCase();
+        }
 
-        // Check if the data has an id (existing record)
-        if (data.id) {
+        data.estimasi = this.toNumeric(data.estimasi);
+        data.nominal = this.toNumeric(data.nominal);
+
+        const isNew = !data.id || String(data.id) === '0';
+        if (!isNew) {
           const existingData = await trx(this.tableName)
             .where('id', data.id)
             .first();
 
           if (existingData) {
-            const createdAt = {
-              created_at: existingData.created_at,
-              updated_at: existingData.updated_at,
-            };
-            Object.assign(data, createdAt);
-
+            data.created_at = existingData.created_at;
+            data.updated_at = existingData.updated_at;
             if (this.utilsService.hasChanges(data, existingData)) {
               data.updated_at = time;
-              isDataChanged = true;
               data.aksi = 'UPDATE';
+            } else {
+              data.aksi = 'NO UPDATE';
             }
+            existingRows.push(data);
+          } else {
+            // id dikirim tapi barisnya sudah tidak ada (mis. dihapus user lain)
+            // -> perlakukan sebagai baris baru daripada menelan datanya diam2.
+            data.created_at = time;
+            data.updated_at = time;
+            data.aksi = 'CREATE';
+            newRows.push(data);
           }
         } else {
-          // New record: Set timestamps
-          const newTimestamps = {
-            created_at: time,
-            updated_at: time,
-          };
-          Object.assign(data, newTimestamps);
-          isDataChanged = true;
+          data.created_at = time;
+          data.updated_at = time;
           data.aksi = 'CREATE';
+          newRows.push(data);
         }
 
-        if (!isDataChanged) {
-          data.aksi = 'NO UPDATE';
-        }
-
-        const { aksi, ...dataForInsert } = data;
-
-        mainDataToInsert.push(dataForInsert);
-        logData.push({
-          ...data,
-          created_at: time,
-        });
+        logData.push({ ...data, created_at: time });
       }
 
-      await trx.raw(tableTemp);
-      const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
+      // UPDATE baris existing (per baris).
+      let updatedData: any = null;
+      for (const row of existingRows) {
+        const res = await trx(this.tableName)
+          .where('id', row.id)
+          .update({
+            nobukti: row.nobukti,
+            panjar_id: row.panjar_id ?? id,
+            orderanmuatan_nobukti: row.orderanmuatan_nobukti,
+            estimasi: row.estimasi,
+            nominal: row.nominal,
+            keterangan: row.keterangan,
+            info: row.info ?? null,
+            modifiedby: row.modifiedby,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+          })
+          .returning('*');
+        if (res && res[0]) updatedData = res[0];
+      }
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
-
-      // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          panjar_id: trx.raw(`${tempTableName}.panjar_id`),
-          orderanmuatan_nobukti: trx.raw(
-            `${tempTableName}.orderanmuatan_nobukti`,
-          ),
-          estimasi: trx.raw(`${tempTableName}.estimasi`),
-          nominal: trx.raw(`${tempTableName}.nominal`),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
+      // Baris di DB (panjar_id = id) yang tak dikirim lagi -> log DELETE, hapus.
+      const incomingIds = existingRows.map((r) => r.id);
+      const getDeleted = await trx(this.tableName)
+        .where('panjar_id', id)
+        .modify((qb: any) => {
+          if (incomingIds.length) qb.whereNotIn('id', incomingIds);
         })
-        .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error(
-            'Error updated data biaya panjar muatan detail:',
-            error,
-          );
-          throw error;
-        });
+        .select('*');
 
-      // Handle insertion if no update occurs
-      const insertedDataQuery = await trx(tempTableName)
-        .select([
-          'nobukti',
-          'panjar_id',
-          'orderanmuatan_nobukti',
-          'estimasi',
-          'nominal',
-          'keterangan',
-          'info',
-          'modifiedby',
-          'created_at',
-          'updated_at',
-        ])
-        .where(`${tempTableName}.id`, '0');
-
-      const getDeleted = await trx(`${this.tableName} as u`)
-        .leftJoin(`${tempTableName}`, 'u.id', `${tempTableName}.id`)
-        .select(
-          'u.nobukti',
-          'u.panjar_id',
-          'u.orderanmuatan_nobukti',
-          'u.estimasi',
-          'u.nominal',
-          'u.keterangan',
-          'u.info',
-          'u.modifiedby',
-          'u.created_at',
-          'u.updated_at',
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where('u.panjar_id', id);
-
-      let pushToLog: any[] = [];
-
-      if (getDeleted.length > 0) {
-        pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-      }
-
-      const pushToLogWithAction = pushToLog.map((entry) => ({
+      const pushToLogWithAction = getDeleted.map((entry: any) => ({
         ...entry,
         aksi: 'DELETE',
       }));
-
       const finalData = logData.concat(pushToLogWithAction);
 
-      const deletedData = await trx(this.tableName)
-        .leftJoin(
-          `${tempTableName}`,
-          `${this.tableName}.id`,
-          `${tempTableName}.id`,
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where(`${this.tableName}.panjar_id`, id)
+      await trx(this.tableName)
+        .where('panjar_id', id)
+        .modify((qb: any) => {
+          if (incomingIds.length) qb.whereNotIn('id', incomingIds);
+        })
         .del();
 
-      if (insertedDataQuery.length > 0) {
+      // INSERT baris baru dgn uuid v7.
+      let insertedData: any = null;
+      if (newRows.length > 0) {
+        const toInsert = newRows.map((r: any) => ({
+          nobukti: r.nobukti,
+          panjar_id: id,
+          orderanmuatan_nobukti: r.orderanmuatan_nobukti,
+          estimasi: r.estimasi,
+          nominal: r.nominal,
+          keterangan: r.keterangan,
+          info: r.info ?? null,
+          modifiedby: r.modifiedby,
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+        }));
+
         insertedData = await trx(this.tableName)
-          .insert(await withUuidV7(trx, insertedDataQuery))
+          .insert(await withUuidV7(trx, toInsert))
           .returning('*')
           .then((result: any) => result[0])
           .catch((error: any) => {
-            console.error(
-              'Error inserting data biaya panjar muatan detail:',
-              error,
-            );
+            console.error('Error inserting data panjar muatan detail:', error);
             throw error;
           });
       }
@@ -207,7 +178,7 @@ export class PanjarmuatandetailService {
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
-          postingdari: 'ADD PANJAR MUATAN DETAIL',
+          postingdari: 'PANJAR HEADER',
           idtrans: id,
           nobuktitrans: id,
           aksi: 'EDIT',
@@ -232,63 +203,188 @@ export class PanjarmuatandetailService {
     }
   }
 
+  /**
+   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
+   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
+   * menunjuk ke view.
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    // panjar_id diurus terpisah (exact match) oleh pemanggil.
+    const excludeSearchKeys = ['panjar_id'];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).trim();
+
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          if (['created_at', 'updated_at'].includes(field)) {
+            query.orWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (field === 'estimasi' || field === 'nominal') {
+            // Bertipe numeric: wajib cast ke text dulu. `ilike` langsung ke
+            // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
+            query.orWhereRaw('p.??::text like ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    for (const [key, value] of Object.entries(filters || {})) {
+      if (excludeSearchKeys.includes(key)) continue;
+      if (value === null || value === undefined || value === '') continue;
+
+      const sanitizedValue = String(value);
+      switch (key) {
+        case 'created_at':
+        case 'updated_at':
+          qb.andWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+            key,
+            `%${sanitizedValue}%`,
+          ]);
+          break;
+        case 'estimasi':
+        case 'nominal':
+          qb.andWhereRaw('p.??::text like ?', [key, `%${sanitizedValue}%`]);
+          break;
+        default:
+          qb.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    }
+  }
+
+  /**
+   * `id` = panjar_id (header yang sedang dipilih). Selalu jadi predikat
+   * eksplisit — lihat catatan di create-vpanjar-pg.sql kenapa tidak dititipkan
+   * ke session context.
+   */
   async findAll(
     id: string,
     trx: any,
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    { search, filters, pagination, sort, useCustomOffset }: FindAllParams,
   ) {
+    const { page = 1, limit = 0, customOffset } = pagination ?? {};
+
+    if (!id || String(id) === '0') {
+      // Bentuk balikan tetap lengkap (bukan cuma `{ data: [] }`) supaya grid
+      // yang membaca pagination.totalItems saat header belum dipilih tidak
+      // menemukan undefined lalu menghitung totalPages = NaN.
+      return {
+        status: false,
+        message: 'No data found',
+        data: [],
+        type: 'local',
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
+      };
+    }
+
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const safeFilters = filters || {};
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      const query = trx(`${this.tableName} as u`)
+      // COUNT dari view dengan filter yang SAMA persis dengan query data —
+      // memakai COUNT tanpa filter membuat totalPages dan windowed pagination
+      // ikut salah begitu ada filter kolom / search aktif.
+      const countResult = await trx(`${this.viewName} as p`)
+        .count('p.id as total')
+        .where('p.panjar_id', id)
+        .modify((qb: any) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      const query = trx(`${this.viewName} as p`)
         .select(
-          'u.id',
-          'u.nobukti',
-          'u.panjar_id',
-          'u.orderanmuatan_nobukti',
-          'u.estimasi',
-          'u.nominal',
-          'u.keterangan',
-          'u.modifiedby',
-          'u.created_at',
-          'u.updated_at',
+          'p.id',
+          'p.panjar_id',
+          'p.nobukti',
+          'p.orderanmuatan_nobukti',
+          'p.estimasi',
+          'p.nominal',
+          'p.keterangan',
+          'p.info',
+          'p.modifiedby',
+          trx.raw(
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
         )
-        .where('panjar_id', id);
+        .where('p.panjar_id', id);
 
-      const excludeSearchKeys = [''];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      query.modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-          });
-        });
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda (atau melewatkan baris) saat
+      // grid menggeser window. Seluruh detail satu bukti di-insert dalam satu
+      // batch sehingga created_at-nya identik — id (PK, unik) jadi tiebreaker
+      // terakhir supaya urutan dijamin total dan stabil antar request.
+      query.orderBy(`p.${sortBy}`, sortDirection);
+      if (sortBy !== 'created_at') {
+        query.orderBy('p.created_at', 'asc');
+      }
+      if (sortBy !== 'id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-          }
-        }
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (Number(page) - 1) * Number(limit);
+
+      // limit 0/undefined = ambil semua. Dipakai pemanggil non-grid yang butuh
+      // seluruh detail satu panjar sekaligus (FormPanjarHeader, exportToExcel).
+      if (Number(limit) > 0) {
+        query.offset(offset).limit(Number(limit));
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
+      const data = await query;
 
-      const result = await query;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
+
+      if (!data.length) {
+        this.logger.warn('No Data found');
+      }
 
       return {
-        data: result,
+        status: data.length > 0,
+        message:
+          data.length > 0
+            ? 'Panjar Muatan Detail data fetched successfully'
+            : 'No data found',
+        data,
+        type: responseType,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error('Error to findAll panjar muatan detail in service', error);
@@ -313,31 +409,41 @@ export class PanjarmuatandetailService {
           nobuktitrans: id,
           aksi: 'DELETE',
           datajson: JSON.stringify(deletedData),
-          modifiedby: modifiedby.toUpperCase(),
+          modifiedby: String(modifiedby ?? '').toUpperCase(),
         },
         trx,
       );
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
-      console.log(
-        'Error deleting panjar muatan detail rincian biaya in service:',
-        error,
-      );
+      console.log('Error deleting panjar muatan detail in service:', error);
       if (error instanceof NotFoundException) {
         throw error;
       }
       throw new InternalServerErrorException(
-        'Failed to delete panjar muatan detail rincian biaya in service',
+        'Failed to delete panjar muatan detail in service',
       );
     }
   }
 
-  findOne(id: string) {
-    return `This action returns a #${id} panjarmuatandetail`;
-  }
+  async findOne(id: string, trx: any) {
+    try {
+      const result = await trx(`${this.viewName} as p`)
+        .select('p.*')
+        .where('p.id', id)
+        .first();
 
-  update(id: string, updatePanjarmuatandetailDto: UpdatePanjarmuatandetailDto) {
-    return `This action updates a #${id} panjarmuatandetail`;
+      if (!result) {
+        throw new NotFoundException('Data not found');
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error fetching panjar muatan detail by id:', error);
+      if (error instanceof NotFoundException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to fetch data by id');
+    }
   }
 }

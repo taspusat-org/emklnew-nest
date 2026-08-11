@@ -12,8 +12,6 @@ import { FindAllParams } from 'src/common/interfaces/all.interface';
 
 @Injectable()
 export class ShippingInstructionDetailRincianService {
-  // tableName untuk TULIS, viewName untuk BACA (pola alatbayar). View sudah
-  // memuat nocontainer, noseal, shipper_nama dari orderanmuatan + shipper.
   private readonly tableName: string = 'shippinginstructiondetailrincian';
   private readonly viewName: string = 'vshippinginstructiondetailrincian';
 
@@ -22,11 +20,6 @@ export class ShippingInstructionDetailRincianService {
     private readonly logTrailService: LogtrailService,
   ) {}
 
-  /**
-   * Pola temp table dipertahankan seperti versi asli; hanya bagian sintaks SQL
-   * Server yang diganti padanan Postgres. Penjelasan lengkap tiap penggantian
-   * ada di ShippingInstructionDetailService.create.
-   */
   async create(
     detailsrincian: any,
     shippinginstructiondetail_id: any,
@@ -54,16 +47,12 @@ export class ShippingInstructionDetailRincianService {
       for (const data of detailsrincian) {
         let isDataChanged = false;
 
-        // Uppercase hanya kolom teks manusiawi. id (PK), shippinginstructiondetail_id
-        // (FK), dan *_nobukti adalah UUID/kunci bertipe text (case-sensitive);
-        // blanket uppercase meng-corrupt id sehingga lookup-by-id gagal.
         ['comodity', 'keterangan'].forEach((field) => {
           if (typeof data[field] === 'string') {
             data[field] = data[field].toUpperCase();
           }
         });
 
-        // Baris dianggap LAMA hanya bila id-nya benar-benar ada di DB.
         let existingData: any = null;
         if (
           data.id !== null &&
@@ -101,10 +90,6 @@ export class ShippingInstructionDetailRincianService {
           data.aksi = 'NO UPDATE';
         }
 
-        // Hanya kolom milik tabel yang ikut ke temp. Payload grid membawa field
-        // tampilan (idOrderan, nocontainer, noseal, shipper_id, shipper_nama,
-        // isNew) yang tidak punya kolom — jsonb_populate_recordset memang
-        // mengabaikannya, tapi dibuang di sini supaya niatnya eksplisit.
         mainDataToInsert.push({
           id: data.id,
           nobukti: data.nobukti,
@@ -246,9 +231,6 @@ export class ShippingInstructionDetailRincianService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      // Baca dari VIEW: nocontainer/noseal (orderanmuatan) dan shipper_nama
-      // (shipper) sudah ikut di sana, jadi dua LEFT JOIN tidak dirakit ulang
-      // tiap kali baris detail berganti.
       const query = trx(`${this.viewName} as p`)
         .select(
           'p.id',
@@ -268,8 +250,6 @@ export class ShippingInstructionDetailRincianService {
         (k) => filters![k],
       );
 
-      // ilike + tanpa escape '[' ala MSSQL — lihat catatan yang sama di
-      // ShippingInstructionService.applyFilters.
       if (search) {
         const sanitized = String(search).trim();
 
@@ -316,8 +296,6 @@ export class ShippingInstructionDetailRincianService {
         }
       }
 
-      // SENGAJA tanpa limit/offset — alasan sama dengan detail: rincian ikut
-      // terkirim saat simpan, dan yang tidak ada di payload akan dihapus.
       const result = await query;
 
       return {

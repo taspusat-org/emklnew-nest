@@ -12,8 +12,8 @@ import {
   HttpStatus,
   UsePipes,
   Query,
-  NotFoundException,
   InternalServerErrorException,
+  NotFoundException,
   Res,
 } from '@nestjs/common';
 import { GroupbiayaextraService } from './groupbiayaextra.service';
@@ -38,11 +38,23 @@ import { dbMssql } from 'src/common/utils/db';
 import { any } from 'zod';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportGroupbiayaextraDto,
+  ReportGroupbiayaextraSchema,
+} from './dto/report-groupbiayaextra.dto';
+import {
+  ExportGroupbiayaextraDto,
+  ExportGroupbiayaextraSchema,
+} from './dto/export-groupbiayaextra.dto';
 
 @Controller('groupbiayaextra')
 export class GroupbiayaextraController {
   constructor(
     private readonly GroupbiayaextraService: GroupbiayaextraService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -171,6 +183,9 @@ export class GroupbiayaextraController {
         req.user?.user?.username,
       );
 
+      // Service memulangkan { status: 404 } (bukan melempar) saat datanya tidak
+      // ada. Tanpa dikonversi di sini, response-nya 200 dengan body error dan
+      // frontend menganggap delete berhasil.
       if (result.status === 404) {
         throw new NotFoundException(result.message);
       }
@@ -181,7 +196,9 @@ export class GroupbiayaextraController {
       await trx.rollback();
       console.error('Error deleting Group Biaya Extra in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      // HttpException mencakup NotFoundException di atas, jadi 404 diteruskan
+      // apa adanya dan tidak tertelan jadi 500.
+      if (error instanceof HttpException) {
         throw error;
       }
 
@@ -190,33 +207,149 @@ export class GroupbiayaextraController {
       );
     }
   }
-  @Get('/export')
-  async exportToExcel(@Query() params: any, @Res() res: Response) {
-    try {
-      const { data } = await this.findAll(params);
 
-      if (!Array.isArray(data)) {
-        throw new Error('Data is not an array or is undefined.');
+  /**
+   * Pra-cek sebelum EDIT (ambil lock) / DELETE (apakah masih dipakai
+   * transaksi). Penolakan DELETE tetap ditegakkan lagi di service, endpoint ini
+   * hanya supaya frontend bisa memberi tahu user sebelum dialog konfirmasi.
+   */
+  @UseGuards(AuthGuard)
+  @Post('check-validation')
+  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
+    const { aksi, value } = body;
+    const trx = await dbMssql.transaction();
+
+    try {
+      const result = await this.GroupbiayaextraService.checkValidasi(
+        aksi,
+        value,
+        req.user?.user?.username,
+        trx,
+      );
+
+      await trx.commit();
+      return result;
+    } catch (error) {
+      await trx.rollback();
+      console.error('Error checking validation Group Biaya Extra:', error);
+
+      if (error instanceof HttpException) {
+        throw error;
       }
 
-      const tempFilePath =
-        await this.GroupbiayaextraService.exportToExcel(data);
-
-      const fileStream = fs.createReadStream(tempFilePath);
-
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="groupbiayaextra.xlsx"',
-      );
-
-      fileStream.pipe(res);
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      res.status(500).send('Failed to export file');
+      throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /groupbiayaextra/report
+   *
+   * Cetak laporan di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Data laporan diambil lewat findAll() milik service ini dengan limit 0,
+   * jadi filter kolom / search global / sort yang dikirim frontend berperilaku
+   * persis sama seperti yang tampil di grid — hanya saja tanpa paging.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportGroupbiayaextraSchema))
+    body: ReportGroupbiayaextraDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
+        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
+        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
+        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
+        // karena hanya memakai API baca (from/raw/count).
+        const result = await this.GroupbiayaextraService.findAll(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
+            pagination: { page: 1, limit: 0 },
+            sort: {
+              sortBy: sortBy || 'keterangan',
+              sortDirection: sortDirection || 'asc',
+            },
+            isLookUp: false,
+          },
+          dbMssql,
+        );
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'Laporan Group Biaya Extra',
+          usercetak: username,
+          tglcetak,
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        }));
+      },
+    });
+  }
+
+  /**
+   * POST /groupbiayaextra/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportGroupbiayaextraSchema))
+    body: ExportGroupbiayaextraDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'keterangan',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_groupbiayaextra_${stamp}.xlsx`,
+      countRows: () =>
+        this.GroupbiayaextraService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.GroupbiayaextraService.buildExportQuery(
+          queryParams,
+          dbMssql,
+        ).stream(),
+      sheet: this.GroupbiayaextraService.exportSheet,
+    });
   }
 }

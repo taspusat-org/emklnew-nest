@@ -14,6 +14,8 @@
   UsePipes,
   Query,
   Res,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { MenuService } from './menu.service';
 import { CreateMenuDto, CreateMenuSchema } from './dto/create-menu.dto';
@@ -30,12 +32,15 @@ import { Response } from 'express';
 import * as fs from 'fs';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { UtilsService } from 'src/utils/utils.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import { ExportMenuDto, ExportMenuSchema } from './dto/export-menu.dto';
 
 @Controller('menu')
 export class MenuController {
   constructor(
     private readonly menuService: MenuService,
     private readonly utilsService: UtilsService,
+    private readonly exportJobService: ExportJobService,
   ) {}
   @Get('sidebar')
   menuSidebar(@Query('userId') userId: number) {
@@ -65,7 +70,7 @@ export class MenuController {
   @UseGuards(AuthGuard)
   @Post()
   async create(
-    @Body(new ZodValidationPipe(CreateMenuSchema))
+    @Body(new ZodValidationPipe(CreateMenuSchema), KeyboardOnlyValidationPipe)
     data: CreateMenuDto,
     @Req() req,
   ) {
@@ -79,7 +84,19 @@ export class MenuController {
       return result;
     } catch (error) {
       await trx.rollback();
-      throw new Error(`Error creating menu: ${error.message}`);
+      console.error('Error while creating menu in controller', error);
+
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: 'Failed to create menu',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -121,6 +138,47 @@ export class MenuController {
       console.error('Error fetching all menus:', error);
       throw new InternalServerErrorException('Failed to fetch menus');
     }
+  }
+
+  /**
+   * POST /menu/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportMenuSchema)) body: ExportMenuDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'title',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_menu_${stamp}.xlsx`,
+      countRows: () => this.menuService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.menuService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.menuService.exportSheet,
+    });
   }
 
   @Get('/export')
@@ -267,7 +325,16 @@ export class MenuController {
     } catch (error) {
       await trx.rollback();
       console.error('Error updating menu in controller:', error);
-      throw new Error('Failed to update menu');
+
+      if (error instanceof HttpException) throw error;
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: 'Failed to update menu',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 

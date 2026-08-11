@@ -3,14 +3,19 @@ import {
   Injectable,
   HttpException,
   HttpStatus,
+  Logger,
   NotFoundException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Column, Workbook } from 'exceljs';
-import { dbMssql } from 'src/common/utils/db';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import {
+  calculateItemIndex,
+  getFetchedPages,
+  UtilsService,
+  uuidV7,
+} from 'src/utils/utils.service';
 import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -19,82 +24,304 @@ import { LocksService } from '../locks/locks.service';
 
 @Injectable()
 export class TypeAkuntansiService {
+  private readonly logger = new Logger(TypeAkuntansiService.name);
   private readonly tableName: string = 'typeakuntansi';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
-    private readonly utilService: UtilsService,
     private readonly globalService: GlobalService,
     private readonly locksService: LocksService,
     private readonly logTrailService: LogtrailService,
     private readonly utilsService: UtilsService,
   ) {}
 
+  /**
+   * Tabel `typeakuntansi` tidak punya view turunan seperti `valatbayar`, jadi
+   * kolom teks status (p.text) dan nama akuntansi (ak.nama) diambil lewat LEFT
+   * JOIN. Query dasar ini dipakai findAll, COUNT, dan perhitungan posisi baris
+   * supaya ketiganya melihat dataset yang PERSIS sama.
+   */
+  private baseQuery(trx: any) {
+    return trx(`${this.tableName} as u`)
+      .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
+      .leftJoin('akuntansi as ak', 'u.akuntansi_id', 'ak.id');
+  }
+
+  private selectColumns(trx: any) {
+    return [
+      'u.id as id',
+      'u.nama',
+      'u.order',
+      'u.keterangan',
+      'u.akuntansi_id',
+      'u.statusaktif',
+      'u.modifiedby',
+      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      'p.memo',
+      'p.text as statusaktif_text',
+      'ak.nama as akuntansi_nama',
+    ];
+  }
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    // statusaktif dikirim sebagai id parameter (varchar UUID) oleh FilterOptions,
+    // jadi percuma ikut dicari pada search global yang berisi teks.
+    const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
+    // `order` bertipe integer: Postgres tidak punya operator `integer ILIKE
+    // text`, jadi harus di-CAST dulu sebelum dicocokkan sebagai teks.
+    const numericFields = ['order'];
+
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (numericFields.includes(field)) {
+            query.orWhereRaw('CAST(u.?? AS TEXT) ILIKE ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (field === 'akuntansi') {
+            query.orWhere('ak.nama', 'ilike', `%${sanitizedValue}%`);
+          } else {
+            query.orWhere(`u.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (numericFields.includes(key)) {
+        qb.andWhereRaw('CAST(u.?? AS TEXT) ILIKE ?', [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'statusaktif_text' || key === 'memo') {
+        qb.andWhere('p.text', '=', sanitizedValue);
+      } else if (key === 'akuntansi') {
+        qb.andWhere('ak.nama', 'ilike', `%${sanitizedValue}%`);
+      } else {
+        qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  /**
+   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
+   * bantu dari frontend (sortBy, filters, statusaktif_text, akuntansi_nama,
+   * method, dll) tidak ikut ditulis -> "Invalid column name". Uppercase HANYA
+   * nama & keterangan: id, akuntansi_id, dan statusaktif adalah uuid v7 HURUF
+   * KECIL — meng-uppercase-nya menulis id yang tidak ada sehingga relasi
+   * akuntansi/status tampil kosong dan perubahan terlihat "tidak tersimpan".
+   */
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.id,
+      nama: dto.nama ? dto.nama.toUpperCase() : null,
+      order: dto.order ?? null,
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      akuntansi_id: dto.akuntansi_id ?? null,
+      statusaktif: dto.statusaktif,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  /**
+   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
+   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
+   * TEKS parameter (p.text) dan kolom akuntansi memakai ak.nama, bukan id
+   * UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
+   */
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { orderCol: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+      case 'statusaktif_text':
+      case 'text':
+        return { orderCol: 'p.text', dir };
+      case 'akuntansi':
+      case 'akuntansi_nama':
+      case 'akuntansi_text':
+        return { orderCol: 'ak.nama', dir };
+      default:
+        return { orderCol: `u.${sortBy}`, dir };
+    }
+  }
+
+  /**
+   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
+   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
+   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
+   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
+   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    const existingData = await this.baseQuery(trx)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+
+    // Baris tidak lolos filter aktif (mis. habis diedit jadi tidak cocok) ->
+    // jatuhkan fokus ke baris pertama daripada menghitung posisi yang salah.
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await this.baseQuery(trx)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
+   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
+   * SELURUH tabel lalu findIndex seperti implementasi lama.
+   */
+  private async buildPagedResult(
+    trx: any,
+    posisi: number,
+    totalItems: number,
+    limit: number,
+    sortBy: string,
+    sortDirection: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+  ) {
+    const pageNumber = Math.ceil(posisi / limit);
+    const totalPages = Math.ceil(totalItems / limit);
+    const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+    const startPage = fetchedPages[0];
+    const endPage = fetchedPages[fetchedPages.length - 1];
+    const customOffset = (startPage - 1) * limit;
+    const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+    const result = await this.findAll(
+      {
+        search: search || '',
+        filters: filters || {},
+        pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+        sort: { sortBy, sortDirection: sortDirection as 'asc' | 'desc' },
+        isLookUp: false,
+        useCustomOffset: true,
+      },
+      trx,
+    );
+
+    const allFetchedData = result?.data ?? [];
+    const pagedData: Record<number, any[]> = {};
+    let dataIndex = 0;
+    fetchedPages.forEach((pageNum) => {
+      pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+      dataIndex += limit;
+    });
+
+    const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+    await this.redisService.set(
+      `${this.tableName}-page-${pageNumber}`,
+      JSON.stringify(allFetchedData),
+    );
+
+    return {
+      itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
+      pageNumber,
+      fetchedPages,
+      pagedData,
+    };
+  }
+
   async create(createData: any, trx: any) {
     try {
-      const {
-        sortBy,
-        sortDirection,
+      const { sortBy, sortDirection, filters, search, limit } = createData;
+
+      const sortColumn = sortBy || 'nama';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
+
+      const uuid = await uuidV7(trx);
+      await trx(this.tableName).insert(this.buildInsertData(createData, uuid));
+
+      // id berupa varchar UUID (bukan auto-increment), jadi orderBy('id','desc')
+      // TIDAK mengembalikan baris yang baru diinsert. Ambil langsung by uuid
+      // yang barusan digenerate supaya fokus baris setelah simpan tepat.
+      const newItem = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', uuid)
+        .first();
+
+      // totalItems SELALU dihitung dengan filter yang sama seperti grid.
+      const totalRecords = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
+
+      const posisi = await this.resolvePosition(
+        trx,
+        uuid,
         filters,
         search,
-        page,
-        limit,
-        method,
-        statusaktif_text,
-        akuntansi_nama,
-        id,
-        ...insertData
-      } = createData;
-      insertData.updated_at = this.utilsService.getTime();
-      insertData.created_at = this.utilsService.getTime();
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['nama', 'keterangan'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
-
-      const insertedData = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
-
-      const newItem = insertedData[0];
-
-      // Ambil data utk dimasukkan ke temp table
-      // ==== NEW ==== kalau kamu sudah menambahkan flag forTemp di findAll,
-      // set forTemp: true agar created_at/updated_at tidak di-FORMAT dan kolom ekstra tidak dipilih
-      const { data, pagination } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-          // forTemp: true, // <-- aktifkan kalau kamu sudah implement opsi ini di findAll
-        },
-        trx,
+        sortColumn,
+        sortDir,
       );
-      let dataIndex = data.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
 
-      // Optionally, you can find the page number or other info if needed
-      const pageNumber = pagination?.currentPage;
-      // simpan cache & log seperti sebelumnya
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
       );
 
       await this.logTrailService.create(
         {
-          namatable: this.tableName,
+          namatabel: this.tableName,
           postingdari: 'ADD TYPE AKUNTANSI',
           idtrans: newItem.id,
           nobuktitrans: newItem.id,
@@ -105,197 +332,103 @@ export class TypeAkuntansiService {
         trx,
       );
 
-      return { newItem, pageNumber, dataIndex };
+      return { newItem, ...paged };
     } catch (error) {
       throw new Error(`Error creating type akuntansi: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, customOffset } = pagination ?? {};
+      let limit = pagination?.limit ?? 0;
+
+      const sortBy = sort?.sortBy || 'nama';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const safeFilters = filters || {};
+
+      // Count HARUS memakai filter & search yang sama dengan query data —
+      // memakai COUNT tanpa filter (implementasi lama) membuat totalPages dan
+      // posisi baris ikut salah begitu ada filter kolom / search aktif.
+      const countResult = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
       if (isLookUp) {
-        const totalData = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const resultTotalData = totalData?.total || 0;
-
-        if (Number(resultTotalData) > 500) {
+        // Hasil lookup > 500 baris: jangan tarik semuanya, biarkan komponen
+        // LookUp beralih ke pencarian server-side.
+        if (total > 500) {
           return {
-            data: {
-              type: 'json',
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
             },
           };
-        } else {
-          limit = 0;
         }
+        limit = 0; // <= 500: kirim seluruh baris, difilter di client.
       }
 
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id as id',
-          'u.nama',
-          'u.order',
-          'u.keterangan',
-          'u.akuntansi_id',
-          'u.statusaktif',
-          'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text as statusaktif_text',
-          'ak.nama as akuntansi_nama',
-        ])
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-        .leftJoin('akuntansi as ak', 'u.akuntansi_id', 'ak.id');
+      const query = this.baseQuery(trx).select(this.selectColumns(trx));
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+      query.orderBy(orderCol, sortDirection);
 
-      if (search) {
-        const sanitized = String(search).trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'akuntansi') {
-              qb.orWhere(`ak.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else {
-              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value);
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'statusaktif_text' || key === 'memo') {
-              query.andWhere(`p.text`, '=', sanitizedValue);
-            } else if (key === 'akuntansi') {
-              query.andWhere('ak.nama', 'ilike', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      // const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-      const totalPages = Math.ceil(total / limit);
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort.sortBy === 'akuntansi') {
-          query.orderBy('ak.nama', sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
-
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
           currentPage: Number(page),
-          totalPages: totalPages,
+          totalPages,
           totalItems: total,
-          itemsPerPage: limit > 0 ? limit : total,
+          itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error to findAll Type Akuntansi', error);
-      throw new Error(error);
+      this.logger.error('Error fetching type akuntansi data', error?.stack);
+      throw new InternalServerErrorException(
+        'Failed to fetch type akuntansi data',
+      );
     }
   }
 
-  // async findAllByIds(ids: { id: number }[]) {
-  //   try {
-  //     const idList = ids.map((item) => item.id)
-
-  //     const tempData = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-
-  //     // Membuat temporary table
-  //     const createTempTableQuery = `CREATE TABLE ${tempData} (id INT);`;
-  //     await dbMssql.raw(createTempTableQuery);
-
-  //     // Memasukkan data ID ke dalam temporary table
-  //     const insertTempTableQuery = `
-  //       INSERT INTO ${tempData} (id)
-  //       VALUES ${idList.map((id) => `(${id})`).join(', ')};
-  //     `;
-  //     await dbMssql.raw(insertTempTableQuery);
-
-  //     // Query utama dengan JOIN ke temporary table
-  //     const query = dbMssql(`${this.tableName} as u`)
-  //       .select([
-  //         'u.id as id',
-  //         'u.nama',
-  //         'u.order',
-  //         'u.keterangan',
-  //         'u.akuntansi_id',
-  //         'u.statusaktif',
-  //         'u.modifiedby',
-  //         dbMssql.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-  //         dbMssql.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-  //         'p.memo',
-  //         'p.text',
-  //         'q.nama'
-  //       ])
-  //       .join('parameter as p', 'u.statusaktif', 'p.id')
-  //       // .leftJoin('akuntansi as q', 'u.akuntansi_id', 'q.id');
-  //       .join(dbMssql.raw(`${tempData} as temp`), 'u.id', 'temp.id') // Menggunakan JOIN antar tabel user dan temporary table
-  //       .orderBy('u.nama', 'ASC');
-
-  //     const data = await query;
-
-  //     const dropTempTableQuery = `DROP TABLE ${tempData};`;
-  //     await dbMssql.raw(dropTempTableQuery);
-
-  //     return data;
-  //   } catch (error) {
-  //     console.error('Error fetching data:', error);
-  //     throw new Error('Failed to fetch data');
-  //   }
-  // }
-
-  async update(dataId: number, data: any, trx: any) {
+  async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName)
-        .where('id', dataId)
-        .first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        // throw new Error('Data Not Found!');
+      if (!existedData) {
         throw new HttpException(
           {
             statusCode: HttpStatus.BAD_REQUEST,
@@ -305,89 +438,73 @@ export class TypeAkuntansiService {
         );
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statusaktif_text,
-        akuntansi_nama,
-        id,
-        method,
-        ...updateData
-      } = data;
+      const { sortBy, sortDirection, filters, search, limit } = data;
 
-      Object.keys(updateData).forEach((key) => {
-        if (typeof updateData[key] === 'string') {
-          updateData[key] = updateData[key].toUpperCase();
-        }
-      });
+      const sortColumn = sortBy || 'nama';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
-      const hasChanges = this.utilService.hasChanges(updateData, existingData);
+      const insertData = this.buildInsertData(data);
+      // id = kunci WHERE (PK) yang datang dari path param, bukan kolom yang
+      // di-SET. created_at juga jangan ditimpa saat edit (buildInsertData
+      // mengisinya dengan now() bila kosong).
+      delete insertData.id;
+      delete insertData.created_at;
+
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
-        updateData.updated_at = this.utilService.getTime();
-        await trx(this.tableName).where('id', id).update(updateData);
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const { data: filteredData, pagination } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
+      // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
+      // walau hasil edit tak lagi cocok dengan filter aktif.
+      const updatedItem = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', id)
+        .first();
+
+      const totalRecords = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
+
+      const posisi = await this.resolvePosition(
         trx,
+        id,
+        filters,
+        search,
+        sortColumn,
+        sortDir,
       );
 
-      let dataIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(id),
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      //
-
-      if (dataIndex === -1) {
-        throw new Error('Updated item not found in all items');
-      }
-
-      const itemsPerPage = limit || 30;
-      const pageNumber = Math.floor(dataIndex / itemsPerPage) + 1;
-
-      // ambil data hingga halaman yg mencakup item yg baru diupdate
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
       );
 
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT TYPE AKUNTANSI',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
-      return {
-        newItems: {
-          id,
-          ...data,
-        },
-        pageNumber,
-        dataIndex,
-      };
+      return { updatedItem, ...paged };
     } catch (error) {
       if (error instanceof HttpException) {
         throw error; // If it's already a HttpException, rethrow it
@@ -400,7 +517,7 @@ export class TypeAkuntansiService {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilService.lockAndDestroy(
+      const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
         'id',
@@ -507,16 +624,6 @@ export class TypeAkuntansiService {
         vertical: 'middle',
       };
 
-      // if (index === 2) {
-      //   cell.alignment = { horizontal: 'right', vertical: 'middle' };
-      //   cell.numFmt = '0'; // angka polos tanpa ribuan / desimal
-      // } else {
-      //   cell.alignment = {
-      //     horizontal: index === 0 ? 'right' : 'left',
-      //     vertical: 'middle',
-      //   };
-      // }
-
       cell.border = {
         top: { style: 'thin' },
         left: { style: 'thin' },
@@ -541,7 +648,7 @@ export class TypeAkuntansiService {
 
         if (colIndex === 2) {
           cell.value = Number(value);
-          cell.numFmt = '0'; // format angka dengan ribuan
+          cell.numFmt = '0'; // angka polos tanpa ribuan / desimal
           cell.alignment = {
             horizontal: 'right',
             vertical: 'middle',
@@ -554,12 +661,7 @@ export class TypeAkuntansiService {
           };
         }
 
-        // cell.value = value ?? '';
         cell.font = { name: 'Tahoma', size: 10 };
-        // cell.alignment = {
-        //   horizontal: colIndex === 0 ? 'right' : 'left',
-        //   vertical: 'middle',
-        // };
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },

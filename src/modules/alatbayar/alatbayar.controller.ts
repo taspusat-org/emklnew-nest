@@ -36,9 +36,17 @@ import { AuthGuard } from '../auth/auth.guard';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ExportAlatbayarDto,
+  ExportAlatbayarSchema,
+} from './dto/export-alatbayar.dto';
 @Controller('alatbayar')
 export class AlatbayarController {
-  constructor(private readonly alatbayarService: AlatbayarService) {}
+  constructor(
+    private readonly alatbayarService: AlatbayarService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -100,18 +108,11 @@ export class AlatbayarController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-
-    try {
-      const result = await this.alatbayarService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
-    }
+    // Endpoint baca: TANPA transaksi. Transaksi menahan satu koneksi pool
+    // selama seluruh request; dengan pool max 30 dan grid yang menembak banyak
+    // lookup sekaligus, pool habis dan semua request lain kena
+    // 'Timeout acquiring a connection'. dbMssql melepas koneksi per query.
+    return this.alatbayarService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
@@ -169,6 +170,7 @@ export class AlatbayarController {
   }
   @UseGuards(AuthGuard)
   @Delete(':id')
+
   //@ALAT-BAYAR
   async delete(@Param('id') id: string, @Req() req) {
     const trx = await dbMssql.transaction();
@@ -195,6 +197,39 @@ export class AlatbayarController {
 
       throw new InternalServerErrorException('Failed to delete alat bayar');
     }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportAlatbayarSchema))
+    body: ExportAlatbayarDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_alatbayar_${stamp}.xlsx`,
+      countRows: () =>
+        this.alatbayarService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.alatbayarService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.alatbayarService.exportSheet,
+    });
   }
 
   @Get('/export')

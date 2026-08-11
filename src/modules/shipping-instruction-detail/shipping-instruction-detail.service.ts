@@ -14,9 +14,6 @@ import { dbMssql } from 'src/common/utils/db';
 
 @Injectable()
 export class ShippingInstructionDetailService {
-  // tableName untuk TULIS, viewName untuk BACA (pola alatbayar). View sudah
-  // memuat statuspisahbl_nama/_memo, emkllain_nama, containerpelayaran_nama,
-  // tujuankapal_nama, daftarbl_nama.
   private readonly tableName: string = 'shippinginstructiondetail';
   private readonly viewName: string = 'vshippinginstructiondetail';
 
@@ -27,31 +24,6 @@ export class ShippingInstructionDetailService {
     private readonly shippingInstructionDetailRincianService: ShippingInstructionDetailRincianService,
   ) {}
 
-  /**
-   * Pola temp table dipertahankan seperti versi asli — hanya bagian yang memang
-   * sintaks SQL Server yang diganti padanan Postgres:
-   *
-   *  1. OPENJSON(?) + jsonExtract  ->  jsonb_populate_recordset(null::<tabel>, ?::jsonb)
-   *     Dipilih ketimbang `value ->> 'kolom'` karena ->> SELALU memulangkan text,
-   *     sedangkan temp table mewarisi tipe kolom tabel asli — text masuk ke kolom
-   *     non-text ditolak PG. jsonb_populate_recordset memetakan JSON ke ROW TYPE
-   *     tabel, jadi tipe tiap kolom otomatis benar dan key yang tidak ada -> NULL
-   *     (persis semantik OPENJSON WITH (...)).
-   *
-   *  2. .join(temp).update(...)  ->  raw `UPDATE ... FROM temp WHERE ...`
-   *     WAJIB raw: knex-pg MEMBUANG join pada .update() tanpa error —
-   *     `update "sid" set "nobukti" = tmp.nobukti` saja, tanpa FROM/WHERE.
-   *
-   *  3. .leftJoin(temp).whereNull(temp.id).del()  ->  whereNotExists(...)
-   *     WAJIB diganti: knex-pg menerjemahkannya jadi `delete ... using "temp"
-   *     where "temp"."id" is null and "sid"."id" = "temp"."id"`. USING itu inner
-   *     join, jadi `temp.id is null` tidak pernah benar — hasilnya nol baris
-   *     terhapus, diam-diam.
-   *
-   *  4. Nama temp TANPA prefiks '#'. createTempTable() menormalkan '##temp_x'
-   *     menjadi 'temp_x' saat CREATE, jadi caller yang tetap memakai '##temp_x'
-   *     akan menunjuk tabel yang tidak ada.
-   */
   async create(details: any, id: any, trx: any) {
     try {
       const allRincian: any[] = []; // Ambil semua data rincian di luar mapping utama
@@ -77,14 +49,22 @@ export class ShippingInstructionDetailService {
         .where('kelompok', 'SHIPPING INSTRUCTION DETAIL')
         .first();
 
+      const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
+      const getStatusDataPendukung = await trx('parameter')
+        .select(
+          'id',
+          trx.raw(`JSON_VALUE(${memoExpr}, '$."NILAI TIDAK"') AS nilai_tidak`),
+        )
+        .where('grp', 'DATA PENDUKUNG')
+        .where('subgrp', 'ORDERANMUATAN')
+        .where('text', 'PISAH BL')
+        .first();
+
+      const defaultStatusPisahBl = getStatusDataPendukung?.nilai_tidak ?? null;
+
       for (const data of details) {
         let isDataChanged = false;
 
-        // Uppercase hanya kolom teks manusiawi. id (PK), orderan_id/
-        // shippinginstruction_id/emkl_id/containerpelayaran_id/tujuankapal_id/
-        // daftarbl_id (FK), status*, dan *_nobukti adalah UUID/kunci bertipe text
-        // (case-sensitive); blanket uppercase meng-corrupt id/FK (mis. lookup
-        // statuspendukung by orderan_id) sehingga lookup gagal.
         [
           'asalpelabuhan',
           'keterangan',
@@ -101,16 +81,7 @@ export class ShippingInstructionDetailService {
         const { detailsrincian, orderan_id, ...detailsWithoutRincian } = data;
         detailsWithoutRincian.statusformat = getFormatShippingDetail.id;
 
-        // Cek apakah ada detail orderan_id (UNTUK CREATE) atau engga,
-        // kalo ada ambil data status pendukung orderan muatan untuk ambil nilai status pisah bl dari orderan
-        if (orderan_id) {
-          const getStatusDataPendukung = await trx('parameter')
-            .select('id')
-            .where('grp', 'DATA PENDUKUNG')
-            .where('subgrp', 'ORDERANMUATAN')
-            .where('text', 'PISAH BL')
-            .first();
-
+        if (orderan_id && getStatusDataPendukung?.id) {
           const getStatusPisahBl = await trx('statuspendukung')
             .select('statuspendukung')
             .where('statusdatapendukung', getStatusDataPendukung.id)
@@ -118,9 +89,7 @@ export class ShippingInstructionDetailService {
             .first();
 
           detailsWithoutRincian.statuspisahbl =
-            getStatusPisahBl?.statuspendukung
-              ? getStatusPisahBl.statuspendukung
-              : 15;
+            getStatusPisahBl?.statuspendukung ?? defaultStatusPisahBl;
         } else {
           const getDataStatusPisahBl = await trx(this.tableName)
             .select('statuspisahbl')
@@ -130,10 +99,8 @@ export class ShippingInstructionDetailService {
             )
             .first();
 
-          // `?.` — baris detail baru belum punya nobukti tersimpan, jadi first()
-          // bisa undefined dan versi lama melempar TypeError di sini.
           detailsWithoutRincian.statuspisahbl =
-            getDataStatusPisahBl?.statuspisahbl ?? 15;
+            getDataStatusPisahBl?.statuspisahbl ?? defaultStatusPisahBl;
         }
 
         if (data.shippinginstructiondetail_nobukti === '') {
@@ -172,9 +139,6 @@ export class ShippingInstructionDetailService {
           allRincian.push(tempRincian);
         }
 
-        // Baris dianggap LAMA hanya bila id-nya benar-benar ada di DB. Grid
-        // mengirim id sementara (index baris) untuk baris hasil PROSES, jadi
-        // `if (id)` saja tidak cukup.
         let existingData: any = null;
         if (
           detailsWithoutRincian.id !== null &&
@@ -202,7 +166,6 @@ export class ShippingInstructionDetailService {
             detailsWithoutRincian.aksi = 'UPDATE';
           }
         } else {
-          // Baris baru: id dipaksa '0' supaya terjaring insertedDataQuery.
           detailsWithoutRincian.id = 0;
           const newTimestamps = {
             created_at: time,
@@ -229,13 +192,11 @@ export class ShippingInstructionDetailService {
 
       const jsonString = JSON.stringify(mainDataToInsert);
 
-      // Padanan OPENJSON (lihat catatan 1 di atas).
       await trx.raw(
         `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
         [jsonString],
       );
 
-      // Padanan UPDATE ... JOIN (lihat catatan 2 di atas).
       const updatedResult = await trx.raw(
         `update ${this.tableName} as t set
            nobukti = tmp.nobukti,
@@ -289,7 +250,6 @@ export class ShippingInstructionDetailService {
         ])
         .where(`${tempTableName}.id`, '0');
 
-      // Padanan leftJoin + whereNull (lihat catatan 3 di atas).
       const notInTemp = (qb: any) => {
         qb.whereNotExists(function (this: any) {
           this.select(trx.raw('1'))
@@ -404,9 +364,6 @@ export class ShippingInstructionDetailService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      // Baca dari VIEW: kolom *_nama & statuspisahbl_memo sudah diturunkan di
-      // sana, jadi 5 LEFT JOIN tidak lagi dirakit ulang tiap request. Alias `p`
-      // dipertahankan supaya seluruh referensi kolom di bawah tetap sama.
       const query = trx(`${this.viewName} as p`)
         .select(
           'p.id',
@@ -439,8 +396,6 @@ export class ShippingInstructionDetailService {
         (k) => !excludeSearchKeys.includes(k),
       );
 
-      // ilike + tanpa escape '[' ala MSSQL — lihat catatan yang sama di
-      // ShippingInstructionService.applyFilters.
       if (search) {
         const sanitized = String(search).trim();
 
@@ -499,8 +454,6 @@ export class ShippingInstructionDetailService {
           } else if (key === 'daftarbl_text') {
             query.andWhere('p.daftarbl_nama', 'ilike', `%${sanitizedValue}%`);
           } else if (key === 'statuspisahbl_text') {
-            // FilterOptions mengirim id parameter, jadi cocokkan ke kolom id-nya
-            // (statuspisahbl), bukan ke teksnya.
             query.andWhere('p.statuspisahbl', '=', sanitizedValue);
           } else {
             query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
@@ -529,11 +482,6 @@ export class ShippingInstructionDetailService {
         }
       }
 
-      // SENGAJA tanpa limit/offset, sama seperti sebelumnya. FormShippingInstruction
-      // membangun payload simpan dari hasil endpoint ini, dan create() MENGHAPUS
-      // detail yang tidak ada di payload — begitu response dipotong per halaman,
-      // menyimpan akan membuang detail yang tidak ikut terkirim. Kalau nanti
-      // butuh paginasi, sediakan jalur terpisah untuk form (ambil semua).
       const result = await query;
 
       return {

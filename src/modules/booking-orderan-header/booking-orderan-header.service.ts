@@ -35,8 +35,7 @@ export class BookingOrderanHeaderService {
     private readonly logTrailService: LogtrailService,
     private readonly runningNumberService: RunningNumberService,
     private readonly bookingOrderanMuatanService: BookingOrderanMuatanService,
-  ) { }
-  ) { }
+  ) {}
 
   async create(createData: any, trx: any) {
     try {
@@ -98,15 +97,27 @@ export class BookingOrderanHeaderService {
 
       const getIdJenisOrderan = await trx
         .from(trx.raw(`parameter`))
-        .select('text')
+        .select('subgrp')
         .where('id', jenisorder_id)
         .first();
 
+      if (!getIdJenisOrderan?.subgrp) {
+        throw new NotFoundException(
+          `JENIS ORDER tidak ditemukan di parameter (jenisorder_id: ${jenisorder_id})`,
+        );
+      }
+
       const getStatusFormatFromOrderan = await trx
         .from(trx.raw(`jenisorder`))
-        .select('statusformat')
-        .where('id', getIdJenisOrderan?.text)
+        .select(['id', 'statusformat'])
+        .where('nama', getIdJenisOrderan.subgrp)
         .first();
+
+      if (!getStatusFormatFromOrderan?.statusformat) {
+        throw new NotFoundException(
+          `STATUS FORMAT tidak ditemukan di jenisorder (nama: ${getIdJenisOrderan.subgrp})`,
+        );
+      }
 
       const getFormatBookingOrderan = await trx
         .from(trx.raw(`parameter`))
@@ -154,7 +165,7 @@ export class BookingOrderanHeaderService {
           const headerData = {
             nobukti: nomorBukti,
             tglbukti: createData.tglbukti,
-            jenisorder_id: getIdJenisOrderan.text,
+            jenisorder_id: getStatusFormatFromOrderan.id,
             statusformat: getStatusFormatFromOrderan.statusformat,
             modifiedby: createData.modifiedby,
             updated_at: this.utilsService.getTime(),
@@ -225,7 +236,7 @@ export class BookingOrderanHeaderService {
           );
 
         headerData.nobukti = nomorBukti;
-        headerData.jenisorder_id = getIdJenisOrderan.text;
+        headerData.jenisorder_id = getStatusFormatFromOrderan.id;
         headerData.statusformat = getStatusFormatFromOrderan.statusformat;
         headerData.updated_at = this.utilsService.getTime();
         headerData.created_at = this.utilsService.getTime();
@@ -262,7 +273,7 @@ export class BookingOrderanHeaderService {
           trx,
         );
 
-        bookingOrderanData.bookingorderan_id = Number(newItem.id);
+        bookingOrderanData.bookingorderan_id = newItem.id;
         bookingOrderanData.nobukti = newItem.nobukti;
 
         const insertBookingOrderan = await serviceCreate.create(
@@ -603,17 +614,29 @@ export class BookingOrderanHeaderService {
 
       const getIdJenisOrderan = await trx
         .from(trx.raw(`parameter`))
-        .select('text')
+        .select('subgrp')
         .where('id', jenisorder_id)
         .first();
 
+      if (!getIdJenisOrderan?.subgrp) {
+        throw new NotFoundException(
+          `JENIS ORDER tidak ditemukan di parameter (jenisorder_id: ${jenisorder_id})`,
+        );
+      }
+
       const getStatusFormatFromOrderan = await trx
         .from(trx.raw(`jenisorder`))
-        .select('statusformat')
-        .where('id', getIdJenisOrderan?.text)
+        .select(['id', 'statusformat'])
+        .where('nama', getIdJenisOrderan.subgrp)
         .first();
 
-      headerData.jenisorder_id = getIdJenisOrderan.text;
+      if (!getStatusFormatFromOrderan?.statusformat) {
+        throw new NotFoundException(
+          `STATUS FORMAT tidak ditemukan di jenisorder (nama: ${getIdJenisOrderan.subgrp})`,
+        );
+      }
+
+      headerData.jenisorder_id = getStatusFormatFromOrderan.id;
       headerData.statusformat = getStatusFormatFromOrderan.statusformat;
       bookingOrderanData.nobukti = nobukti;
       bookingOrderanData.bookingorderan_id = id;

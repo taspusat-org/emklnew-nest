@@ -3,7 +3,6 @@ import {
   Get,
   Post,
   Body,
-  Patch,
   Param,
   Delete,
   Query,
@@ -12,14 +11,13 @@ import {
   Req,
   Put,
   InternalServerErrorException,
-  Res,
+  HttpException,
   HttpStatus,
+  Res,
 } from '@nestjs/common';
+
 import { KasgantungheaderService } from './kasgantungheader.service';
-import { CreateKasgantungheaderDto } from './dto/create-kasgantungheader.dto';
-import { UpdateKasgantungheaderDto } from './dto/update-kasgantungheader.dto';
 import {
-  FindAllDto,
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
@@ -28,33 +26,51 @@ import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import { AuthGuard } from '../auth/auth.guard';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportKasgantungheaderDto,
+  ReportKasgantungheaderSchema,
+} from './dto/report-kasgantungheader.dto';
+import {
+  ExportKasgantungheaderDto,
+  ExportKasgantungheaderSchema,
+} from './dto/export-kasgantungheader.dto';
 
 @Controller('kasgantungheader')
 export class KasgantungheaderController {
   constructor(
     private readonly kasgantungheaderService: KasgantungheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
   @Post()
   //@KAS-GANTUNG
-  async create(
-    @Body()
-    data: any,
-    @Req() req,
-  ) {
+  async create(@Body() data: any, @Req() req) {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
-
       const result = await this.kasgantungheaderService.create(data, trx);
-
       await trx.commit();
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('error', error);
-      throw new Error(`Error: ${error.message}`);
+
+      // PENTING: Jangan wrap HttpException dengan Error baru
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -62,9 +78,19 @@ export class KasgantungheaderController {
   @Get()
   //@KAS-GANTUNG
   @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAll(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+  async findAll(@Query() query: any) {
+    // isreload dibuang di sini: tidak dipakai findAll, tapi frontend masih
+    // mengirimnya dan tak boleh ikut jadi filter kolom.
+    const {
+      search,
+      page,
+      limit,
+      sortBy,
+      sortDirection,
+      isLookUp,
+      isreload,
+      ...filters
+    } = query;
 
     const sortParams = {
       sortBy: sortBy || 'nobukti',
@@ -83,18 +109,8 @@ export class KasgantungheaderController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-
-    try {
-      const result = await this.kasgantungheaderService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
-    }
+    // Endpoint baca: TANPA transaksi, lihat alatbayar.controller.ts.
+    return this.kasgantungheaderService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
@@ -111,8 +127,18 @@ export class KasgantungheaderController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error updating menu in controller:', error);
-      throw new Error('Failed to update menu');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -133,10 +159,11 @@ export class KasgantungheaderController {
       return result;
     } catch (error) {
       trx.rollback();
-      console.error('Error deleting pengembaliankasgantungheader:', error);
-      throw new Error(
-        `Error deleting pengembaliankasgantungheader: ${error.message}`,
-      );
+      console.error('Error deleting kasgantungheader:', error);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to delete data');
     }
   }
 
@@ -158,7 +185,7 @@ export class KasgantungheaderController {
       return result;
     } catch (error) {
       trx.rollback();
-      console.error('Error in findAll:', error);
+      console.error('Error in findAllKasgantung:', error);
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
@@ -184,10 +211,11 @@ export class KasgantungheaderController {
       return result;
     } catch (error) {
       trx.rollback();
-      console.error('Error in findAll:', error);
+      console.error('Error in findAllPengembalian:', error);
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
+
   @UseGuards(AuthGuard)
   @Get(':id')
   //@KAS-GANTUNG
@@ -205,27 +233,86 @@ export class KasgantungheaderController {
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
-  @Post('check-validation')
-  @UseGuards(AuthGuard)
-  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
-    const { aksi, value } = body;
 
-    const trx = await dbMssql.transaction();
-    const editedby = req.user?.user?.username;
-    try {
-      const forceEdit = await this.kasgantungheaderService.checkValidasi(
-        aksi,
-        value,
-        editedby,
-        trx,
-      );
-      trx.commit();
-      return forceEdit;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error checking validation:', error);
-      throw new InternalServerErrorException('Failed to check validation');
-    }
+  /**
+   * POST /kasgantungheader/report
+   *
+   * Cetak bukti kas gantung di background. Request langsung balas { jobId };
+   * progres render dikirim lewat socket namespace `/report` (event
+   * `report:progress`, room = jobId), dan PDF-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * LaporanKasGantung.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
+   * frontend hanya id baris yang dicentang. Datanya dua tabel — `data`
+   * (header) dan `detail` (rincian) — sesuai datasource template.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportKasgantungheaderSchema))
+    body: ReportKasgantungheaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.kasgantungheaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /kasgantungheader/export
+   *
+   * Export Excel SATU bukti kas gantung beserta rinciannya di background —
+   * cakupannya sama dengan cetak bukti, bukan daftar seluruh baris grid.
+   * Request langsung balas { jobId }; progresnya dikirim lewat socket namespace
+   * `/report` (kanal yang sama dengan cetak laporan), dan file-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * Sengaja TANPA transaksi: pembacaan murni untuk export, dan job-nya berumur
+   * panjang. Membuka transaksi di sini hanya menahan koneksi database.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportKasgantungheaderSchema))
+    body: ExportKasgantungheaderDto,
+  ) {
+    const header = await this.kasgantungheaderService.loadExportBuktiHeader(
+      body.id,
+      dbMssql,
+    );
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const nobukti = String(header.nobukti ?? '').replace(/[^A-Za-z0-9_-]+/g, '');
+
+    return this.exportJobService.start({
+      filename: `kas_gantung_${nobukti}_${stamp}.xlsx`,
+      countRows: () =>
+        this.kasgantungheaderService.countExportBuktiRows(
+          header.nobukti,
+          dbMssql,
+        ),
+      streamRows: () =>
+        this.kasgantungheaderService
+          .buildExportBuktiQuery(header.nobukti, dbMssql)
+          .stream(),
+      sheet: this.kasgantungheaderService.buildExportBuktiSheet(header),
+    });
   }
 
   @Get('/export/:id')
@@ -271,6 +358,29 @@ export class KasgantungheaderController {
       return res
         .status(HttpStatus.INTERNAL_SERVER_ERROR)
         .send('Failed to export file');
+    }
+  }
+
+  @Post('check-validation')
+  @UseGuards(AuthGuard)
+  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
+    const { aksi, value } = body;
+
+    const trx = await dbMssql.transaction();
+    const editedby = req.user?.user?.username;
+    try {
+      const forceEdit = await this.kasgantungheaderService.checkValidasi(
+        aksi,
+        value,
+        editedby,
+        trx,
+      );
+      trx.commit();
+      return forceEdit;
+    } catch (error) {
+      trx.rollback();
+      console.error('Error checking validation:', error);
+      throw new InternalServerErrorException('Failed to check validation');
     }
   }
 }

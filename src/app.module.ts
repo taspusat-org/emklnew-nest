@@ -11,6 +11,7 @@ import { UtilsModule } from './utils/utils.module';
 import { RedisModule } from './common/redis/redis.module';
 import { RedisController } from './common/redis/redis.controller';
 import { SocketModule } from './common/socket/socket.module';
+import { ReportModule } from './common/report/report.module';
 import { AcosModule } from './modules/acos/acos.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { AuthGuard } from './modules/auth/auth.guard';
@@ -140,6 +141,7 @@ import { EstimasiBiayaHeaderModule } from './modules/estimasi-biaya-header/estim
 import { EstimasiBiayaDetailInvoiceModule } from './modules/estimasi-biaya-detail-invoice/estimasi-biaya-detail-invoice.module';
 import { BiayaHeaderModule } from './modules/biaya-header/biaya-header.module';
 import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-muatan-detail.module';
+import { AsuransiModule } from './modules/asuransi/asuransi.module';
 
 @Module({
   imports: [
@@ -164,6 +166,7 @@ import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-mua
     RedisModule,
     LogtrailModule,
     SocketModule,
+    ReportModule,
     MenuModule,
     RoleModule,
     UserModule,
@@ -277,6 +280,7 @@ import { BiayaMuatanDetailModule } from './modules/biaya-muatan-detail/biaya-mua
     EstimasiBiayaDetailInvoiceModule,
     BiayaHeaderModule,
     BiayaMuatanDetailModule,
+    AsuransiModule,
   ],
   controllers: [],
   providers: [

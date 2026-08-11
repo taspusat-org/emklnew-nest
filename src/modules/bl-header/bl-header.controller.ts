@@ -33,10 +33,24 @@ import {
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportBlHeaderDto,
+  ReportBlHeaderSchema,
+} from './dto/report-bl-header.dto';
+import {
+  ExportBlHeaderDto,
+  ExportBlHeaderSchema,
+} from './dto/export-bl-header.dto';
 
 @Controller('blheader')
 export class BlHeaderController {
-  constructor(private readonly blHeaderService: BlHeaderService) {}
+  constructor(
+    private readonly blHeaderService: BlHeaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -224,6 +238,105 @@ export class BlHeaderController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /blheader/report
+   *
+   * Cetak laporan di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Data laporan diambil lewat findOne() milik service ini — hasilnya sudah
+   * BARIS DATAR (header di-join ke rincian + orderan muatan), bentuk yang
+   * diharapkan datasource `data` di LaporanBL.mrt dan yang dulu dirakit di
+   * browser.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportBlHeaderSchema))
+    body: ReportBlHeaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const trx = await dbMssql.transaction();
+        let result: any;
+        try {
+          result = await this.blHeaderService.findOne(String(id), trx);
+          await trx.commit();
+        } catch (error) {
+          await trx.rollback();
+          throw error;
+        }
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+          usercetak: username,
+          tglcetak,
+          judul: 'BILL OF LADING',
+        }));
+      },
+    });
+  }
+
+  /**
+   * POST /blheader/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBlHeaderSchema))
+    body: ExportBlHeaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_bl_${stamp}.xlsx`,
+      countRows: () =>
+        this.blHeaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.blHeaderService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.blHeaderService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

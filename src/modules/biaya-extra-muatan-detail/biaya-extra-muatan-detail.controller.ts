@@ -5,7 +5,6 @@ import {
   Body,
   Patch,
   Param,
-  Delete,
   Query,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -84,11 +83,6 @@ export class BiayaExtraMuatanDetailController {
         'Failed to fetch biaya extra muatan detail in controller',
       );
     }
-  }
-
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.biayaExtraMuatanDetailService.findOne(id);
   }
 
   @Patch(':id')

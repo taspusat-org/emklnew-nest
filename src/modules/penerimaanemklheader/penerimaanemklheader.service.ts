@@ -499,7 +499,7 @@ export class PenerimaanemklheaderService implements OnModuleInit {
         const { id, ...rest } = detail;
         return {
           ...rest,
-          id: 0,
+          id: '0',
           coa: coakredit,
           penerimaanemklheader_nobukti: insertData.penerimaan_nobukti,
           nobukti: insertData.penerimaan_nobukti,
@@ -527,7 +527,7 @@ export class PenerimaanemklheaderService implements OnModuleInit {
 
           return {
             ...rest,
-            id: 0,
+            id: '0',
             nobukti: insertData.nobukti, // Inject nobukti into each detail
             pengeluaranemkl_nobukti: detail.nobukti,
             modifiedby: insertData.modifiedby,

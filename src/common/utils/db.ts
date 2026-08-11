@@ -1,16 +1,40 @@
+import { RequestTimeoutException } from '@nestjs/common';
 import knex from 'knex';
 import knexConfig from 'src/knexfile';
-import { getRequestStore } from '../context/request-context';
+import { getRequestStore, RequestStore } from '../context/request-context';
 
-function wrapTransaction(trx: any): any {
+const TIMEOUT_MESSAGE =
+  'Permintaan melebihi batas waktu dan transaksi dibatalkan. Silakan coba lagi.';
+
+function wrapTransaction(trx: any, store?: RequestStore): any {
+  // Setelah timeout, interceptor sudah me-rollback trx tapi service TERUS
+  // menembak query. Knex membalasnya dengan 'Transaction query already
+  // complete' sambil tetap menahan koneksi pool — memperparah request lain
+  // yang sedang antre. Hentikan di sini begitu abort signal menyala.
+  const assertNotAborted = () => {
+    if (store?.abortController.signal.aborted) {
+      throw new RequestTimeoutException(TIMEOUT_MESSAGE);
+    }
+  };
+
   return new Proxy(trx, {
     apply(target, thisArg, argsList) {
+      assertNotAborted();
       return Reflect.apply(target, thisArg, argsList);
     },
     get(target, prop, receiver) {
+      if (prop === 'raw') {
+        return function (...args: any[]) {
+          assertNotAborted();
+          return target.raw(...args);
+        };
+      }
       if (prop === 'commit') {
         return async function (...args: any[]) {
-          if (typeof target.isCompleted === 'function' && target.isCompleted()) {
+          if (
+            typeof target.isCompleted === 'function' &&
+            target.isCompleted()
+          ) {
             return;
           }
           return target.commit.apply(target, args);
@@ -18,7 +42,10 @@ function wrapTransaction(trx: any): any {
       }
       if (prop === 'rollback') {
         return async function (...args: any[]) {
-          if (typeof target.isCompleted === 'function' && target.isCompleted()) {
+          if (
+            typeof target.isCompleted === 'function' &&
+            target.isCompleted()
+          ) {
             return;
           }
           return target.rollback.apply(target, args);
@@ -87,7 +114,7 @@ function wrapWithTimeout(originalDb: any): any {
               { once: true },
             );
 
-            return wrapTransaction(trx);
+            return wrapTransaction(trx, store);
           });
         };
       }

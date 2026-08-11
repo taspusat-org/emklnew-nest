@@ -6,11 +6,22 @@ import {
 } from '@nestjs/common';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  UtilsService,
+  toNumeric,
+  calculateItemIndex,
+  getFetchedPages,
+  uuidV7,
+} from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
+
+const MONEY_COLUMNS = ['nominal'];
+
 @Injectable()
 export class HargatruckingService {
   constructor(
@@ -19,67 +30,195 @@ export class HargatruckingService {
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly tableName = 'hargatrucking';
-  async create(CreateHargatruckingDto: any, trx: any) {
+  private readonly viewName = 'vhargatrucking';
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys: string[] = [];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
+
+    if (search && filters && Object.keys(filters).length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (['created_at', 'updated_at'].includes(field)) {
+            qb.orWhereRaw("to_char(vht.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhereRaw('vht.??::text ilike ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("to_char(vht.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else {
+        // ✅ prefix vht. agar konsisten dengan alias view
+        qb.andWhereRaw('vht.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    // Tabel `harga trucking` hanya punya kolom status* (varchar id parameter),
+    // TIDAK ada kolom *_uuid. Menyisipkan *_uuid -> "Invalid column name".
+    // Kolom _text/_uuid/_memo diturunkan di view vharga trucking via JOIN parameter.
+    return {
+      id: uuid ? uuid : dto.uuid,
+      tujuankapal_id: dto.tujuankapal_id
+        ? dto.tujuankapal_id.toUpperCase()
+        : null,
+      container_id: dto.container_id ? dto.container_id.toUpperCase() : null, // Wajib isi
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      jenisorder_id: dto.jenisorder_id ? dto.jenisorder_id.toUpperCase() : null, // Wajib isi
+      emkl_id: dto.emkl_id ? dto.emkl_id.toUpperCase() : null, // Wajib isi
+      nominal: toNumeric(dto.nominal) ?? 0,
+      statusaktif: dto.statusaktif,
+      info: dto.info ? dto.info.toUpperCase() : null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  /**
+   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
+   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
+   * menampilkan urutan berdasarkan kolom TEKS (text/*_text), bukan id (varchar
+   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
+   * fokus baris setelah simpan akan meleset.
+   */
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'statusaktif_nama', dir: 'asc' }; // findAll: hardcode 'asc' on vht.nama
+      case 'statusbank':
+        return { col: 'statusbank_nama', dir };
+      case 'statusdefault':
+        return { col: 'statusdefault_nama', dir };
+      case 'statuslangsungcair':
+        return { col: 'statuslangsungcair_nama', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateaHargatruckingDto: any, trx: any) {
     try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        tujuankapal_id,
-        emkl_id,
-        keterangan,
-        container_id,
-        jenisorder_id,
-        nominal,
-        statusaktif,
-        modifiedby,
-        created_at,
-        updated_at,
-        info,
-      } = CreateHargatruckingDto;
-      const insertData = {
-        tujuankapal_id: tujuankapal_id,
-        emkl_id: emkl_id,
-        keterangan: keterangan,
-        statusaktif: statusaktif,
-        container_id: container_id,
-        jenisorder_id: jenisorder_id,
-        nominal: nominal,
-        modifiedby: modifiedby,
-        created_at: created_at || this.utilsService.getTime(),
-        updated_at: updated_at || this.utilsService.getTime(),
-      };
-      console.log(insertData, 'INSERTSSS');
-      // Insert the new item
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
-      const newItem = insertedItems[0]; // Get the inserted item
-      const { data, pagination } = await this.findAll(
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateaHargatruckingDto;
+
+      const uuid = await uuidV7(trx);
+
+      const insertData = this.buildInsertData(CreateaHargatruckingDto, uuid);
+      const x = await trx(this.tableName).insert(insertData);
+
+      // id sekarang varchar UUID (bukan auto-increment), jadi
+      // orderBy('id','desc').first() TIDAK mengembalikan baris yang baru
+      // diinsert — id UUID tidak terurut secara kronologis. Ambil langsung
+      // by uuid yang baru kita generate & insert supaya fokus baris setelah
+      // simpan menunjuk ke data yang benar.
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+      const existingData = await trx(`${this.viewName} as vht`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vht`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+
+      if (existingData) {
+        // Hitung posisi memakai kolom & arah yang SAMA dengan urutan tampil grid
+        // (findAll). Untuk kolom status, bandingkan nilai TEKS dari baris view,
+        // bukan id UUID — supaya fokus baris setelah simpan tepat.
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        // Posisi = jumlah baris yang tampil sebelum-atau-pada baris baru,
+        // memakai kolom & arah urut yang sama dengan grid (findAll). Tidak
+        // ada klausa tiebreaker `id <=` lagi: id UUID tidak terurut, jadi
+        // klausa itu malah memfilter baris acak & membuat posisi meleset.
+
+        const resultposition = await trx(`${this.viewName} as vht`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
-      let itemIndex = data.findIndex(
-        (item) => String(item.id) === String(newItem.id),
-      );
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
 
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
-      );
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
+
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+      // 6. Side-effects
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -92,172 +231,125 @@ export class HargatruckingService {
         },
         trx,
       );
+
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      throw new Error(`Error creating container: ${error.message}`);
+      throw new Error(`Error creating harga trucking: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      // default pagination
-      let { page, limit } = pagination ?? {};
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const sortBy = sort?.sortBy || 'tujuankapal_text';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
 
-      // lookup mode: jika total > 500, kirim json saja
-      if (isLookUp) {
-        const countResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-        const totalCount = Number(countResult?.total) || 0;
-        if (totalCount > 500) {
-          return { data: { type: 'json' } };
-        }
-        limit = 0;
+      // Count dari tabel BASE (hargatrucking), bukan view vhargatrucking.
+      const countResult = await trx(`${this.viewName} as vht`)
+        .count('vht.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as b`))
-        .select([
-          'b.id',
-          'b.tarifdetail_id',
-          'b.tujuankapal_id',
-          'b.emkl_id',
-          'b.keterangan',
-          'b.container_id',
-          'b.jenisorder_id',
-          'b.nominal',
-          'b.statusaktif',
-          'b.info',
-          'b.modifiedby',
-          trx.raw("TO_CHAR(b.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(b.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text',
-          'p1.nama as tujuankapal_text',
-          'p2.nama as emkl_text',
-          'p3.nama as container_text',
-          'p4.nama as jenisorderan_text',
-        ])
-        .leftJoin(
-          trx.raw('parameter as p'),
-          'b.statusaktif',
-          'p.id',
-        )
-        .leftJoin(
-          trx.raw('tujuankapal as p1'),
-          'b.tujuankapal_id',
-          'p1.id',
-        )
-        .leftJoin(
-          trx.raw('emkl as p2'),
-          'b.emkl_id',
-          'p2.id',
-        )
-        .leftJoin(
-          trx.raw('container as p3'),
-          'b.container_id',
-          'p3.id',
-        )
-        .leftJoin(
-          trx.raw('jenisorder as p4'),
-          'b.jenisorder_id',
-          'p4.id',
-        );
+      // SELECT disesuaikan DENGAN SCHEMA HARGA TRUCKING yang sebenarnya
+      const query = trx(`${this.viewName} as vht`).select([
+        'vht.id',
+        'vht.keterangan',
+        'vht.tarifdetail_id',
+        'vht.emkl_id',
+        'vht.emkl_text',
+        'vht.tujuankapal_id',
+        'vht.tujuankapal_text',
+        'vht.container_id',
+        'vht.container_text',
+        'vht.jenisorder_id',
+        'vht.jenisorder_text',
+        'vht.nominal',
+        'vht.statusaktif',
+        'vht.statusaktif_text', // Status aktif text dari join parameter view
+        'vht.statusaktif_memo', // Status aktif text dari join parameter view
+        'vht.info',
+        'vht.modifiedby',
+        trx.raw(
+          "to_char(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ]);
+
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .statusaktif_text)
+      if (sortBy === 'statusaktif') {
+        query.orderBy('vht.statusaktif_text', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
+      } else {
+        query.orderBy(`vht.${sortBy}`, sortDirection);
+      }
+
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
 
-      const excludeSearchKeys = [
-        'tujuankapal_id',
-        'statusaktif',
-        'emkl_id',
-        'container_id',
-        'jenisorder_id',
-      ];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-      if (search) {
-        const sanitizedValue = String(search).replace(/\[/g, '[[]');
+      // console.log(query.toQuery());
+      // Debug query dan nilainya sebelum dieksekusi:
+      console.log('Query:', query.toSQL().sql);
+      console.log('Bindings (Values):', query.toSQL().bindings);
 
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
-                field,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (field === 'tujuankapal_text') {
-              qb.orWhere(`p1.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (field === 'emkl_text') {
-              qb.orWhere(`p2.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (field === 'container_text') {
-              qb.orWhere(`p3.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (field === 'jenisorderan_text') {
-              qb.orWhere(`p4.nama`, 'like', `%${sanitizedValue}%`);
-            } else {
-              qb.orWhere(`b.${field}`, 'like', `%${sanitizedValue}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, rawValue] of Object.entries(filters)) {
-          if (!rawValue) continue;
-          const val = String(rawValue).replace(/\[/g, '[[]');
-
-          if (key === 'created_at' || key === 'updated_at') {
-            query.andWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              key,
-              `%${val}%`,
-            ]);
-          } else if (key === 'memo') {
-            query.andWhere('p.memo', 'like', `%${val}%`);
-          } else if (key === 'tujuankapal_text') {
-            query.andWhere('p1.nama', 'like', `%${val}%`);
-          } else if (key === 'emkl_text') {
-            query.andWhere('p2.nama', 'like', `%${val}%`);
-          } else if (key === 'container_text') {
-            query.andWhere('p3.nama', 'like', `%${val}%`);
-          } else if (key === 'jenisorderan_text') {
-            query.andWhere('p4.nama', 'like', `%${val}%`);
-          } else if (key === 'nominal') {
-            query.andWhere('b.nominal', 'like', `%${val}%`);
-          } else {
-            query.andWhere(`b.${key}`, 'like', `%${val}%`);
-          }
-        }
-      }
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
       const data = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
@@ -268,101 +360,186 @@ export class HargatruckingService {
     }
   }
 
+  async findOne(id: string, trx: any) {
+    try {
+      const query = trx(`${this.viewName} as vht`).select([
+        'vht.id',
+        'vht.keterangan',
+        'vht.tarifdetail_id',
+        'vht.emkl_id',
+        'vht.emkl_text',
+        'vht.tujuankapal_id',
+        'vht.tujuankapal_text',
+        'vht.container_id',
+        'vht.container_text',
+        'vht.jenisorder_id',
+        'vht.jenisorder_text',
+        'vht.nominal',
+        'vht.statusaktif',
+        'vht.statusaktif_text', // Status aktif text dari join parameter view
+        'vht.statusaktif_memo', // Status aktif text dari join parameter view
+        'vht.info',
+        'vht.modifiedby',
+        trx.raw(
+          "to_char(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ]);
+
+      query.where('id', id);
+
+      const [data] = await query;
+      return {
+        data: data,
+      };
+    } catch (error) {
+      console.error('Error fetching data findone biaya trucking by id:', error);
+      throw new Error('Failed to fetch data findone biaya trucking by id');
+    }
+  }
+
   async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName).where('id', id).first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        throw new Error('Harga Trucking not found');
+      if (!existedData) {
+        throw new Error('harga trucking not found');
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        tujuankapal_text,
-        emkl_text,
-        container_text,
-        jenisorderan_text,
-        id: skipId,
-        text,
-        ...insertData
-      } = data;
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      // JANGAN blanket-uppercase semua field string. id, uuid, dan status*
+      // adalah UUID bertipe TEXT (case-sensitive). Meng-uppercase-nya mengubah
+      // nilai: id lowercase (mis. 02-019f5ea1-..) jadi 02-019F5EA1-.. sehingga
+      // PK berubah & FK status* bisa tak match. Uppercase nama & keterangan
+      // sudah ditangani buildInsertData().
+      // 2. Build insert payload — uppercase hanya nama & keterangan,
+      //    sama persis seperti create, via buildInsertData()
+      const insertData = this.buildInsertData(data);
+      // id = kunci WHERE (PK), bukan kolom yang di-SET saat update.
+      // buildInsertData mengisi id dari dto.uuid; kalau ikut ter-UPDATE, PK
+      // berpindah dan lookup `updatedItem` (by id lama) gagal -> updatedItem
+      // undefined -> updatedItem.id throw -> 500. created_at juga jangan ditimpa
+      // saat edit (buildInsertData mengisinya dengan now() bila dto kosong).
+      delete insertData.id;
+      delete insertData.created_at;
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['keterangan'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
+      Object.keys(insertData).forEach((key) => {
+        if (MONEY_COLUMNS.includes(key)) {
+          insertData[key] = toNumeric(insertData[key]);
+        } else if (typeof insertData[key] === 'string') {
+          insertData[key] = insertData[key].toUpperCase();
         }
       });
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
+
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const { data: filteredData, pagination } = await this.findAll(
+      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
+      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_uuid/
+      // _memo) yang tidak ada di tabel base; dipakai untuk acuan posisi dan
+      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
+      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
+      // dengan filter aktif.
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+
+      const existingData = await trx(`${this.viewName} as vht`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vht`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
+        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vht`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      // Cari index item yang baru saja diupdate
-      let itemIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(id),
-      );
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      const itemsPerPage = limit || 10; // Default 10 items per page, atau yang dikirimkan dari frontend
-      const pageNumber = Math.floor(itemIndex / itemsPerPage) + 1;
-
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT HARGA TRUCKING',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
       return {
-        updatedItem: {
-          id,
-          ...data,
-        },
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      console.error('Error updating Bank:', error);
-      throw new Error('Failed to update Bank');
+      console.error('Error updating harga trucking:', error);
+      throw new Error('Failed to update harga trucking');
     }
   }
 
@@ -397,6 +574,117 @@ export class HargatruckingService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
+  private readonly EXPORT_COLUMNS = [
+    // 'vht.tarifdetail_id',
+    'vht.tujuankapal_text',
+    'vht.emkl_text',
+    'vht.keterangan',
+    'vht.container_text',
+    'vht.jenisorder_text',
+    'vht.nominal',
+    'vht.statusaktif_text',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
+   * proses kehabisan heap.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as vht`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('vht.statusaktif_text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('vht.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('vht.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('vht.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`vht.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
+   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
+   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as vht`)
+      .count('vht.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN HARGA TRUCKING',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'TUJUAN KAPAL',
+      'EMKL',
+      'KETERANGAN',
+      'CONTAINER',
+      'JENIS ORDERAN',
+      'NOMINAL',
+      'STATUS AKTIF',
+    ],
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    columnWidths: [6, 20, 20, 50, 20, 20, 20, 15],
+    columnFormats: [
+      null, // NO. — default sudah rata kanan
+      null, // TUJUAN KAPAL
+      null, // EMKL
+      { wrapText: true }, // KETERANGAN — teks panjang dibungkus
+      null, // CONTAINER
+      null, // JENIS ORDERAN
+      { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL,
+      { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.tujuankapal_text,
+      row.emkl_text,
+      row.keterangan,
+      row.container_text,
+      row.jenisorder_text,
+      row.nominal,
+      row.statusaktif_text,
+    ],
+  };
 
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
@@ -457,9 +745,9 @@ export class HargatruckingService {
         row.emkl_text,
         row.keterangan,
         row.container_text,
-        row.jenisorderan_text,
+        row.jenisorder_text,
         row.nominal,
-        row.text,
+        row.statusaktif_text,
       ];
       rowValues.forEach((value, colIndex) => {
         const cell = worksheet.getCell(currentRow, colIndex + 1);

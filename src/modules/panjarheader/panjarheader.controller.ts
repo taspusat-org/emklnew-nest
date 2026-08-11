@@ -35,10 +35,24 @@ import {
   UpdatePanjarHeaderSchema,
   UpdatePanjarheaderDto,
 } from './dto/create-panjarheader.dto';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportPanjarheaderDto,
+  ReportPanjarheaderSchema,
+} from './dto/report-panjarheader.dto';
+import {
+  ExportPanjarheaderDto,
+  ExportPanjarheaderSchema,
+} from './dto/export-panjarheader.dto';
 
 @Controller('panjarheader')
 export class PanjarheaderController {
-  constructor(private readonly panjarheaderService: PanjarheaderService) {}
+  constructor(
+    private readonly panjarheaderService: PanjarheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -88,9 +102,15 @@ export class PanjarheaderController {
       sortDirection: sortDirection || 'asc',
     };
 
+    // ZodValidationPipe memvalidasi tapi memulangkan value ASLI, jadi page &
+    // limit di sini masih string dari query string. Tanpa Number(), knex
+    // menerima .limit('50') dan offset dihitung lewat koersi JS yang kebetulan
+    // benar — eksplisit saja supaya windowed pagination tidak bergantung koersi.
+    const numericLimit = Number(limit);
     const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
     };
 
     const params: FindAllParams = {
@@ -205,6 +225,117 @@ export class PanjarheaderController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  /**
+   * POST /panjarheader/report
+   *
+   * Cetak laporan di background. Request langsung balas { jobId }; progres
+   * render dikirim lewat socket namespace `/report` (event `report:progress`,
+   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
+   *
+   * Data laporan diambil lewat findOne() milik service ini — hasilnya sudah
+   * BARIS DATAR (header di-join ke muatan detail), bentuk yang diharapkan
+   * LaporanPanjar.mrt dan yang dulu dirakit di browser.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportPanjarheaderSchema))
+    body: ReportPanjarheaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const trx = await dbMssql.transaction();
+        let result: any;
+        try {
+          result = await this.panjarheaderService.findOne(String(id), trx);
+          await trx.commit();
+        } catch (error) {
+          await trx.rollback();
+          throw error;
+        }
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+          usercetak: username,
+          tglcetak,
+          judul: 'LAPORAN PANJAR',
+        }));
+      },
+    });
+  }
+
+  /**
+   * POST /panjarheader/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   *
+   * jenisorder_id diresolve DI SINI (bukan di dalam query) karena streamRows
+   * dipanggil secara sinkron oleh ExportJobService, sedangkan resolusinya
+   * butuh query lookup saat filter jenis orderan kosong (default MUATAN).
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportPanjarheaderSchema))
+    body: ExportPanjarheaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const jenisOrderId =
+      await this.panjarheaderService.resolveExportJenisOrderId(
+        dbMssql,
+        filters?.jenisOrderan,
+      );
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+      jenisOrderId,
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_panjar_${stamp}.xlsx`,
+      countRows: () =>
+        this.panjarheaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.panjarheaderService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.panjarheaderService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

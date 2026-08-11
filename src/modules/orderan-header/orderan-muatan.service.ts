@@ -11,11 +11,6 @@ import {
   formatDateToSQL,
   UtilsService,
 } from 'src/utils/utils.service';
-import {
-  withUuidV7,
-  formatDateToSQL,
-  UtilsService,
-} from 'src/utils/utils.service';
 import { LocksService } from '../locks/locks.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -249,12 +244,6 @@ export class OrderanMuatanService {
           trx.raw(
             "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
           ),
-          trx.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          trx.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
 
           'header.id as header_id',
           'header.nobukti as header_nobukti',
@@ -307,11 +296,6 @@ export class OrderanMuatanService {
           'pivot.approval_memo as approval_memo',
         ])
         .leftJoin('orderanheader as header', 'u.nobukti', 'header.nobukti')
-        .leftJoin(
-          'jenisorder as jenisorderan',
-          'header.jenisorder_id',
-          'jenisorderan.id',
-        )
         .leftJoin(
           'jenisorder as jenisorderan',
           'header.jenisorder_id',
@@ -403,10 +387,6 @@ export class OrderanMuatanService {
             console.log('MASUK SINI4');
 
             if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
-                [key, `%${sanitizedValue}%`],
-              );
               query.andWhereRaw(
                 "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
                 [key, `%${sanitizedValue}%`],
@@ -1087,37 +1067,7 @@ export class OrderanMuatanService {
    * dalam satu daftarbl nilainya memang seragam.
    */
   async processShipping(schedule_id: any, trx: any) {
-  /**
-   * PROSES SHIPPING — satu query GROUP BY, tidak menulis apa pun.
-   *
-   * Dikelompokkan per `daftarbl_id` (satu grup = satu baris DETAIL shipping
-   * instruction), dan tiap grup membawa daftar orderan muatannya sebagai
-   * `detailsrincian` lewat json_agg — jadi tidak perlu lagi N+1 request ke
-   * /orderanheader untuk mengambil rincian tiap grup seperti sebelumnya.
-   *
-   * Kolom detail yang bisa diturunkan dari orderanmuatan hanya:
-   *   asalpelabuhan <- u.asalmuatan
-   *   shipper       <- shipper.nama (lewat u.shipper_id)
-   *   comodity      <- default parameter (GENERAL CARGO)
-   * `consignee`, `notifyparty`, dan `totalgw` TIDAK punya kolom sumber di
-   * orderanmuatan maupun daftarbl, jadi tidak diisi di sini — lihat catatan di
-   * form: ketiganya tetap bisa diisi user dan dipertahankan saat proses ulang.
-   *
-   * MAX(...) dipakai untuk kolom non-group supaya tetap valid di GROUP BY;
-   * dalam satu daftarbl nilainya memang seragam.
-   */
-  async processShipping(schedule_id: any, trx: any) {
     try {
-      // Default comodity diambil dari parameter supaya bisa diubah tanpa deploy.
-      // Kalau barisnya belum ada, jatuh ke 'GENERAL CARGO'.
-      const defaultComodityRow = await trx('parameter')
-        .select('text')
-        .where('grp', 'COMODITY DEFAULT')
-        .andWhere('subgrp', 'SHIPPING INSTRUCTION')
-        .first();
-
-      const defaultComodity = defaultComodityRow?.text || 'GENERAL CARGO';
-
       // Default comodity diambil dari parameter supaya bisa diubah tanpa deploy.
       // Kalau barisnya belum ada, jatuh ke 'GENERAL CARGO'.
       const defaultComodityRow = await trx('parameter')
@@ -1131,38 +1081,12 @@ export class OrderanMuatanService {
       const query = trx
         .from(trx.raw(`${this.tableName} as u`))
         .leftJoin('shipper as s', 'u.shipper_id', 's.id')
-        .leftJoin('shipper as s', 'u.shipper_id', 's.id')
         .select([
           'u.daftarbl_id',
-          trx.raw('MAX(u.emkl_id) AS emkl_id'),
           trx.raw('MAX(u.emkl_id) AS emkl_id'),
           trx.raw('MAX(u.pelayarancontainer_id) AS pelayarancontainer_id'),
           trx.raw('MAX(u.tujuankapal_id) AS tujuankapal_id'),
           trx.raw('MAX(u.id) AS orderan_id'),
-          trx.raw('MAX(u.asalmuatan) AS asalpelabuhan'),
-          trx.raw('MAX(s.nama) AS shipper'),
-          trx.raw('?::text AS comodity', [defaultComodity]),
-          // SEMENTARA dipatok. `consignee` belum punya kolom sumber di
-          // orderanmuatan maupun daftarbl, tapi di form dibuat read-only, jadi
-          // nilainya harus datang dari sini. Begitu sumber aslinya ada, ganti
-          // literal ini dengan kolomnya (atau ikuti pola parameter seperti
-          // COMODITY DEFAULT di atas).
-          trx.raw(`?::text AS consignee`, ['PT TAS']),
-          // Satu baris rincian per orderan muatan di grup ini.
-          trx.raw(
-            `json_agg(
-               json_build_object(
-                 'orderanmuatan_nobukti', COALESCE(u.nobukti, ''),
-                 'comodity', ?::text,
-                 'nocontainer', COALESCE(u.nocontainer, ''),
-                 'noseal', COALESCE(u.noseal, ''),
-                 'shipper_id', u.shipper_id,
-                 'shipper_nama', COALESCE(s.nama, '')
-               )
-               ORDER BY u.nobukti
-             ) AS detailsrincian`,
-            [defaultComodity],
-          ),
           trx.raw('MAX(u.asalmuatan) AS asalpelabuhan'),
           trx.raw('MAX(s.nama) AS shipper'),
           trx.raw('?::text AS comodity', [defaultComodity]),
@@ -1197,7 +1121,6 @@ export class OrderanMuatanService {
         data,
       };
     } catch (error) {
-      console.error('Error to processShipping Orderan Muatan', error);
       console.error('Error to processShipping Orderan Muatan', error);
       throw new Error(error);
     }

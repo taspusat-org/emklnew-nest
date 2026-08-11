@@ -7,6 +7,7 @@ import { AuthModule } from '../auth/auth.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { LocksModule } from '../locks/locks.module';
 import { GlobalModule } from '../global/global.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { GlobalModule } from '../global/global.module';
     LogtrailModule,
     GlobalModule,
     LocksModule,
+    ReportModule,
   ],
   controllers: [GroupbiayaextraController],
   providers: [GroupbiayaextraService],
