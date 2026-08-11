@@ -10,6 +10,7 @@ import { PindahBukuController } from './pindah-buku.controller';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   controllers: [PindahBukuController],
@@ -24,6 +25,8 @@ import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.mod
     LogtrailModule,
     RunningNumberModule,
     JurnalumumheaderModule,
+    ReportModule,
   ],
+  exports: [PindahBukuService],
 })
 export class PindahBukuModule {}

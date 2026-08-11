@@ -26,7 +26,7 @@ export class KasgantungdetailService {
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly logger = new Logger(KasgantungdetailService.name);
-  private async setDateRangeSessionContext(
+  private async setSessionContext(
     trx: any,
     filters: Record<string, any>,
   ): Promise<void> {
@@ -211,7 +211,7 @@ export class KasgantungdetailService {
     trx: any,
   ) {
     const { page = 1, limit = 0 } = pagination ?? {};
-    await this.setDateRangeSessionContext(trx, filters || {});
+    await this.setSessionContext(trx, filters || {});
 
     if (!filters?.nobukti) {
       // Bentuk balikan tetap lengkap supaya grid yang membaca

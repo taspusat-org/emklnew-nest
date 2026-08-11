@@ -273,15 +273,14 @@ export class KasgantungheaderController {
   /**
    * POST /kasgantungheader/export
    *
-   * Export Excel daftar kas gantung di background. Request langsung balas
-   * { jobId }; progresnya dikirim lewat socket namespace `/report` (kanal yang
-   * sama dengan cetak laporan), dan file-nya diambil di
+   * Export Excel SATU bukti kas gantung beserta rinciannya di background —
+   * cakupannya sama dengan cetak bukti, bukan daftar seluruh baris grid.
+   * Request langsung balas { jobId }; progresnya dikirim lewat socket namespace
+   * `/report` (kanal yang sama dengan cetak laporan), dan file-nya diambil di
    * GET /report/download/:jobId.
    *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris. Jangan disamakan dengan GET /export/:id di
-   * bawah: yang itu mengekspor SATU bukti beserta rinciannya, yang ini seluruh
-   * baris yang lolos filter grid.
+   * Sengaja TANPA transaksi: pembacaan murni untuk export, dan job-nya berumur
+   * panjang. Membuka transaksi di sini hanya menahan koneksi database.
    */
   @UseGuards(AuthGuard)
   @Post('export')
@@ -289,32 +288,30 @@ export class KasgantungheaderController {
     @Body(new ZodValidationPipe(ExportKasgantungheaderSchema))
     body: ExportKasgantungheaderDto,
   ) {
-    const { search, filters, sortBy, sortDirection } = body;
+    const header = await this.kasgantungheaderService.loadExportBuktiHeader(
+      body.id,
+      dbMssql,
+    );
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
     const stamp =
       `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
       `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-    const queryParams = {
-      search,
-      filters: (filters ?? {}) as Record<string, string | number>,
-      sort: {
-        sortBy: sortBy || 'nobukti',
-        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
-      },
-    };
+    const nobukti = String(header.nobukti ?? '').replace(/[^A-Za-z0-9_-]+/g, '');
 
     return this.exportJobService.start({
-      filename: `laporan_kas_gantung_${stamp}.xlsx`,
+      filename: `kas_gantung_${nobukti}_${stamp}.xlsx`,
       countRows: () =>
-        this.kasgantungheaderService.countExportRows(queryParams, dbMssql),
+        this.kasgantungheaderService.countExportBuktiRows(
+          header.nobukti,
+          dbMssql,
+        ),
       streamRows: () =>
         this.kasgantungheaderService
-          .buildExportQuery(queryParams, dbMssql)
+          .buildExportBuktiQuery(header.nobukti, dbMssql)
           .stream(),
-      sheet: this.kasgantungheaderService.exportSheet,
+      sheet: this.kasgantungheaderService.buildExportBuktiSheet(header),
     });
   }
 

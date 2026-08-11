@@ -1,138 +1,257 @@
 import {
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { CreateParameterDto } from './dto/create-parameter.dto';
-import { UpdateParameterDto } from './dto/update-parameter.dto';
 import { dbMssql } from 'src/common/utils/db';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import {
+  calculateItemIndex,
+  getFetchedPages,
+  UtilsService,
+  uuidV7,
+} from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { Workbook } from 'exceljs';
+import { LocksService } from '../locks/locks.service';
+import { Workbook, Column } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
+
 @Injectable()
 export class ParameterService {
+  private readonly logger = new Logger(ParameterService.name);
   private readonly tableName = 'parameter';
+
+  /** Kolom teks manusiawi yang di-uppercase sebelum disimpan. */
+  private readonly upperCaseFields = [
+    'grp',
+    'subgrp',
+    'kelompok',
+    'text',
+    'type',
+    'default',
+  ];
+
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
+    private readonly locksService: LocksService,
   ) {}
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const dateFields = ['created_at', 'updated_at'];
+    // memo & info bertipe text — dikecualikan dari search global supaya
+    // pencarian tidak menyapu seluruh isi JSON memo.
+    const searchFields = [
+      'grp',
+      'subgrp',
+      'kelompok',
+      'text',
+      'type',
+      'default',
+      'modifiedby',
+    ];
+
+    if (search) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          query.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(p.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else {
+        qb.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    const data: Record<string, any> = {
+      id: uuid ? uuid : dto.id,
+      grp: dto.grp ?? null,
+      subgrp: dto.subgrp ?? null,
+      kelompok: dto.kelompok ?? null,
+      text: dto.text ?? null,
+      // memo datang dari form sebagai objek key/value; kolomnya bertipe text.
+      memo:
+        dto.memo && typeof dto.memo === 'object'
+          ? JSON.stringify(dto.memo)
+          : (dto.memo ?? null),
+      type: dto.type ?? null,
+      default: dto.default ?? null,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby ? String(dto.modifiedby).toUpperCase() : '',
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+
+    this.upperCaseFields.forEach((field) => {
+      if (typeof data[field] === 'string') {
+        data[field] = data[field].toUpperCase();
+      }
+    });
+
+    return data;
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { orderCol: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    return { orderCol: `p.${sortBy}`, dir };
+  }
+
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    const existingData = await trx(`${this.tableName} as p`)
+      .select({ posval: orderCol })
+      .where('p.id', id)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await trx(`${this.tableName} as p`)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  private async buildPagedResult(
+    trx: any,
+    posisi: number,
+    totalItems: number,
+    limit: number,
+    sortBy: string,
+    sortDirection: string,
+    filters: Record<string, any>,
+    search: string | undefined,
+  ) {
+    const pageNumber = Math.ceil(posisi / limit);
+    const totalPages = Math.ceil(totalItems / limit);
+    const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+    const startPage = fetchedPages[0];
+    const endPage = fetchedPages[fetchedPages.length - 1];
+    const customOffset = (startPage - 1) * limit;
+    const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+    // trx WAJIB diteruskan: dipanggil dari dalam transaksi create/update, jadi
+    // window harus dibaca lewat koneksi yang sama supaya baris yang baru
+    // disimpan (belum commit) ikut terlihat.
+    const result = await this.findAll(
+      {
+        search: search || '',
+        filters: filters || {},
+        pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+        sort: { sortBy, sortDirection: sortDirection as 'asc' | 'desc' },
+        isLookUp: false,
+        useCustomOffset: true,
+      },
+      undefined,
+      trx,
+    );
+
+    const allFetchedData = result?.data ?? [];
+    const pagedData: Record<number, any[]> = {};
+    let dataIndex = 0;
+    fetchedPages.forEach((pageNum) => {
+      pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+      dataIndex += limit;
+    });
+
+    const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+    await this.redisService.set(
+      `${this.tableName}-page-${pageNumber}`,
+      JSON.stringify(allFetchedData),
+    );
+
+    return {
+      itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
+      pageNumber,
+      fetchedPages,
+      pagedData,
+    };
+  }
+
   async create(data: any, trx: any) {
     try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        ...insertData
-      } = data;
+      const { sortBy, sortDirection, filters, search, limit } = data;
 
-      // Uppercase string values
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      [
-        'grp',
-        'subgrp',
-        'kelompok',
-        'text',
-        'memo',
-        'type',
-        'default',
-      ].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
+      const sortColumn = sortBy || 'grp';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
+      const uuid = await uuidV7(trx);
+      const insertData = this.buildInsertData(data, uuid);
+      await trx(this.tableName).insert(insertData);
 
-      const newItem = insertedItems[0];
+      const newItem = await trx(this.tableName).where('id', uuid).first();
 
-      // Hapus semua cache yang terkait dengan parameter
+      // Cache list dibersihkan SEBELUM posisi dihitung supaya window yang
+      // dirakit buildPagedResult tidak diambil dari hasil pra-insert.
       await this.clearParameterCache();
 
-      // Query untuk mencari posisi item baru
-      const query = trx(this.tableName)
-        .select(
-          'id',
-          'grp',
-          'subgrp',
-          'kelompok',
-          'text',
-          'memo',
-          'type',
-          'default',
-          'modifiedby',
-          'info',
-          dbMssql.raw(
-            "to_char(created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "to_char(updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-        )
-        .orderBy(sortBy ? `${sortBy}` : 'id', sortDirection || 'desc')
-        .where('id', '<=', newItem.id);
+      const totalRecords = await trx(`${this.tableName} as p`)
+        .count('p.id as total')
+        .modify((qb: any) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
 
-      // Apply search filter
-      if (search) {
-        query.where((builder) => {
-          builder
-            .orWhere('grp', 'ilike', `%${search}%`)
-            .orWhere('subgrp', 'ilike', `%${search}%`)
-            .orWhere('kelompok', 'ilike', `%${search}%`)
-            .orWhere('text', 'ilike', `%${search}%`)
-            .orWhere('memo', 'ilike', `%${search}%`)
-            .orWhere('type', 'ilike', `%${search}%`)
-            .orWhere('default', 'ilike', `%${search}%`)
-            .orWhere('modifiedby', 'ilike', `%${search}%`)
-            .orWhere('info', 'ilike', `%${search}%`);
-        });
-      }
-
-      // Apply column filters
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                `to_char(${key}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${value}%`],
-              );
-            } else {
-              query.andWhere(key, 'ilike', `%${value}%`);
-            }
-          }
-        }
-      }
-
-      const filteredItems = await query;
-
-      // Find index of new item
-      const itemIndex = filteredItems.findIndex(
-        (item) => item.id === newItem.id,
+      const posisi = await this.resolvePosition(
+        trx,
+        uuid,
+        filters,
+        search,
+        sortColumn,
+        sortDir,
       );
 
-      if (itemIndex === -1) {
-        throw new Error('Item baru tidak ditemukan di hasil pencarian');
-      }
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
+      );
 
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-
-      // Log trail
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -146,41 +265,57 @@ export class ParameterService {
         trx,
       );
 
-      return {
-        newItem,
-        pageNumber,
-        itemIndex,
-      };
+      return { newItem, ...paged };
     } catch (error) {
-      throw new Error(`Error creating parameter: ${error.message}`);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error creating parameter', error?.stack);
+      throw new InternalServerErrorException('Gagal menyimpan parameter');
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp, exclude }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      exclude,
+      useCustomOffset,
+    }: FindAllParams,
     notIn?: any,
+    db: any = dbMssql,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, customOffset } = pagination ?? {};
+      let limit = pagination?.limit ?? 0;
+      // Jalur buildPagedResult berjalan di dalam transaksi tulis: hasilnya
+      // belum commit, jadi tidak boleh dibaca dari maupun ditulis ke cache list.
+      const useCache = useCustomOffset !== true;
 
-      // Generate unique cache key based on query parameters
+      const sortBy = sort?.sortBy || 'grp';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const safeFilters = (filters || {}) as Record<string, any>;
+
       const cacheKey = this.generateCacheKey({
         search,
-        filters,
+        filters: safeFilters,
         page,
         limit,
-        sort,
+        sort: { sortBy, sortDirection },
         isLookUp,
         exclude,
+        notIn,
+        customOffset: useCustomOffset ? customOffset : undefined,
       });
-      // Check if data exists in cache. Caching is best-effort: if Redis is
-      // unavailable, fall through to the database instead of failing the request
-      // with a 500/timeout.
+      // Caching best-effort: kalau Redis mati, jatuh ke database daripada
+      // menggagalkan request.
       let cachedData: string | null = null;
       try {
-        cachedData = await this.redisService.get(cacheKey);
+        cachedData = useCache ? await this.redisService.get(cacheKey) : null;
       } catch {
         cachedData = null;
       }
@@ -194,16 +329,16 @@ export class ParameterService {
           ) {
             return parsedCache;
           }
-          // Jika data kosong, hapus cache yang tidak valid
           await this.redisService.del(cacheKey);
         } catch {
-          // Ignore malformed cache / Redis errors and fall back to the DB.
+          // Abaikan cache rusak / Redis error, lanjut ke DB.
         }
       }
 
-      // Handle lookup mode
+      // Gate lookup memakai jumlah baris TANPA filter — perilaku ini dipakai
+      // ~50 halaman lookup lain, jangan diubah bersama perbaikan paging.
       if (isLookUp) {
-        const acoCountResult = await dbMssql(this.tableName)
+        const acoCountResult = await db(this.tableName)
           .count('id as total')
           .first();
 
@@ -211,117 +346,101 @@ export class ParameterService {
 
         if (Number(acoCount) > 500) {
           return { data: { type: 'json' } };
-        } else {
-          limit = 0;
         }
+        limit = 0;
       }
 
-      // Query database
-      const offset = (page - 1) * limit;
-      const query = dbMssql(this.tableName).select(
-        'id',
-        'grp',
-        'subgrp',
-        'kelompok',
-        'text',
-        'memo',
-        'type',
-        'default',
-        'modifiedby',
-        'info',
-        dbMssql.raw("to_char(created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at"),
-        dbMssql.raw("to_char(updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at"),
+      const applyScope = (qb: any) => {
+        this.applyFilters(qb, safeFilters, search);
+
+        if (exclude && filters) {
+          for (const [key, value] of Object.entries(safeFilters)) {
+            if (value != null) {
+              qb.andWhere(`p.${key}`, '!=', value);
+            }
+          }
+        }
+
+        if (notIn) {
+          const notInObj =
+            typeof notIn === 'string' ? JSON.parse(notIn) : notIn;
+
+          if (notInObj && typeof notInObj === 'object') {
+            for (const [key, values] of Object.entries(notInObj)) {
+              if (Array.isArray(values) && values.length > 0) {
+                qb.whereNotIn(`p.${key}`, values);
+              }
+            }
+          }
+        }
+      };
+
+      // totalItems dihitung DENGAN filter aktif; sebelumnya memakai COUNT
+      // seluruh tabel sehingga jumlah halaman grid salah begitu difilter dan
+      // buildPagedResult menghitung posisi baris pada window yang keliru.
+      const countResult = await db(`${this.tableName} as p`)
+        .count('p.id as total')
+        .modify(applyScope)
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      const query = db(`${this.tableName} as p`).select(
+        'p.id',
+        'p.grp',
+        'p.subgrp',
+        'p.kelompok',
+        'p.text',
+        'p.memo',
+        'p.type',
+        'p.default',
+        'p.modifiedby',
+        'p.info',
+        db.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at"),
+        db.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at"),
       );
 
+      query.modify(applyScope);
+
+      const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+      query.orderBy(orderCol, sortDirection);
+
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
+
       if (limit > 0) {
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
 
-      // Apply search
-      if (search) {
-        query.where((builder) => {
-          builder.orWhere('text', 'ilike', `%${search}%`);
-        });
-      }
-
-      // Apply filters
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                `to_char(${key}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${value}%`],
-              );
-            } else {
-              query.andWhere(key, 'ilike', `%${value}%`);
-            }
-          }
-        }
-      }
-
-      // Apply exclude filters
-      if (exclude && filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value != null) {
-            query.andWhere(key, '!=', value);
-          }
-        }
-      }
-
-      // Apply notIn filter - Dinamis untuk semua key
-      if (notIn) {
-        // Jika notIn adalah string JSON, parse dulu
-        const notInObj = typeof notIn === 'string' ? JSON.parse(notIn) : notIn;
-
-        if (notInObj && typeof notInObj === 'object') {
-          // Loop semua key di notIn object
-          for (const [key, values] of Object.entries(notInObj)) {
-            if (Array.isArray(values) && values.length > 0) {
-              query.whereNotIn(key, values);
-            }
-          }
-        }
-      }
-      // Apply sorting
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
-
-      // Get total count
-      const result = await dbMssql(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-
-      // Execute query
       const parameters = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
-      // Prepare response
       const responseObject = {
         data: parameters,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
       };
 
-      // Save to cache with expiration (e.g., 1 hour = 3600 seconds).
-      // Best-effort: never let a cache write failure break the response.
-      try {
-        await this.redisService.set(cacheKey, JSON.stringify(responseObject));
-      } catch {
-        // ignore — Redis unavailable
+      if (useCache) {
+        try {
+          await this.redisService.set(cacheKey, JSON.stringify(responseObject));
+        } catch {
+          // ignore — Redis unavailable
+        }
       }
 
       return responseObject;
     } catch (error) {
-      console.error('Error fetching parameters:', error);
-      throw new Error('Failed to fetch parameters');
+      this.logger.error('Error fetching parameters', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
   }
 
@@ -337,13 +456,15 @@ export class ParameterService {
       sort = {},
       isLookUp = false,
       exclude = false,
+      notIn = null,
+      customOffset,
     } = params;
 
-    // Create a stable string representation of parameters
     const filterStr = JSON.stringify(filters);
     const sortStr = JSON.stringify(sort);
+    const notInStr = notIn ? JSON.stringify(notIn) : '';
 
-    return `${this.tableName}:list:${search}:${filterStr}:${sortStr}:${page}:${limit}:${isLookUp}:${exclude}`;
+    return `${this.tableName}:list:${search}:${filterStr}:${sortStr}:${page}:${limit}:${isLookUp}:${exclude}:${notInStr}:${customOffset ?? ''}`;
   }
 
   /**
@@ -351,23 +472,14 @@ export class ParameterService {
    */
   private async clearParameterCache(): Promise<void> {
     try {
-      // Delete all keys matching the pattern
       const pattern = `${this.tableName}:list:*`;
-      const deletedCount = await this.redisService.delPattern(pattern);
-
-      if (deletedCount > 0) {
-        console.log(
-          `Cleared ${deletedCount} cache entries for ${this.tableName}`,
-        );
-      }
-
-      // Also clear the old allItems cache if exists
+      await this.redisService.delPattern(pattern);
       await this.redisService.del(`${this.tableName}-allItems`);
     } catch (error) {
-      console.error('Error clearing cache:', error);
-      // Don't throw error, just log it
+      this.logger.warn(`Gagal membersihkan cache parameter: ${error?.message}`);
     }
   }
+
   async findAllApproval({
     search,
     filters,
@@ -425,9 +537,10 @@ export class ParameterService {
             if (!value) continue;
 
             if (key === 'created_at' || key === 'updated_at') {
-              qb.andWhereRaw(`to_char(${key}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`, [
-                `%${value}%`,
-              ]);
+              qb.andWhereRaw(
+                `to_char(${key}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
+                [`%${value}%`],
+              );
             } else if (key === 'json') {
               // filters.json = { "SINGKATAN":"BIAYA", "NILAI YA":"12" }
               if (value && typeof value === 'object') {
@@ -480,8 +593,12 @@ export class ParameterService {
         dbMssql.raw('[default] AS [default]'),
         'modifiedby',
         'info',
-        dbMssql.raw("to_char(created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at"),
-        dbMssql.raw("to_char(updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at"),
+        dbMssql.raw(
+          "to_char(created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
+        ),
+        dbMssql.raw(
+          "to_char(updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
+        ),
       );
 
       attachCommonConditions(dataQuery);
@@ -528,244 +645,155 @@ export class ParameterService {
 
   async getById(id: string, trx: any) {
     try {
-      // Fetch data by id from the database table
       const result = await trx(this.tableName).where('id', id).first();
 
-      // Check if data is found
       if (!result) {
-        throw new Error('Data not found');
+        throw new NotFoundException('Parameter tidak ditemukan');
       }
 
       return result;
     } catch (error) {
-      console.error('Error fetching data by id:', error);
-      throw new Error('Failed to fetch data by id');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error fetching parameter by id', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data by id');
     }
   }
 
   async findAllByIds(ids: { id: string }[]) {
     try {
       const idList = ids.map((item) => item.id);
-      const tempData = `##temp_${Math.random().toString(36).substring(2, 15)}`;
 
-      // Membuat temporary table
-      const createTempTableQuery = `
-        CREATE TABLE ${tempData} (
-          id NVARCHAR(100)
-        );
-      `;
-      await dbMssql.raw(createTempTableQuery);
-
-      // Memasukkan data ID ke dalam temporary table
-      const insertTempTableQuery = `
-        INSERT INTO ${tempData} (id)
-        VALUES ${idList.map((id) => `('${id}')`).join(', ')};
-      `;
-      await dbMssql.raw(insertTempTableQuery);
-
-      // Menggunakan alias 'u' untuk tabel utama
-      const query = dbMssql(`${this.tableName} AS u`)
+      const data = await dbMssql(`${this.tableName} as p`)
         .select(
-          'u.id',
-          'u.grp',
-          'u.subgrp',
-          'u.kelompok',
-          'u.text',
-          'u.memo',
-          'u.type',
-          'u.default',
-          'u.modifiedby',
-          'u.info',
+          'p.id',
+          'p.grp',
+          'p.subgrp',
+          'p.kelompok',
+          'p.text',
+          'p.memo',
+          'p.type',
+          'p.default',
+          'p.modifiedby',
+          'p.info',
           dbMssql.raw(
-            "to_char(u.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
           ),
           dbMssql.raw(
-            "to_char(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
           ),
         )
-        .join(dbMssql.raw(`${tempData} AS temp`), 'u.id', 'temp.id') // Memperbaiki JOIN dengan alias yang benar
-        .orderBy('u.grp', 'ASC'); // Menambahkan alias 'u' di bagian order by
-
-      const data = await query;
-
-      // Menghapus temporary table setelah query selesai
-      const dropTempTableQuery = `DROP TABLE ${tempData};`;
-      await dbMssql.raw(dropTempTableQuery);
+        .whereIn('p.id', idList)
+        .orderBy('p.grp', 'ASC');
 
       return data;
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
+      this.logger.error('Error fetching parameter by ids', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
   }
 
   async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName).where('id', id).first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        throw new Error('Parameter not found');
+      if (!existedData) {
+        throw new NotFoundException('Parameter tidak ditemukan');
       }
 
-      // Ensure memo is a JSON string
-      data.memo = JSON.stringify(data.memo);
+      const { sortBy, sortDirection, filters, search, limit } = data;
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statusaktif_text,
-        ...insertData
-      } = data;
+      const sortColumn = sortBy || 'grp';
+      const sortDir = sortDirection || 'asc';
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      [
-        'grp',
-        'subgrp',
-        'kelompok',
-        'text',
-        'memo',
-        'type',
-        'default',
-      ].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
+      const insertData = this.buildInsertData(data);
+      // id = kunci WHERE (PK), bukan kolom yang di-SET. created_at juga jangan
+      // ditimpa saat edit (buildInsertData mengisinya dengan now() bila kosong).
+      delete insertData.id;
+      delete insertData.created_at;
 
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
-
-      // If memo is an object, serialize it to a JSON string
-      if (insertData.memo && typeof insertData.memo === 'object') {
-        insertData.memo = JSON.stringify(insertData.memo); // Convert object to JSON string
-      } else if (insertData.memo === undefined || insertData.memo === null) {
-        insertData.memo = ''; // Assign empty string if memo is undefined or null
-      }
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
-        // Ensure updated_at field is properly set using getTime()
         insertData.updated_at = this.utilsService.getTime();
-
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const query = trx(this.tableName)
-        .select(
-          'id',
-          'grp',
-          'subgrp',
-          'kelompok',
-          'text',
-          'memo',
-          'type',
-          'default',
-          'modifiedby',
-          'info',
-          dbMssql.raw(
-            "to_char(created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
-          ),
-          dbMssql.raw(
-            "to_char(updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
-          ),
-        )
-        .orderBy(sortBy ? `${sortBy}` : 'id', sortDirection || 'desc')
-        .where('id', '<=', id); // Filter based on ID condition
+      await this.clearParameterCache();
 
-      // Handle search conditions
-      if (search) {
-        query.where((builder) => {
-          builder
-            .orWhere('grp', 'ilike', `%${search}%`)
-            .orWhere('subgrp', 'ilike', `%${search}%`)
-            .orWhere('kelompok', 'ilike', `%${search}%`)
-            .orWhere('text', 'ilike', `%${search}%`)
-            .orWhere('memo', 'ilike', `%${search}%`)
-            .orWhere('type', 'ilike', `%${search}%`)
-            .orWhere('default', 'ilike', `%${search}%`)
-            .orWhere('modifiedby', 'ilike', `%${search}%`)
-            .orWhere('info', 'ilike', `%${search}%`);
-        });
-      }
+      // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
+      // walau hasil edit tak lagi cocok dengan filter aktif.
+      const updatedItem = await trx(this.tableName).where('id', id).first();
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                `to_char(${key}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${value}%`],
-              );
-            } else {
-              query.andWhere(key, 'ilike', `%${value}%`);
-            }
-          }
-        }
-      }
+      const totalRecords = await trx(`${this.tableName} as p`)
+        .count('p.id as total')
+        .modify((qb: any) => this.applyFilters(qb, filters, search))
+        .first();
+      const totalItems = Number(totalRecords?.total ?? 0);
 
-      // Fetch filtered items
-      const filteredItems = await query;
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        filters,
+        search,
+        sortColumn,
+        sortDir,
+      );
 
-      const itemIndex = filteredItems.findIndex((item) => item.id === id);
-
-      if (itemIndex === -1) {
-        throw new Error('Item not found in search results');
-      }
-
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      const endIndex = pageNumber * limit;
-
-      // Get data for the page
-      const limitedItems = filteredItems.slice(0, endIndex);
-
-      // Store the result in Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+      const paged = await this.buildPagedResult(
+        trx,
+        posisi,
+        totalItems,
+        pageLimit,
+        sortColumn,
+        sortDir,
+        filters,
+        search,
       );
 
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT PARAMETER',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
-      return {
-        newItem: {
-          id,
-          ...data,
-        },
-        pageNumber,
-        itemIndex,
-      };
+      return { updatedItem, ...paged };
     } catch (error) {
-      console.error('Error updating parameter:', error);
-      throw new Error('Failed to update parameter');
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error updating parameter', error?.stack);
+      throw new InternalServerErrorException('Gagal memperbarui parameter');
     }
   }
 
-  async delete(id: string, trx: any) {
+  async delete(id: string, trx: any, modifiedby?: string) {
     try {
+      // lockAndDestroy mengembalikan `true` (bukan melempar) saat baris tidak
+      // ada, sehingga tanpa cek ini penghapusan id asing tetap dibalas 200 dan
+      // logtrail-nya tercatat dengan idtrans undefined.
+      const existedData = await trx(this.tableName).where('id', id).first();
+      if (!existedData) {
+        throw new NotFoundException('Parameter tidak ditemukan');
+      }
+
       const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
         'id',
         trx,
       );
+
+      await this.clearParameterCache();
 
       await this.logTrailService.create(
         {
@@ -775,20 +803,21 @@ export class ParameterService {
           nobuktitrans: deletedData.id,
           aksi: 'DELETE',
           datajson: JSON.stringify(deletedData),
-          modifiedby: deletedData.modifiedby,
+          modifiedby: modifiedby ?? deletedData.modifiedby,
         },
         trx,
       );
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
-      console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
+      this.logger.error('Error deleting parameter', error?.stack);
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
   async validateRows(rows: { key: string; value: string }[]) {
     const errors: { rowIndex: number; message: string }[] = [];
 
@@ -816,43 +845,142 @@ export class ParameterService {
     return { success: true };
   }
 
-  async exportToExcel(data: any[]) {
-    const workbook = new Workbook();
-    const worksheet = workbook.addWorksheet('Data Export');
+  /**
+   * Pra-cek sebelum dialog dibuka.
+   *
+   * EDIT mengambil lock baris seperti modul master lainnya. DELETE tidak punya
+   * satu tabel referensi untuk dicek: id parameter dipakai sebagai `statusaktif`
+   * (dan kolom sejenis) di hampir seluruh tabel, jadi tidak ada analog
+   * `checkUsed` bertabel-tunggal seperti groupbiayaextra.
+   */
+  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
+    try {
+      if (aksi === 'EDIT') {
+        return await this.locksService.forceEdit(
+          this.tableName,
+          value,
+          editedby,
+          trx,
+        );
+      }
 
-    // Header export
-    worksheet.mergeCells('A1:F1');
-    worksheet.mergeCells('A2:F2');
-    worksheet.mergeCells('A3:F3');
-    worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
-    worksheet.getCell('A2').value = 'LAPORAN PARAMETER';
-    worksheet.getCell('A3').value = 'Data Export';
-    worksheet.getCell('A1').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A2').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A3').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A1').font = { size: 14, bold: true };
-    worksheet.getCell('A2').font = { bold: true };
-    worksheet.getCell('A3').font = { bold: true };
+      return { status: 'success', message: 'Data aman untuk dihapus.' };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error('Error di checkValidasi parameter', error?.stack);
+      throw new InternalServerErrorException('Failed to check validation');
+    }
+  }
 
-    // Mendefinisikan header kolom
-    const headers = [
-      'No.',
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
+  private readonly EXPORT_COLUMNS = [
+    'p.grp',
+    'p.subgrp',
+    'p.kelompok',
+    'p.text',
+    'p.type',
+    'p.default',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'grp';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    return db(`${this.tableName} as p`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .orderBy(orderCol, sortDirection);
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
+   * sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as p`)
+      .count('p.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN PARAMETER',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
       'GROUP',
       'SUB GROUP',
       'KELOMPOK',
       'TEXT',
-      'MEMO',
-      'CREATED AT',
-    ];
+      'TYPE',
+      'DEFAULT',
+    ],
+    columnWidths: [6, 25, 25, 25, 30, 15, 15],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.grp,
+      row.subgrp,
+      row.kelompok,
+      row.text,
+      row.type,
+      row.default,
+    ],
+  };
+
+  async exportToExcel(data: any[]) {
+    const workbook = new Workbook();
+    const worksheet = workbook.addWorksheet('Data Export');
+
+    worksheet.mergeCells('A1:G1');
+    worksheet.mergeCells('A2:G2');
+    worksheet.mergeCells('A3:G3');
+    worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
+    worksheet.getCell('A2').value = 'LAPORAN PARAMETER';
+    worksheet.getCell('A3').value = 'Data Export';
+    ['A1', 'A2', 'A3'].forEach((cellKey, i) => {
+      worksheet.getCell(cellKey).alignment = {
+        horizontal: 'center',
+        vertical: 'middle',
+      };
+      worksheet.getCell(cellKey).font = {
+        name: 'Tahoma',
+        size: i === 0 ? 14 : 10,
+        bold: true,
+      };
+    });
+
+    const headers = this.exportSheet.headers;
+
     headers.forEach((header, index) => {
       const cell = worksheet.getCell(5, index + 1);
       cell.value = header;
@@ -871,39 +999,32 @@ export class ParameterService {
       };
     });
 
-    // Mengisi data ke dalam Excel dengan nomor urut sebagai ID
     data.forEach((row, rowIndex) => {
-      worksheet.getCell(rowIndex + 6, 1).value = rowIndex + 1; // Nomor urut (ID)
-      worksheet.getCell(rowIndex + 6, 2).value = row.grp;
-      worksheet.getCell(rowIndex + 6, 3).value = row.subgrp;
-      worksheet.getCell(rowIndex + 6, 4).value = row.kelompok;
-      worksheet.getCell(rowIndex + 6, 5).value = row.text;
-      worksheet.getCell(rowIndex + 6, 6).value = row.memo;
-      worksheet.getCell(rowIndex + 6, 7).value = row.created_at;
-
-      // Menambahkan border untuk setiap cell
-      for (let col = 1; col <= headers.length; col++) {
-        const cell = worksheet.getCell(rowIndex + 6, col);
+      const currentRow = rowIndex + 6;
+      const rowValues = this.exportSheet.mapRow(row, rowIndex + 1);
+      rowValues.forEach((value, colIndex) => {
+        const cell = worksheet.getCell(currentRow, colIndex + 1);
+        cell.value = value ?? '';
         cell.font = { name: 'Tahoma', size: 10 };
+        cell.alignment = {
+          horizontal: colIndex === 0 ? 'right' : 'left',
+          vertical: 'middle',
+        };
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
           bottom: { style: 'thin' },
           right: { style: 'thin' },
         };
-      }
+      });
     });
 
-    // Mengatur lebar kolom
-    worksheet.getColumn(1).width = 10; // Lebar untuk nomor urut
-    worksheet.getColumn(2).width = 30;
-    worksheet.getColumn(3).width = 30;
-    worksheet.getColumn(4).width = 30;
-    worksheet.getColumn(5).width = 15;
-    worksheet.getColumn(6).width = 20;
-    worksheet.getColumn(7).width = 30;
+    worksheet.columns
+      .filter((c): c is Column => !!c)
+      .forEach((col, index) => {
+        col.width = this.exportSheet.columnWidths[index] ?? 20;
+      });
 
-    // Simpan file Excel ke direktori sementara
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -911,10 +1032,10 @@ export class ParameterService {
 
     const tempFilePath = path.resolve(
       tempDir,
-      `laporan_parameter${Date.now()}.xlsx`,
+      `laporan_parameter_${Date.now()}.xlsx`,
     );
     await workbook.xlsx.writeFile(tempFilePath);
 
-    return tempFilePath; // Kembalikan path file sementara
+    return tempFilePath;
   }
 }
