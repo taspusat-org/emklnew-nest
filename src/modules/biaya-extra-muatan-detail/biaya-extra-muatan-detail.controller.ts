@@ -39,14 +39,20 @@ export class BiayaExtraMuatanDetailController {
       sortDirection: sortDirection || 'asc',
     };
 
+    // Query string selalu string. Tanpa Number() di sini offset/totalPages
+    // bergantung pada koersi JS.
+    const numericLimit = Number(limit);
     const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
     };
 
     const params: FindAllParams = {
       search,
-      filters,
+      // Header terpilih ikut sebagai filter, bukan argumen terpisah — service
+      // memakainya untuk set_config('tas.biayaextra_id') + WHERE eksplisit.
+      filters: { ...filters, biayaextra_id: id },
       pagination,
       isLookUp: isLookUp === 'true',
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
@@ -55,22 +61,14 @@ export class BiayaExtraMuatanDetailController {
     const trx = await dbMssql.transaction();
     try {
       const result = await this.biayaExtraMuatanDetailService.findAll(
-        id,
-        trx,
         params,
+        trx,
       );
       await trx.commit();
 
-      if (result.data.length === 0) {
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-          total: result.total,
-          pagination: result.pagination,
-        };
-      }
-
+      // Balikan diteruskan apa adanya, termasuk saat kosong: service sudah
+      // mengisi `pagination` bahkan untuk hasil kosong, dan grid butuh
+      // totalPages untuk berhenti di halaman terakhir.
       return result;
     } catch (error) {
       trx.rollback();

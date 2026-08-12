@@ -87,21 +87,28 @@ export class JurnalumumdetailService {
       logData.push({ ...data, created_at: time });
     }
 
-    // UPDATE baris existing. nobukti/tglbukti/coa sengaja TIDAK diubah agar sama
-    // dgn perilaku lama (UPDATE JOIN meng-set ketiganya ke nilai sendiri).
+    // UPDATE baris existing. coa/nobukti/tglbukti IKUT diubah: user bisa
+    // mengganti COA pada baris yang sudah ada, dan nobukti/tglbukti detail harus
+    // mengikuti headernya. Kolom yang tidak dikirim pemanggil dibiarkan apa
+    // adanya supaya tidak menimpa nilai lama dengan undefined.
     let updatedData: any = null;
     for (const row of existingRows) {
+      const payload: Record<string, any> = {
+        keterangan: row.keterangan,
+        nominal: row.nominal,
+        info: row.info,
+        modifiedby: row.modifiedby,
+        jurnalumum_id: row.jurnalumum_id ?? id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      };
+      if (row.coa !== undefined) payload.coa = row.coa;
+      if (row.nobukti !== undefined) payload.nobukti = row.nobukti;
+      if (row.tglbukti !== undefined) payload.tglbukti = row.tglbukti;
+
       const res = await trx(this.tableName)
         .where('id', row.id)
-        .update({
-          keterangan: row.keterangan,
-          nominal: row.nominal,
-          info: row.info,
-          modifiedby: row.modifiedby,
-          jurnalumum_id: row.jurnalumum_id ?? id,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        })
+        .update(payload)
         .returning('*');
       if (res && res[0]) updatedData = res[0];
     }

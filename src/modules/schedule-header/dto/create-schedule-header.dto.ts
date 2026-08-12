@@ -1,14 +1,26 @@
 import { z } from 'zod';
-import { isRecordExist } from 'src/utils/utils.service';
+
+// id header, id detail, dan seluruh FK (pelayaran/kapal/tujuankapal) adalah
+// varchar(200) berisi UUID — bukan angka. Union string|number dipertahankan
+// karena grid mengirim 0 untuk baris detail yang baru.
+const idField = z.union([z.string(), z.number()]);
+
+const requiredLookup = (label: string) =>
+  idField
+    .nullable()
+    .refine(
+      (value) => value !== null && value !== '' && String(value) !== '0',
+      { message: `${label} WAJIB DIISI` },
+    );
 
 const baseDetails = z.object({
-  id: z.number().optional(),
+  id: idField.optional(),
   nobukti: z.string().nullable().optional(),
-  pelayaran_id: z.number().nullable(),
+  pelayaran_id: requiredLookup('PELAYARAN'),
   pelayaran_nama: z.string().nullable().optional(),
-  kapal_id: z.number().nullable(),
+  kapal_id: requiredLookup('KAPAL'),
   kapal_nama: z.string().nullable().optional(),
-  tujuankapal_id: z.number().nullable(),
+  tujuankapal_id: requiredLookup('TUJUAN KAPAL'),
   tujuankapal_nama: z.string().nullable().optional(),
   tglberangkat: z.string().nullable(),
   tgltiba: z.string().nullable(),
@@ -20,7 +32,6 @@ const baseDetails = z.object({
   closing: z.string().nullable(),
   etatujuan: z.string().nullable(),
   etdtujuan: z.string().nullable(),
-  // keterangan: z.string().nullable(),
   keterangan: z.string().nonempty({ message: 'KETERANGAN WAJIB DIISI' }),
 });
 
@@ -28,15 +39,14 @@ const baseDetails = z.object({
 // 1. BASE FIELDS
 // ------------------------
 const baseFields = {
-  nobukti: z.string().nullable(),
+  nobukti: z.string().nullable().optional(),
   tglbukti: z.string().nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
   keterangan: z
     .string()
     .nonempty({ message: 'KETERANGAN WAJIB DIISI' })
-    .min(1, { message: 'Keterangan Wajib Diisi' })
     .max(100),
   modifiedby: z.string().max(200).optional(),
-  details: z.array(baseDetails).min(1),
+  details: z.array(baseDetails).min(1, { message: 'DETAIL WAJIB DIISI' }),
 };
 
 // ------------------------
@@ -53,7 +63,6 @@ export type CreateScheduleDto = z.infer<typeof CreateScheduleSchema>;
 // ------------------------
 export const UpdateScheduleSchema = z.object({
   ...baseFields,
-  // id: z.number({ required_error: 'Id wajib diisi untuk update' }),
   // Field atau aturan khusus update bisa ditambah di sini
 });
 export type UpdateScheduleDto = z.infer<typeof UpdateScheduleSchema>;
