@@ -40,10 +40,15 @@ import { InjectMethodPipe } from 'src/common/pipes/inject-method.pipe';
 import { AclGuard } from '../auth/acl.guard';
 import { RequireAcos } from '../auth/access.decorator';
 import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
 import {
   ReportTypeAkuntansiDto,
   ReportTypeAkuntansiSchema,
 } from './dto/report-type-akuntansi.dto';
+import {
+  ExportTypeAkuntansiDto,
+  ExportTypeAkuntansiSchema,
+} from './dto/export-type-akuntansi.dto';
 import {
   ApiTags,
   ApiOperation,
@@ -60,6 +65,7 @@ export class TypeAkuntansiController {
   constructor(
     private readonly typeAkuntansiService: TypeAkuntansiService,
     private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -327,6 +333,54 @@ export class TypeAkuntansiController {
     });
   }
 
+  /**
+   * POST /type-akuntansi/export
+   *
+   * Export Excel di background. Request langsung balas { jobId }; progresnya
+   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
+   * laporan), dan file-nya diambil di GET /report/download/:jobId.
+   *
+   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
+   * menyentuh ratusan ribu baris.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportTypeAkuntansiSchema))
+    body: ExportTypeAkuntansiDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_type_akuntansi_${stamp}.xlsx`,
+      countRows: () =>
+        this.typeAkuntansiService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.typeAkuntansiService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.typeAkuntansiService.exportSheet,
+    });
+  }
+
+  // Jalur blob lama, MASIH DIPAKAI tombol Export di halaman /reports/typeakuntansi
+  // dan /reports/akunpusat (viewer PDF tab terpisah). Grid sudah pindah ke
+  // POST /export di atas.
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {
     try {

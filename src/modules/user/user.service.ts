@@ -27,6 +27,7 @@ import { Workbook, Column } from 'exceljs';
 export class UserService {
   private readonly logger = new Logger(UserService.name);
   private readonly tableName = 'users';
+  private readonly viewName = 'vusers';
   /** Password awal user baru — user mengganti sendiri setelah login pertama. */
   private readonly DEFAULT_PASSWORD = '12345678';
 
@@ -39,17 +40,13 @@ export class UserService {
   ) {}
 
   /**
-   * Tabel `users` tidak punya view turunan, jadi kolom teks status
-   * (p.text / p.memo) dan nama karyawan diambil lewat LEFT JOIN. Query dasar
-   * ini dipakai findAll, COUNT, dan perhitungan posisi baris supaya ketiganya
-   * melihat dataset yang PERSIS sama.
+   * Teks status (statusaktif_text/_memo) dan nama cabang sudah dirangkai di
+   * `vusers`, jadi join-nya tidak diulang di sini. Query dasar ini dipakai
+   * findAll, COUNT, dan perhitungan posisi baris supaya ketiganya melihat
+   * dataset yang PERSIS sama.
    */
   private baseQuery(trx: any) {
-    return trx(`${this.tableName} as u`).leftJoin(
-      'parameter as p',
-      'u.statusaktif',
-      'p.id',
-    );
+    return trx(`${this.viewName} as u`);
   }
 
   private selectColumns(trx: any) {
@@ -62,19 +59,30 @@ export class UserService {
       'u.modifiedby',
       trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
       trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-      'p.memo',
-      'p.text',
+      'u.statusaktif_memo as memo',
+      'u.statusaktif_text as text',
     ];
   }
 
   /**
-   * Kolom yang berada di tabel selain `users`. Dipakai applyFilters supaya
-   * filter/search-nya di-prefix ke alias yang benar — `u.namakaryawan` tidak
-   * ada dan langsung melempar "column does not exist".
+   * Kolom `vusers` yang boleh dipakai filter/search, dipetakan dari nama key
+   * yang dikirim grid. Key di luar daftar ini DIABAIKAN, bukan diteruskan
+   * sebagai `u.<key>`: grid masih mengirim `namakaryawan` (kolomnya tidak ada
+   * di tabel `users` maupun view) pada setiap request, dan meneruskannya
+   * membuat seluruh grid gagal dengan "column does not exist" begitu search
+   * global diisi.
    */
-  private readonly JOINED_COLUMNS: Record<string, string> = {
-    text: 'p.text',
-    memo: 'p.memo',
+  private readonly FILTER_COLUMNS: Record<string, string> = {
+    username: 'u.username',
+    name: 'u.name',
+    email: 'u.email',
+    statusaktif: 'u.statusaktif',
+    modifiedby: 'u.modifiedby',
+    created_at: 'u.created_at',
+    updated_at: 'u.updated_at',
+    cabang_nama: 'u.cabang_nama',
+    text: 'u.statusaktif_text',
+    memo: 'u.statusaktif_memo',
   };
 
   private applyFilters(
@@ -87,7 +95,7 @@ export class UserService {
     const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
 
     const searchFields = Object.keys(filters || {}).filter(
-      (k) => !excludeSearchKeys.includes(k),
+      (k) => !excludeSearchKeys.includes(k) && k in this.FILTER_COLUMNS,
     );
     const dateFields = ['created_at', 'updated_at'];
 
@@ -101,8 +109,11 @@ export class UserService {
               `%${sanitizedValue}%`,
             ]);
           } else {
-            const column = this.JOINED_COLUMNS[field] ?? `u.${field}`;
-            query.orWhere(column, 'ilike', `%${sanitizedValue}%`);
+            query.orWhere(
+              this.FILTER_COLUMNS[field],
+              'ilike',
+              `%${sanitizedValue}%`,
+            );
           }
         });
       });
@@ -112,6 +123,9 @@ export class UserService {
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
+      const column = this.FILTER_COLUMNS[key];
+      if (!column) return;
+
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
         qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
@@ -119,9 +133,8 @@ export class UserService {
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'text' || key === 'memo') {
-        qb.andWhere(`p.${key}`, '=', sanitizedValue);
+        qb.andWhere('u.statusaktif_text', '=', sanitizedValue);
       } else {
-        const column = this.JOINED_COLUMNS[key] ?? `u.${key}`;
         qb.andWhere(column, 'ilike', `%${sanitizedValue}%`);
       }
     });
@@ -155,8 +168,12 @@ export class UserService {
   /**
    * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
    * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
-   * TEKS parameter (p.text) dan kolom karyawan memakai k.namakaryawan, bukan
-   * id UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
+   * TEKS parameter (statusaktif_text), bukan id UUID-nya. Kalau tidak sama,
+   * fokus baris setelah simpan akan meleset.
+   *
+   * Kolom di luar view (mis. `namakaryawan` yang masih jadi kolom grid) jatuh
+   * ke `username` — sama seperti applyFilters, sort ke kolom yang tidak ada
+   * akan menggagalkan seluruh query.
    */
   private resolvePositionOrder(
     sortBy: string,
@@ -166,9 +183,12 @@ export class UserService {
     switch (sortBy) {
       case 'statusaktif':
       case 'text':
-        return { orderCol: 'p.text', dir };
+        return { orderCol: 'u.statusaktif_text', dir };
       default:
-        return { orderCol: `u.${sortBy}`, dir };
+        return {
+          orderCol: this.FILTER_COLUMNS[sortBy] ?? 'u.username',
+          dir,
+        };
     }
   }
 
@@ -529,9 +549,16 @@ export class UserService {
     }
   }
 
+  /**
+   * Dibaca lewat view, bukan tabel: hasilnya dikirim apa adanya ke pemanggil
+   * dan `users` menyimpan hash password di baris yang sama.
+   */
   async getById(id: string, trx: any) {
     try {
-      const result = await trx(this.tableName).where('id', id).first();
+      const result = await this.baseQuery(trx)
+        .select(this.selectColumns(trx))
+        .where('u.id', id)
+        .first();
 
       if (!result) {
         throw new Error('Data not found');
@@ -672,7 +699,7 @@ export class UserService {
     'u.username',
     'u.name',
     'u.email',
-    'p.text',
+    'u.statusaktif_text as text',
   ];
 
   /**
@@ -705,8 +732,8 @@ export class UserService {
 
   /**
    * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. JOIN ke `parameter` & `karyawan` tetap dipakai karena filter
-   * menyaring lewat p.text / k.namakaryawan.
+   * sebenarnya. Memakai view yang sama dengan findAll supaya filter status
+   * menyaring dataset yang identik.
    */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
@@ -728,21 +755,15 @@ export class UserService {
       'LAPORAN USER',
       'Data Export',
     ],
-    headers: [
-      'NO.',
-      'USERNAME',
-      'NAMA',
-      'EMAIL',
-      'NAMA KARYAWAN',
-      'STATUS AKTIF',
-    ],
-    columnWidths: [5, 25, 30, 30, 30, 20],
+    // Kolom NAMA KARYAWAN dihapus: `users` tidak menyimpan relasi karyawan,
+    // jadi kolomnya selalu kosong di file hasil export.
+    headers: ['NO.', 'USERNAME', 'NAMA', 'EMAIL', 'STATUS AKTIF'],
+    columnWidths: [5, 25, 30, 30, 20],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.username,
       row.name,
       row.email,
-      row.namakaryawan,
       row.text,
     ],
   };
@@ -751,9 +772,9 @@ export class UserService {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    worksheet.mergeCells('A1:F1');
-    worksheet.mergeCells('A2:F2');
-    worksheet.mergeCells('A3:F3');
+    worksheet.mergeCells('A1:E1');
+    worksheet.mergeCells('A2:E2');
+    worksheet.mergeCells('A3:E3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN USER';
     worksheet.getCell('A3').value = 'Data Export';

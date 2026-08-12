@@ -1,17 +1,11 @@
 import {
   Controller,
   Get,
-  Post,
-  Body,
-  Patch,
   Param,
-  Delete,
   Query,
   InternalServerErrorException,
 } from '@nestjs/common';
 import { ScheduleDetailService } from './schedule-detail.service';
-import { CreateScheduleDetailDto } from './dto/create-schedule-detail.dto';
-import { UpdateScheduleDetailDto } from './dto/update-schedule-detail.dto';
 import { dbMssql } from 'src/common/utils/db';
 import { FindAllDto, FindAllParams } from 'src/common/interfaces/all.interface';
 
@@ -19,11 +13,9 @@ import { FindAllDto, FindAllParams } from 'src/common/interfaces/all.interface';
 export class ScheduleDetailController {
   constructor(private readonly scheduleDetailService: ScheduleDetailService) {}
 
-  @Post()
-  create(@Body() createScheduleDetailDto: CreateScheduleDetailDto) {
-    return this.scheduleDetailService.create(createScheduleDetailDto);
-  }
-
+  // Rincian schedule tidak punya endpoint tulis sendiri: create/update/delete
+  // seluruhnya lewat header (POST/PUT /schedule-header) supaya header dan
+  // rinciannya tersimpan dalam satu transaksi.
   @Get(':id')
   async findAll(@Param('id') id: string, @Query() query: FindAllDto) {
     const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
@@ -34,9 +26,13 @@ export class ScheduleDetailController {
       sortDirection: sortDirection || 'asc',
     };
 
+    // Query string selalu string. Tanpa Number() di sini offset/totalPages
+    // bergantung pada koersi JS.
+    const numericLimit = Number(limit);
     const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
     };
 
     const params: FindAllParams = {
@@ -50,30 +46,15 @@ export class ScheduleDetailController {
     const trx = await dbMssql.transaction();
     try {
       const result = await this.scheduleDetailService.findAll(id, trx, params);
-      trx.commit();
+      await trx.commit();
+
       return result;
     } catch (error) {
       trx.rollback();
-      console.error(
-        'Error fetching data schedule detail in controller ',
-        error,
-      );
+      console.error('Error fetching data schedule detail in controller', error);
       throw new InternalServerErrorException(
         'Failed to fetch schedule detail in controller',
       );
     }
-  }
-
-  @Patch(':id')
-  update(
-    @Param('id') id: string,
-    @Body() updateScheduleDetailDto: UpdateScheduleDetailDto,
-  ) {
-    return this.scheduleDetailService.update(id, updateScheduleDetailDto);
-  }
-
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.scheduleDetailService.remove(id);
   }
 }

@@ -64,7 +64,6 @@ export class BiayaExtraHeaderController {
     data: any,
     @Req() req,
   ) {
-    console.log('data', data);
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
@@ -347,9 +346,11 @@ export class BiayaExtraHeaderController {
     const trx = await dbMssql.transaction();
     try {
       const { jenisOrderan } = query;
+      // jenisOrderan adalah id bertipe text (UUID) — `+jenisOrderan` dulu
+      // mengubahnya jadi NaN sebelum sampai ke service.
       const result = await this.biayaExtraHeaderService.findOneDetail(
         id,
-        +jenisOrderan,
+        jenisOrderan,
         trx,
       );
       trx.commit();

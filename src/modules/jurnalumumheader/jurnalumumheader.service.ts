@@ -718,10 +718,14 @@ export class JurnalumumheaderService {
         );
       }
 
-      // Check each detail, update or set id accordingly
+      // Check each detail, update or set id accordingly. tglbukti ikut di-inject
+      // seperti di create(): form detail tidak mengirim tglbukti, jadi baris baru
+      // yang ditambahkan saat EDIT akan tersimpan tanpa tanggal kalau tidak
+      // diambil dari headernya.
       const detailsWithNobukti = data.details.map((detail: any) => ({
         ...detail,
         nobukti: existingData.nobukti, // Inject nobukti into each detail
+        tglbukti: insertData.tglbukti ?? existingData.tglbukti,
         modifiedby: insertData.modifiedby,
       }));
       await this.jurnalumumdetailService.create(detailsWithNobukti, id, trx);
