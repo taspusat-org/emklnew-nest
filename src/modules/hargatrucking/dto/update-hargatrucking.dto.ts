@@ -17,7 +17,7 @@ export const UpdateHargatruckingSchema = z.object({
   keterangan: z.string().trim().min(1, { message: 'Keterangan is required' }),
 
   statusaktif: z.string().min(1, { message: 'Status aktif is required' }),
-  statusaktif_text: z.string().nullable().optional(),
+  text: z.string().nullable().optional(),
 
   info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
