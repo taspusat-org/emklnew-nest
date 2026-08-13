@@ -107,15 +107,15 @@
             "Type": "System.String"
           },
           "13": {
-            "Name": "statusaktif_text",
-            "NameInSource": "statusaktif_text",
-            "Alias": "statusaktif_text",
+            "Name": "text",
+            "NameInSource": "text",
+            "Alias": "text",
             "Type": "System.String"
           },
           "14": {
-            "Name": "statusaktif_memo",
-            "NameInSource": "statusaktif_memo",
-            "Alias": "statusaktif_memo",
+            "Name": "memo",
+            "NameInSource": "memo",
+            "Alias": "memo",
             "Type": "System.String"
           },
           "15": {
@@ -994,7 +994,7 @@
               },
               "MaxNumberOfLines": 6,
               "Text": {
-                "Value": "{data.statusaktif_text}"
+                "Value": "{data.text}"
               },
               "VertAlignment": "Center",
               "Font": "Tahoma;;;",

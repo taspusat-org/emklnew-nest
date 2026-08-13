@@ -21,7 +21,7 @@ export const CreateHargatruckingSchema = z.object({
   nominal: z.string().min(1, { message: 'Nominal is required' }),
 
   statusaktif: z.string().min(1, { message: 'status aktif is required' }),
-  statusaktif_text: z.string().nullable().optional(),
+  text: z.string().nullable().optional(),
 
   info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),

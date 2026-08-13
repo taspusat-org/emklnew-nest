@@ -75,16 +75,12 @@ export class HargatruckingService {
           `%${sanitizedValue}%`,
         ]);
       } else {
-        // ✅ prefix vht. agar konsisten dengan alias view
         qb.andWhereRaw('vht.??::text ilike ?', [key, `%${sanitizedValue}%`]);
       }
     });
   }
 
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
-    // Tabel `harga trucking` hanya punya kolom status* (varchar id parameter),
-    // TIDAK ada kolom *_uuid. Menyisipkan *_uuid -> "Invalid column name".
-    // Kolom _text/_uuid/_memo diturunkan di view vharga trucking via JOIN parameter.
     return {
       id: uuid ? uuid : dto.uuid,
       tujuankapal_id: dto.tujuankapal_id
@@ -103,13 +99,6 @@ export class HargatruckingService {
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (text/*_text), bukan id (varchar
-   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
-   * fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -117,13 +106,13 @@ export class HargatruckingService {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
     switch (sortBy) {
       case 'statusaktif':
-        return { col: 'statusaktif_nama', dir: 'asc' }; // findAll: hardcode 'asc' on vht.nama
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on vht.nama
       case 'statusbank':
-        return { col: 'statusbank_nama', dir };
+        return { col: 'statusbank_text', dir };
       case 'statusdefault':
-        return { col: 'statusdefault_nama', dir };
+        return { col: 'statusdefault_text', dir };
       case 'statuslangsungcair':
-        return { col: 'statuslangsungcair_nama', dir };
+        return { col: 'statuslangsungcair_text', dir };
       default:
         return { col: sortBy, dir };
     }
@@ -133,17 +122,10 @@ export class HargatruckingService {
     try {
       const { sortBy, sortDirection, filters, search, page, limit, info } =
         CreateaHargatruckingDto;
-
       const uuid = await uuidV7(trx);
-
       const insertData = this.buildInsertData(CreateaHargatruckingDto, uuid);
       const x = await trx(this.tableName).insert(insertData);
 
-      // id sekarang varchar UUID (bukan auto-increment), jadi
-      // orderBy('id','desc').first() TIDAK mengembalikan baris yang baru
-      // diinsert — id UUID tidak terurut secara kronologis. Ambil langsung
-      // by uuid yang baru kita generate & insert supaya fokus baris setelah
-      // simpan menunjuk ke data yang benar.
       const newItem = await trx(this.viewName).where('id', uuid).first();
       const existingData = await trx(`${this.viewName} as vht`)
         .where('id', newItem.id)
@@ -154,7 +136,6 @@ export class HargatruckingService {
       let posisi: number;
       let totalItems: number;
 
-      // totalItems selalu dihitung dengan filter — fix bug utama
       const totalRecords = await trx(`${this.viewName} as vht`)
         .count('id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
@@ -162,17 +143,10 @@ export class HargatruckingService {
       totalItems = Number(totalRecords?.total ?? 0);
 
       if (existingData) {
-        // Hitung posisi memakai kolom & arah yang SAMA dengan urutan tampil grid
-        // (findAll). Untuk kolom status, bandingkan nilai TEKS dari baris view,
-        // bukan id UUID — supaya fokus baris setelah simpan tepat.
         const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
         );
-        // Posisi = jumlah baris yang tampil sebelum-atau-pada baris baru,
-        // memakai kolom & arah urut yang sama dengan grid (findAll). Tidak
-        // ada klausa tiebreaker `id <=` lagi: id UUID tidak terurut, jadi
-        // klausa itu malah memfilter baris acak & membuat posisi meleset.
 
         const resultposition = await trx(`${this.viewName} as vht`)
           .count('* as posisi')
@@ -289,7 +263,6 @@ export class HargatruckingService {
         };
       }
 
-      // SELECT disesuaikan DENGAN SCHEMA HARGA TRUCKING yang sebenarnya
       const query = trx(`${this.viewName} as vht`).select([
         'vht.id',
         'vht.keterangan',
@@ -304,8 +277,8 @@ export class HargatruckingService {
         'vht.jenisorder_text',
         'vht.nominal',
         'vht.statusaktif',
-        'vht.statusaktif_text', // Status aktif text dari join parameter view
-        'vht.statusaktif_memo', // Status aktif text dari join parameter view
+        'vht.text',
+        'vht.memo',
         'vht.info',
         'vht.modifiedby',
         trx.raw(
@@ -318,9 +291,9 @@ export class HargatruckingService {
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .statusaktif_text)
+      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .text)
       if (sortBy === 'statusaktif') {
-        query.orderBy('vht.statusaktif_text', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
+        query.orderBy('vht.text', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
       } else {
         query.orderBy(`vht.${sortBy}`, sortDirection);
       }
@@ -376,8 +349,8 @@ export class HargatruckingService {
         'vht.jenisorder_text',
         'vht.nominal',
         'vht.statusaktif',
-        'vht.statusaktif_text', // Status aktif text dari join parameter view
-        'vht.statusaktif_memo', // Status aktif text dari join parameter view
+        'vht.text',
+        'vht.memo',
         'vht.info',
         'vht.modifiedby',
         trx.raw(
@@ -409,19 +382,7 @@ export class HargatruckingService {
       }
 
       const { sortBy, sortDirection, filters, search, limit } = data;
-      // JANGAN blanket-uppercase semua field string. id, uuid, dan status*
-      // adalah UUID bertipe TEXT (case-sensitive). Meng-uppercase-nya mengubah
-      // nilai: id lowercase (mis. 02-019f5ea1-..) jadi 02-019F5EA1-.. sehingga
-      // PK berubah & FK status* bisa tak match. Uppercase nama & keterangan
-      // sudah ditangani buildInsertData().
-      // 2. Build insert payload — uppercase hanya nama & keterangan,
-      //    sama persis seperti create, via buildInsertData()
       const insertData = this.buildInsertData(data);
-      // id = kunci WHERE (PK), bukan kolom yang di-SET saat update.
-      // buildInsertData mengisi id dari dto.uuid; kalau ikut ter-UPDATE, PK
-      // berpindah dan lookup `updatedItem` (by id lama) gagal -> updatedItem
-      // undefined -> updatedItem.id throw -> 500. created_at juga jangan ditimpa
-      // saat edit (buildInsertData mengisinya dengan now() bila dto kosong).
       delete insertData.id;
       delete insertData.created_at;
 
@@ -440,12 +401,6 @@ export class HargatruckingService {
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
-      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_uuid/
-      // _memo) yang tidak ada di tabel base; dipakai untuk acuan posisi dan
-      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
-      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
-      // dengan filter aktif.
       const updatedItem = await trx(this.viewName).where('id', id).first();
 
       const existingData = await trx(`${this.viewName} as vht`)
@@ -464,8 +419,6 @@ export class HargatruckingService {
         .first();
       totalItems = Number(totalRecords?.total ?? 0);
       if (existingData) {
-        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
-        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
         const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
@@ -575,7 +528,6 @@ export class HargatruckingService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
   private readonly EXPORT_COLUMNS = [
     // 'vht.tarifdetail_id',
     'vht.tujuankapal_text',
@@ -584,17 +536,9 @@ export class HargatruckingService {
     'vht.container_text',
     'vht.jenisorder_text',
     'vht.nominal',
-    'vht.statusaktif_text',
+    'vht.text',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
-   * proses kehabisan heap.
-   */
   buildExportQuery(
     {
       search,
@@ -613,7 +557,7 @@ export class HargatruckingService {
       .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
     if (sortBy === 'statusaktif') {
-      query.orderBy('vht.statusaktif_text', 'asc');
+      query.orderBy('vht.text', 'asc');
     } else if (sortBy === 'statusbank') {
       query.orderBy('vht.statusbank_text', sortDirection);
     } else if (sortBy === 'statusdefault') {
@@ -682,7 +626,7 @@ export class HargatruckingService {
       row.container_text,
       row.jenisorder_text,
       row.nominal,
-      row.statusaktif_text,
+      row.text,
     ],
   };
 
@@ -747,7 +691,7 @@ export class HargatruckingService {
         row.container_text,
         row.jenisorder_text,
         row.nominal,
-        row.statusaktif_text,
+        row.text,
       ];
       rowValues.forEach((value, colIndex) => {
         const cell = worksheet.getCell(currentRow, colIndex + 1);
