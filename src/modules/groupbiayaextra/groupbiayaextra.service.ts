@@ -534,20 +534,11 @@ export class GroupbiayaextraService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
   private readonly EXPORT_COLUMNS = [
     'ab.keterangan',
     'ab.statusaktif_text as text',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -568,11 +559,6 @@ export class GroupbiayaextraService {
       .orderBy(orderCol, sortDirection);
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. Memakai view yang sama dengan findAll supaya filter status
-   * (statusaktif_text / statusaktif_memo) menyaring dataset yang identik.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -585,7 +571,6 @@ export class GroupbiayaextraService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

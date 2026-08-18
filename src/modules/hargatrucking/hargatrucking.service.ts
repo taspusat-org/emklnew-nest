@@ -103,13 +103,6 @@ export class HargatruckingService {
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (text/*_text), bukan id (varchar
-   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
-   * fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -117,7 +110,12 @@ export class HargatruckingService {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
     switch (sortBy) {
       case 'statusaktif':
-        return { col: 'statusaktif_nama', dir: 'asc' }; // findAll: hardcode 'asc' on vht.nama
+        // Kolomnya `statusaktif_text` (nama yang dipakai view & findAll),
+        // BUKAN `statusaktif_nama` yang tidak pernah ada di vhargatrucking —
+        // itu bikin perhitungan posisi setelah simpan gagal 42703 saat grid
+        // sedang diurutkan berdasarkan status. Arahnya ikut `dir` supaya sama
+        // dengan orderBy di findAll (yang memakai sortDirection, bukan 'asc').
+        return { col: 'statusaktif_text', dir };
       case 'statusbank':
         return { col: 'statusbank_nama', dir };
       case 'statusdefault':
@@ -575,7 +573,6 @@ export class HargatruckingService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
   private readonly EXPORT_COLUMNS = [
     // 'vht.tarifdetail_id',
     'vht.tujuankapal_text',
@@ -587,14 +584,6 @@ export class HargatruckingService {
     'vht.statusaktif_text',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
-   * proses kehabisan heap.
-   */
   buildExportQuery(
     {
       search,
@@ -627,11 +616,6 @@ export class HargatruckingService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
-   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
-   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -644,7 +628,6 @@ export class HargatruckingService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

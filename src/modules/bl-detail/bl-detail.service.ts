@@ -129,23 +129,29 @@ export class BlDetailService {
         [jsonString],
       );
 
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          bl_nobukti: trx.raw(`${tempTableName}.bl_nobukti`),
-          bl_id: trx.raw(`${tempTableName}.bl_id`),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          noblconecting: trx.raw(`${tempTableName}.noblconecting`),
-          shippinginstructiondetail_nobukti: trx.raw(
-            `${tempTableName}.shippinginstructiondetail_nobukti`,
-          ),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*');
+      // UPDATE ... FROM, bukan .join().update(). Bentuk join+update itu warisan
+      // SQL Server; di Postgres knex MENGABAIKAN join-nya sehingga SQL yang
+      // dihasilkan menyebut kolom temp tanpa klausa FROM dan gagal dengan
+      // "missing FROM-clause entry for table temp_xxx" (SQLSTATE 42P01).
+      // Bentuk di bawah mengikuti ShippingInstructionDetailService yang sudah
+      // dipakai di Postgres.
+      const updatedResult = await trx.raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           bl_nobukti = tmp.bl_nobukti,
+           bl_id = tmp.bl_id,
+           keterangan = tmp.keterangan,
+           noblconecting = tmp.noblconecting,
+           shippinginstructiondetail_nobukti = tmp.shippinginstructiondetail_nobukti,
+           info = tmp.info,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      );
+      const updatedData = updatedResult?.rows ?? [];
 
       const insertedDataQuery = await trx(tempTableName)
         .select([
@@ -374,10 +380,27 @@ export class BlDetailService {
         }
       }
 
+      const countQuery = query.clone();
+      countQuery.clearSelect().clearOrder();
+      const countResult = await countQuery.count('u.id as total').first();
+      const total = Number(countResult?.total ?? 0);
+
+      if (limit > 0) {
+        query.offset((page - 1) * limit).limit(limit);
+      }
+
       const result = await query;
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
 
       return {
         data: result,
+        total,
+        pagination: {
+          currentPage: page,
+          totalPages,
+          totalItems: total,
+          itemsPerPage: limit,
+        },
       };
     } catch (error) {
       console.error('Error to findAll Schedule detail in service', error);

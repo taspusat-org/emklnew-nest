@@ -515,7 +515,15 @@ export class BookingOrderanMuatanService {
       }
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
+        // customOffset: offset absolut dari grid berjendela, dipakai saat window
+        // harus mulai di halaman yang BUKAN kelipatan ukuran window (mis.
+        // setelah simpan, baris baru ada di halaman terakhir dan window digeser
+        // mundur supaya tidak cuma berisi satu baris).
+        const customOffset = (pagination as any)?.customOffset;
+        const offset =
+          typeof customOffset === 'number' && customOffset >= 0
+            ? customOffset
+            : (page - 1) * limit;
         query.limit(limit).offset(offset);
       }
 

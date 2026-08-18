@@ -29,7 +29,6 @@ export const CreateUserSchema = z.object({
   // membuat payload dari lookup karyawan selalu ditolak validasi.
   karyawan_id: z.string().nullable().optional(),
   namakaryawan: z.string().nullable().optional(),
-  /** User asal yang hak aksesnya (role + acl) disalin ke user baru. */
   userId: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });

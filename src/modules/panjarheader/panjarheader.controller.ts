@@ -227,17 +227,6 @@ export class PanjarheaderController {
     }
   }
 
-  /**
-   * POST /panjarheader/report
-   *
-   * Cetak laporan di background. Request langsung balas { jobId }; progres
-   * render dikirim lewat socket namespace `/report` (event `report:progress`,
-   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
-   *
-   * Data laporan diambil lewat findOne() milik service ini — hasilnya sudah
-   * BARIS DATAR (header di-join ke muatan detail), bentuk yang diharapkan
-   * LaporanPanjar.mrt dan yang dulu dirakit di browser.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
@@ -282,20 +271,6 @@ export class PanjarheaderController {
     });
   }
 
-  /**
-   * POST /panjarheader/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   *
-   * jenisorder_id diresolve DI SINI (bukan di dalam query) karena streamRows
-   * dipanggil secara sinkron oleh ExportJobService, sedangkan resolusinya
-   * butuh query lookup saat filter jenis orderan kosong (default MUATAN).
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

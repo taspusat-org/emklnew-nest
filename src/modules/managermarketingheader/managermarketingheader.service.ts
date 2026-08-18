@@ -16,12 +16,6 @@ import {
   parseNumberWithSeparators,
 } from 'src/utils/utils.service';
 
-/**
- * InputCurrency di form mengirim string berformat ribuan ("10,000"), sedangkan
- * `managermarketing.minimalprofit` bertipe numeric → Postgres menolak dengan
- * `invalid input syntax for type numeric: "10,000"` (500 saat SAVE).
- * Kosong/tak terbaca dijadikan null (kolomnya nullable).
- */
 function normalizeMinimalProfit(value: any): number | null {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return Number.isNaN(value) ? null : value;

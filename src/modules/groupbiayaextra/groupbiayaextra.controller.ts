@@ -183,9 +183,6 @@ export class GroupbiayaextraController {
         req.user?.user?.username,
       );
 
-      // Service memulangkan { status: 404 } (bukan melempar) saat datanya tidak
-      // ada. Tanpa dikonversi di sini, response-nya 200 dengan body error dan
-      // frontend menganggap delete berhasil.
       if (result.status === 404) {
         throw new NotFoundException(result.message);
       }
@@ -196,8 +193,6 @@ export class GroupbiayaextraController {
       await trx.rollback();
       console.error('Error deleting Group Biaya Extra in controller:', error);
 
-      // HttpException mencakup NotFoundException di atas, jadi 404 diteruskan
-      // apa adanya dan tidak tertelan jadi 500.
       if (error instanceof HttpException) {
         throw error;
       }
@@ -208,11 +203,6 @@ export class GroupbiayaextraController {
     }
   }
 
-  /**
-   * Pra-cek sebelum EDIT (ambil lock) / DELETE (apakah masih dipakai
-   * transaksi). Penolakan DELETE tetap ditegakkan lagi di service, endpoint ini
-   * hanya supaya frontend bisa memberi tahu user sebelum dialog konfirmasi.
-   */
   @UseGuards(AuthGuard)
   @Post('check-validation')
   async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
@@ -307,16 +297,6 @@ export class GroupbiayaextraController {
     });
   }
 
-  /**
-   * POST /groupbiayaextra/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

@@ -23,12 +23,6 @@ export class HutangdetailService {
 
   private readonly logger = new Logger(HutangdetailService.name);
 
-  /**
-   * Kolom tabel hutangdetail (selain `id` yang diisi withUuidV7) — satu-satunya
-   * sumber kebenaran untuk INSERT maupun UPDATE, supaya kedua daftar kolom tidak
-   * lagi ditulis terpisah dan bisa menyimpang. Key kiriman frontend di luar
-   * daftar ini (mis. coa_text, aksi) dibuang.
-   */
   private buildDetailRow(
     row: any,
     hutangId: any,
@@ -174,11 +168,6 @@ export class HutangdetailService {
     return updatedData || insertedData;
   }
 
-  /**
-   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
-   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
-   * menunjuk ke view (coa_text sudah jadi kolom view, bukan hasil JOIN ad-hoc).
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,

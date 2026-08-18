@@ -250,17 +250,6 @@ export class PindahBukuController {
     }
   }
 
-  /**
-   * POST /pindahbuku/report
-   *
-   * Cetak bukti pindah buku di background. Request langsung balas { jobId };
-   * progres render dikirim lewat socket namespace `/report` (event
-   * `report:progress`, room = jobId), dan PDF-nya diambil di
-   * GET /report/download/:jobId.
-   *
-   * LaporanPindahBuku.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
-   * frontend hanya id baris yang dicentang.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
@@ -285,15 +274,6 @@ export class PindahBukuController {
     });
   }
 
-  /**
-   * POST /pindahbuku/export
-   *
-   * Export Excel SATU bukti pindah buku beserta rinciannya di background —
-   * cakupannya sama dengan cetak bukti, bukan daftar seluruh baris grid.
-   * Request langsung balas { jobId }; progresnya dikirim lewat socket namespace
-   * `/report` (kanal yang sama dengan cetak laporan), dan file-nya diambil di
-   * GET /report/download/:jobId.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

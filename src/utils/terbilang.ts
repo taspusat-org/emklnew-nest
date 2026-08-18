@@ -1,14 +1,5 @@
-/**
- * Ejaan angka ke huruf (bahasa Indonesia) untuk baris "terbilang" di laporan.
- *
- * Port dari lib/utils/terbilang.ts milik frontend — dipindah ke backend karena
- * cetak laporan kini dirender di sini (lihat ReportJobService), bukan lagi di
- * browser. Keluarannya HARUS sama persis dengan versi frontend supaya bukti
- * yang dicetak sebelum dan sesudah migrasi tidak berbeda bunyinya.
- */
 
 export interface TerbilangOptions {
-  /** "SERATUS"/"SERIBU" (true) atau "SATU RATUS"/"SATU RIBU" (false). */
   preferSeForSeratusSeribu?: boolean;
   negativeWord?: string;
   decimalWord?: string;

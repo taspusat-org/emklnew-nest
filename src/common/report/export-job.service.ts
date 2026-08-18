@@ -7,34 +7,18 @@ import { requestContext } from '../context/request-context';
 import { ReportJobStore } from './report-job.store';
 import { ReportGateway } from './report.gateway';
 
-/** Batas keras format xlsx: 1.048.576 baris per sheet (termasuk header). */
 export const EXCEL_MAX_ROWS = 1_048_576;
 
-/** Progres di-emit tiap sekian baris ATAU sekian ms, mana yang lebih dulu. */
 const PROGRESS_ROW_INTERVAL = 5_000;
 const PROGRESS_TIME_INTERVAL_MS = 400;
 
-/**
- * Lebar kolom pada xlsx ditulis di elemen `<cols>`, yang HARUS berada sebelum
- * `<sheetData>`. Pada mode streaming ExcelJS menulis `<cols>` tepat saat baris
- * pertama di-flush, jadi lebar kolom hanya bisa diukur dari baris yang sudah
- * dilihat sebelum itu. Karena itu sejumlah baris pertama ditahan dulu di memori
- * untuk diukur, baru sisanya mengalir seperti biasa. Jumlahnya sengaja kecil
- * supaya pemakaian memori tetap datar walau datanya jutaan baris.
- */
 const WIDTH_SAMPLE_ROWS = 500;
 
-/** Batas lebar kolom hasil auto-fit (satuan ≈ jumlah karakter). */
 const MIN_COLUMN_WIDTH = 6;
 const MAX_COLUMN_WIDTH = 60;
 
-/** Kelonggaran supaya teks tidak menempel ke garis border sel. */
 const COLUMN_WIDTH_PADDING = 2;
 
-/**
- * Label tahap yang tampil di toast. Sengaja hanya menyebut tahapannya, tanpa
- * angka baris — hitungan detailnya sudah terwakili oleh progress bar.
- */
 const STEP = {
   counting: 'Menghitung jumlah data...',
   querying: 'Mengambil data...',
@@ -45,45 +29,20 @@ const STEP = {
 
 export type ExportColumnAlign = 'left' | 'center' | 'right';
 
-/**
- * Format angka Excel siap pakai. Yang disimpan di sel tetap angka mentah —
- * ini hanya mengatur cara Excel menampilkannya, jadi sel-nya masih bisa
- * di-SUM / difilter sebagai angka.
- *
- * Pemisah ribuan/desimal ditulis mengikuti notasi Excel (`,` ribuan, `.`
- * desimal); saat dibuka, Excel menampilkannya sesuai regional setting
- * pemakainya — di Windows Indonesia otomatis jadi `Rp1.500.000,00`.
- */
 export const EXCEL_FORMAT = {
-  /** 1500000 → Rp1.500.000 (negatif merah dalam kurung). */
   RUPIAH: '"Rp"#,##0;[Red]("Rp"#,##0)',
-  /** 1500000.5 → Rp1.500.000,50 */
   RUPIAH_DESIMAL: '"Rp"#,##0.00;[Red]("Rp"#,##0.00)',
-  /** 1500000 → 1.500.000 — tanpa simbol mata uang. */
   ANGKA: '#,##0',
   ANGKA_DESIMAL: '#,##0.00',
-  /** 0.155 → 15,50% */
   PERSEN: '0.00%',
   TANGGAL: 'dd-mm-yyyy',
   TANGGAL_JAM: 'dd-mm-yyyy hh:mm',
 } as const;
 
 export interface ExportColumnFormat {
-  /**
-   * Format tampilan Excel (numFmt) — pakai salah satu dari `EXCEL_FORMAT`
-   * atau string format kustom. Hanya berlaku untuk sel bertipe angka; nilai
-   * dari `mapRow` yang berupa string angka ('1500000.00', umum keluar dari
-   * driver database untuk kolom DECIMAL) otomatis dikonversi.
-   */
   numFmt?: string;
-  /**
-   * Perataan isi sel. Default: rata kanan untuk kolom nomor urut (kolom
-   * pertama) dan kolom ber-`numFmt`, sisanya rata kiri.
-   */
   align?: ExportColumnAlign;
-  /** Perataan judul kolomnya. Default: kolom pertama rata kanan, sisanya tengah. */
   headerAlign?: ExportColumnAlign;
-  /** Bungkus teks panjang jadi beberapa baris dalam satu sel. */
   wrapText?: boolean;
 }
 
@@ -94,32 +53,12 @@ export interface ExportInfoLine {
 
 export interface ExportSheetDefinition {
   sheetName?: string;
-  /** Baris judul di atas header (di-merge selebar kolom header). */
   titleLines?: string[];
-  /**
-   * Blok label/nilai antara judul dan tabel — dipakai export per transaksi
-   * untuk menaruh data master (no bukti, tanggal, relasi) di atas rinciannya.
-   * Label ditulis di kolom pertama, nilainya di kolom kedua.
-   */
   infoLines?: ExportInfoLine[];
-  /**
-   * Baris TOTAL di bawah data. `sumColumns` berisi indeks kolom (sejajar
-   * `headers`) yang dijumlahkan sambil baris mengalir — bukan query terpisah.
-   */
   totalRow?: { label?: string; sumColumns: number[] };
   headers: string[];
-  /**
-   * Lebar kolom tetap. Boleh dikosongkan seluruhnya, atau per kolom (`null` /
-   * `undefined`) — kolom yang tidak diisi lebarnya mengikuti isi data
-   * (auto-fit). Isi hanya bila memang ingin menguncinya di angka tertentu.
-   */
   columnWidths?: (number | null | undefined)[];
-  /**
-   * Format per kolom (mata uang, persen, tanggal, perataan). Urutannya sejajar
-   * `headers`; kolom yang tidak diisi memakai format bawaan.
-   */
   columnFormats?: (ExportColumnFormat | null | undefined)[];
-  /** Memetakan satu baris database menjadi nilai-nilai sel. */
   mapRow: (row: any, rowNumber: number) => (string | number | null)[];
 }
 
@@ -136,11 +75,6 @@ const DEFAULT_COLUMN_FORMAT: ResolvedColumnFormat = {
   wrapText: false,
 };
 
-/**
- * Format angka Excel hanya berlaku pada sel bertipe angka. Kolom DECIMAL
- * sering keluar dari driver database sebagai string ('1500000.00'); kalau
- * ditulis apa adanya, sel-nya jadi teks dan format rupiahnya diabaikan diam-diam.
- */
 function toNumericCell(
   value: string | number | null | undefined,
 ): string | number {
@@ -154,12 +88,6 @@ function toNumericCell(
   return Number.isFinite(parsed) ? parsed : value;
 }
 
-/**
- * Panjang teks yang TAMPIL di Excel, bukan nilai mentahnya: 1500000 dengan
- * format rupiah muncul sebagai "Rp1.500.000" — 11 karakter, bukan 7. Kalau
- * yang diukur nilai mentahnya, kolomnya jadi kesempitan dan Excel menampilkan
- * `#######`. Hasilnya perkiraan, dan itu cukup untuk menentukan lebar kolom.
- */
 function displayedLength(
   value: string | number | null | undefined,
   numFmt?: string,
@@ -200,30 +128,12 @@ function displayedLength(
 }
 
 export interface StartExportJobOptions {
-  /** Nama file yang dipakai saat diunduh browser. */
   filename: string;
-  /** Jumlah baris yang akan diekspor — dipakai untuk progres yang sebenarnya. */
   countRows: () => Promise<number>;
-  /**
-   * Sumber baris dalam bentuk stream (mis. knex `.stream()`), BUKAN array.
-   * Export bisa menyentuh jutaan baris; menariknya sekaligus ke memori
-   * membuat proses kehabisan heap.
-   */
   streamRows: () => NodeJS.ReadableStream;
   sheet: ExportSheetDefinition;
 }
 
-/**
- * Menjalankan export Excel di background lalu melaporkan progresnya lewat
- * socket — pola & channel-nya sama persis dengan ReportJobService (namespace
- * `/report`, event `report:progress`, room = jobId), hanya berkas hasilnya
- * xlsx. Hasilnya diambil di GET /report/download/:jobId.
- *
- * Seluruh pipeline-nya streaming: baris ditarik dari database lewat cursor dan
- * langsung ditulis ke file xlsx sementara, jadi pemakaian memori tidak ikut
- * naik seiring jumlah baris. Sebelumnya seluruh hasil query ditampung di array
- * lalu dirakit di memori — pada ~1 juta baris itu menabrak heap limit V8.
- */
 @Injectable()
 export class ExportJobService {
   private readonly logger = new Logger(ExportJobService.name);
@@ -233,10 +143,6 @@ export class ExportJobService {
     private readonly gateway: ReportGateway,
   ) {}
 
-  /**
-   * Mendaftarkan job baru dan langsung mengembalikan jobId — proses export
-   * sengaja TIDAK di-await supaya request HTTP-nya balas seketika.
-   */
   start(options: StartExportJobOptions): { jobId: string } {
     const jobId = randomUUID();
 
@@ -253,11 +159,6 @@ export class ExportJobService {
     return { jobId };
   }
 
-  /**
-   * Ticker halus untuk tahap yang panjangnya tidak bisa diukur (query + sort
-   * di database, yang belum mengeluarkan baris apa pun). Begitu baris pertama
-   * mengalir, progres diambil alih perhitungan nyata baris tertulis / total.
-   */
   private startProgressTicker(
     jobId: string,
     step: string,
@@ -294,7 +195,6 @@ export class ExportJobService {
     });
   }
 
-  /** File hasil ditulis ke <cwd>/tmp, lalu dihapus setelah diunduh / kadaluarsa. */
   private createTempPath(jobId: string): string {
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
@@ -522,21 +422,12 @@ export class ExportJobService {
     }
   }
 
-  /**
-   * Nomor baris judul kolom: judul laporan + 1 baris kosong, lalu blok info
-   * (kalau ada) + 1 baris kosong lagi. Data mulai satu baris di bawahnya.
-   */
   private resolveHeaderOffset(sheet: ExportSheetDefinition): number {
     const titles = sheet.titleLines?.length ?? 0;
     const info = sheet.infoLines?.length ?? 0;
     return titles + 2 + (info > 0 ? info + 1 : 0);
   }
 
-  /**
-   * Menggabungkan format dari pemanggil dengan bawaannya — sekali per export,
-   * bukan per sel. Kolom pertama (nomor urut) dan kolom ber-`numFmt` isinya
-   * angka, jadi defaultnya rata kanan supaya digitnya sejajar.
-   */
   private resolveColumnFormats(
     sheet: ExportSheetDefinition,
   ): ResolvedColumnFormat[] {
@@ -558,12 +449,6 @@ export class ExportJobService {
     });
   }
 
-  /**
-   * Mengukur lebar tiap kolom dari teks terpanjang yang pernah dilihat —
-   * dimulai dari judul kolomnya sendiri, lalu ditambah baris data yang
-   * di-sample. Baris judul laporan sengaja tidak ikut diukur karena sel-nya
-   * di-merge selebar tabel; kalau ikut, kolom pertama jadi melar sendiri.
-   */
   private createWidthMeasurer(
     sheet: ExportSheetDefinition,
     formats: ResolvedColumnFormat[],
@@ -682,11 +567,6 @@ export class ExportJobService {
     headerRow.commit();
   }
 
-  /**
-   * Baris TOTAL di bawah data. Label-nya di-merge dari kolom pertama sampai
-   * tepat sebelum kolom angka pertama yang dijumlahkan, meniru bentuk laporan
-   * yang sudah dipakai sebelumnya.
-   */
   private writeTotalRow(
     worksheet: any,
     sheet: ExportSheetDefinition,

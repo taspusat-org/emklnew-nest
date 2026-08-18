@@ -1,13 +1,5 @@
 import { z } from 'zod';
 
-/**
- * Payload cetak laporan Panjar.
- *
- * Beda dengan modul master (mis. Group Biaya Extra) yang mencetak SELURUH
- * baris hasil filter: Panjar mencetak SATU bukti (header + muatan detail),
- * jadi yang dikirim adalah id baris yang dicentang di grid — bukan
- * search/filter/sort. Bentuknya sama dengan Shipping Instruction.
- */
 export const ReportPanjarheaderSchema = z.object({
   mrtName: z.string().min(1, { message: 'mrtName wajib diisi' }),
   id: z
@@ -19,7 +11,6 @@ export const ReportPanjarheaderSchema = z.object({
           : String(value).trim() !== '',
       { message: 'id wajib diisi' },
     ),
-  /** Judul yang dicetak di header laporan. */
   judullaporan: z.string().optional(),
 });
 

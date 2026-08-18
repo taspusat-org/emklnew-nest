@@ -140,16 +140,6 @@ export class MenuController {
     }
   }
 
-  /**
-   * POST /menu/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

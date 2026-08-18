@@ -48,19 +48,6 @@ export class UtilsService {
     }
   }
 
-  /**
-   * Create temporary table from data array (auto-detect structure)
-   * OPTIMIZED FOR BIG DATA - Support jutaan records dengan bulk insert
-   *
-   * @param data Array of objects to insert
-   * @param trx Transaction object
-   * @param customPrefix Optional custom prefix for temp table name
-   * @param options Optional configuration
-   *   - chunkSize: Number of rows per batch (default: 5000 for big data)
-   *   - addPositionField: Add auto-increment position field (default: true)
-   *   - onProgress: Callback for progress tracking
-   * @returns Object containing temp table name, inserted count, and execution time
-   */
   async createTempTableFromData(
     data: any[],
     trx: any,
@@ -161,11 +148,6 @@ export class UtilsService {
       throw new Error(`Failed to create temp table: ${error.message}`);
     }
   }
-  /**
-   * Create temp table directly from SQL query using SELECT INTO (optimized for BIG DATA)
-   * This method is MUCH FASTER than fetching to Node.js then inserting
-   * Perfect for 500k+ rows
-   */
   async createTempFisikTableFromQuery(
     queryBuilder: any,
     trx: any,
@@ -534,14 +516,6 @@ export class UtilsService {
     }
   }
 
-  /**
-   * Cari baris anak pertama yang masih mereferensikan `tableName`.id = value lewat
-   * foreign key (baca katalog PG, jadi otomatis mengikuti SEMUA FK yang ada).
-   * Mengembalikan { ref_table, ref_column } bila masih dipakai, atau null bila
-   * aman dihapus. `excludeTables` untuk melewati tabel yang referensinya ikut
-   * terhapus (mis. tabel master itu sendiri saat mengecek relasi_id-nya —
-   * `<master>.relasi_id` adalah self-reference yang dihapus lebih dulu).
-   */
   async findFirstReference(
     tableName: string,
     value: any,
@@ -1251,13 +1225,6 @@ export async function uuidV7(trx: any): Promise<string> {
   return uuid ?? null;
 }
 
-/**
- * Generate banyak uuid v7 sekaligus dengan 2 query saja (kode cabang + batch),
- * BUKAN 2 query per baris.
- *
- * Sebelumnya insert massal memanggil uuidV7() per baris: 591 baris ACL = 1.182
- * round-trip DB berurutan, yang membuat PUT /roleacl kena timeout.
- */
 export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
   if (count <= 0) return [];
 
@@ -1279,14 +1246,6 @@ export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
   return fallback;
 }
 
-/**
- * Attaches a freshly generated uuidV7 to the `id` field before insert.
- * - For a single object: returns a copy with `id` set.
- * - For an array of rows: sets `id` on each row and returns it.
- *
- * Satu statement untuk seluruh array (bukan Promise.all): transaksi knex
- * memakai satu koneksi dan tidak bisa menjalankan query paralel.
- */
 export async function withUuidV7(trx: any, data: any): Promise<any> {
   if (Array.isArray(data)) {
     const uuids = await uuidV7Many(trx, data.length);

@@ -54,15 +54,6 @@ export class PanjarheaderService {
 
   // ─── Session context ───────────────────────────────────────────────────────
 
-  /**
-   * Rentang tanggal + jenis orderan dititipkan ke view lewat GUC per-transaksi
-   * (set_config(..., is_local = true) → otomatis reset saat transaksi selesai,
-   * jadi tidak bocor ke request lain lewat connection pool). '' = tanpa filter.
-   *
-   * jenisorder_id WAJIB selalu di-set: grid panjar memang selalu dipersempit
-   * ke satu jenis orderan, dan default-nya MUATAN — persis perilaku lama yang
-   * dulu ditulis sebagai `where u.jenisorder_id = <MUATAN>` di findAll.
-   */
   private async setSessionContext(
     trx: any,
     filters: Record<string, any> | undefined,
@@ -93,11 +84,6 @@ export class PanjarheaderService {
     ]);
   }
 
-  /**
-   * jenisorder_id kini uuid v7 bertipe text. FilterGrid mengirim id-nya apa
-   * adanya; kalau kosong/'null' (halaman baru dibuka, user belum memilih),
-   * jatuh ke MUATAN — dicari by nama karena id-nya berbeda per database.
-   */
   private async resolveJenisOrderId(trx: any, raw: any): Promise<string> {
     const value = String(raw ?? '').trim();
     if (value && value !== 'null' && value !== 'undefined') return value;
@@ -112,10 +98,6 @@ export class PanjarheaderService {
 
   // ─── Query dasar ───────────────────────────────────────────────────────────
 
-  /**
-   * Query dasar dipakai findAll, COUNT, dan perhitungan posisi baris supaya
-   * ketiganya melihat dataset yang PERSIS sama.
-   */
   private baseQuery(trx: any) {
     return trx(`${this.viewName} as u`);
   }
@@ -197,12 +179,6 @@ export class PanjarheaderService {
     });
   }
 
-  /**
-   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
-   * mereplikasi orderBy di findAll(): grid mengurutkan kolom jenis order /
-   * biaya emkl memakai TEKS lookup-nya, bukan id UUID-nya. Kalau tidak sama,
-   * fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -220,13 +196,6 @@ export class PanjarheaderService {
     }
   }
 
-  /**
-   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
-   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
-   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
-   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
-   * supaya sort kolom tanggal dibandingkan sebagai tanggal.
-   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -257,11 +226,6 @@ export class PanjarheaderService {
     return posisi > 0 ? posisi : 1;
   }
 
-  /**
-   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
-   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
-   * SELURUH tabel lalu findIndex seperti implementasi lama (`limit: 0`).
-   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
@@ -316,11 +280,6 @@ export class PanjarheaderService {
     };
   }
 
-  /**
-   * Payload detail dibangun EKSPLISIT dari kolom tabel supaya field bantu dari
-   * frontend (orderanmuatan_id, isNew, dll) tidak ikut ditulis -> "column does
-   * not exist".
-   */
   private buildDetailPayload(
     details: any[],
     nobukti: string,
@@ -557,15 +516,6 @@ export class PanjarheaderService {
     }
   }
 
-  /**
-   * Dipakai export & cetak: header di-JOIN dengan detail sehingga hasilnya
-   * BARIS DATAR (satu baris per detail) — bentuk yang sudah diharapkan
-   * exportToExcel dan template LaporanPanjar.mrt.
-   *
-   * Session context di-reset ke kosong lebih dulu: baris yang dicetak bisa saja
-   * berada di luar periode/jenis orderan yang sedang aktif di grid, dan filter
-   * view tidak boleh menyembunyikannya.
-   */
   async findOne(id: string, trx: any) {
     try {
       await this.setSessionContext(trx, undefined, { withJenisOrder: false });
@@ -616,24 +566,10 @@ export class PanjarheaderService {
     'u.modifiedby',
   ];
 
-  /**
-   * jenisorder_id yang dipakai export, hasil resolusi yang SAMA dengan grid
-   * (kosong -> MUATAN). Dipanggil controller sekali di depan karena
-   * ExportJobService.streamRows bersifat sinkron.
-   */
   async resolveExportJenisOrderId(db: any, jenisOrderan: any): Promise<string> {
     return this.resolveJenisOrderId(db, jenisOrderan);
   }
 
-  /**
-   * Periode + jenis orderan ditulis EKSPLISIT di sini, TIDAK lewat
-   * setSessionContext: set_config(..., true) itu transaction-local, sedangkan
-   * export mengalirkan baris lewat cursor di luar transaksi. Tanpa session
-   * context kedua guard di view `vpanjarheader` bernilai true sehingga view
-   * memulangkan SEMUA periode dan SEMUA jenis orderan — persis kebalikan dari
-   * yang tampil di grid. Pola & alasannya sama dengan
-   * ShippingInstructionService.buildExportQuery.
-   */
   private applyExportScope(
     qb: any,
     filters: Record<string, any> | undefined,
@@ -688,10 +624,6 @@ export class PanjarheaderService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya.
-   */
   async countExportRows(
     {
       search,
@@ -709,7 +641,6 @@ export class PanjarheaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — kolomnya mengikuti kolom grid header panjar. */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

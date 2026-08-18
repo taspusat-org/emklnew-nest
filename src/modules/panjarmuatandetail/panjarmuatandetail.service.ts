@@ -23,11 +23,6 @@ export class PanjarmuatandetailService {
     private readonly logTrailService: LogtrailService,
   ) {}
 
-  /**
-   * estimasi & nominal bertipe numeric. Grid mengirimnya lewat InputCurrency
-   * sebagai string ter-format ("100,000.00"); koma ribuan ditolak Postgres
-   * dengan 22P02 invalid input syntax for type numeric. Kosong -> null.
-   */
   private toNumeric(value: any): number | null {
     if (value === null || value === undefined || value === '') return null;
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -35,19 +30,6 @@ export class PanjarmuatandetailService {
     return Number.isNaN(parsed) ? null : parsed;
   }
 
-  /**
-   * Upsert seluruh detail milik satu panjar sekaligus: baris yang dikirim
-   * dengan id nyata di-UPDATE, yang id-nya kosong/'0' di-INSERT, dan baris di DB
-   * yang TIDAK lagi dikirim dihapus.
-   *
-   * Rewrite Postgres: TANPA temp table + OPENJSON. OPENJSON adalah fungsi SQL
-   * Server (tidak ada di PG) dan `jsonExtract` knex memakai jsonb_path_query
-   * yang mengembalikan jsonb ber-quote sehingga nilainya korup. Kalaupun mau
-   * tetap lewat temp table, padanan PG-nya adalah jsonb_populate_recordset
-   * (lihat shipping-instruction-detail). Di sini dipakai bentuk yang lebih
-   * sederhana & sudah terbukti di pengeluarandetail: upsert langsung dari array
-   * JS, nilainya diambil apa adanya dari objek.
-   */
   async create(details: any, id: any = 0, trx: any = null) {
     try {
       const time = this.utilsService.getTime();
@@ -203,11 +185,6 @@ export class PanjarmuatandetailService {
     }
   }
 
-  /**
-   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
-   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
-   * menunjuk ke view.
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
@@ -267,11 +244,6 @@ export class PanjarmuatandetailService {
     }
   }
 
-  /**
-   * `id` = panjar_id (header yang sedang dipilih). Selalu jadi predikat
-   * eksplisit — lihat catatan di create-vpanjar-pg.sql kenapa tidak dititipkan
-   * ke session context.
-   */
   async findAll(
     id: string,
     trx: any,

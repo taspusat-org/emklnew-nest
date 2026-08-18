@@ -129,22 +129,25 @@ export class BlDetailRincianService {
       );
 
       // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          bldetail_id: trx.raw(`${tempTableName}.bldetail_id`),
-          bldetail_nobukti: trx.raw(`${tempTableName}.bldetail_nobukti`),
-          orderanmuatan_nobukti: trx.raw(
-            `${tempTableName}.orderanmuatan_nobukti`,
-          ),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*');
+      // UPDATE ... FROM — alasannya sama dengan BlDetailService: di Postgres
+      // knex mengabaikan join pada update sehingga temp table tidak pernah
+      // masuk klausa FROM ("missing FROM-clause entry", SQLSTATE 42P01).
+      const updatedResult = await trx.raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           bldetail_id = tmp.bldetail_id,
+           bldetail_nobukti = tmp.bldetail_nobukti,
+           orderanmuatan_nobukti = tmp.orderanmuatan_nobukti,
+           keterangan = tmp.keterangan,
+           info = tmp.info,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      );
+      const updatedData = updatedResult?.rows ?? [];
 
       // Handle insertion if no update occurs
       const insertedDataQuery = await trx(tempTableName)
@@ -269,11 +272,6 @@ export class BlDetailRincianService {
     }
   }
 
-  /**
-   * Nama kolom pivot untuk satu biaya EMKL. WAJIB dipakai di dua tempat —
-   * pembuatan temp table di tempPivotBiaya() dan daftar select di findAll() —
-   * supaya keduanya tidak pernah bergeser sendiri-sendiri.
-   */
   private pivotColumnAlias(nama: string): string {
     const alias = String(nama)
       .replace(/\s+/g, '')
@@ -283,24 +281,6 @@ export class BlDetailRincianService {
     return alias.startsWith('biaya') ? alias : `biaya${alias}`;
   }
 
-  /**
-   * Satu baris per (bldetail_id, orderanmuatan_nobukti) dengan SATU KOLOM per
-   * biaya EMKL yang statusbiayabl = YA — dipakai findAll() sebagai sumber kolom
-   * biaya di grid rincian.
-   *
-   * Versi lama memakai PIVOT + JSON_VALUE(A.[kolom], '$.nominal') + tiga temp
-   * table ber-prefiks '##'. Ketiganya khusus SQL Server:
-   *   - PIVOT tidak ada di Postgres,
-   *   - JSON_VALUE dan kurung siku sebagai pembatas identifier juga tidak ada,
-   *   - '##' bukan identifier valid saat direferensikan mentah.
-   * Padanannya di Postgres adalah conditional aggregation
-   * (MAX(CASE WHEN ... THEN ... END)), yang sekaligus menghapus kebutuhan
-   * merakit lalu membongkar JSON: nominalnya diambil langsung dari kolomnya.
-   *
-   * Nama biaya EMKL ikut ke dalam SQL sebagai NILAI BIND (bukan literal yang
-   * dirangkai), jadi tidak ada jalur injeksi lewat data master. Yang dirangkai
-   * hanya nama kolom hasil, dan itu sudah dibersihkan pivotColumnAlias().
-   */
   async tempPivotBiaya(trx: any) {
     try {
       const tempHasil = `temp_pivotbiaya_${Math.random()

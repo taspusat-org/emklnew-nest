@@ -960,10 +960,6 @@ export class KasgantungheaderService {
     }
   }
 
-  /**
-   * Daftar kas gantung yang sisanya belum nol dalam rentang tanggal — dipakai
-   * lookup di layar Pengembalian Kas Gantung.
-   */
   async getKasGantung(dari: any, sampai: any, trx: any) {
     try {
       const tglDariFormatted = formatDateToSQL(dari);
@@ -1010,11 +1006,6 @@ export class KasgantungheaderService {
     }
   }
 
-  /**
-   * Baris kas gantung untuk satu pengembalian: yang SUDAH tercatat di
-   * pengembalian tersebut (bayar terisi) digabung dengan yang belum pernah
-   * dikembalikan sama sekali (bayar 0).
-   */
   async getPengembalian(id: any, dari: any, sampai: any, trx: any) {
     try {
       const tglDariFormatted = formatDateToSQL(dari);
@@ -1125,11 +1116,6 @@ export class KasgantungheaderService {
     }
   }
 
-  /**
-   * Data untuk cetak bukti kas gantung di background: satu header beserta
-   * rinciannya, dipetakan ke dua datasource LaporanKasGantung.mrt — `data`
-   * (header) dan `detail` (rincian nominal).
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
@@ -1179,11 +1165,6 @@ export class KasgantungheaderService {
     };
   }
 
-  /**
-   * Data master satu bukti untuk blok info di atas tabel rincian. Dipakai juga
-   * untuk memberi nama file, jadi diambil SEBELUM job export dimulai supaya
-   * id yang tidak ada langsung balas 404, bukan gagal di tengah job.
-   */
   async loadExportBuktiHeader(id: string, db: any) {
     const header = await this.baseQuery(db)
       .select([
@@ -1209,11 +1190,6 @@ export class KasgantungheaderService {
     return header;
   }
 
-  /**
-   * Rincian satu bukti, urut sesuai urutan input. Dikembalikan sebagai query
-   * (bukan array) supaya ExportJobService bisa men-stream-nya lewat cursor,
-   * sama seperti export daftar.
-   */
   buildExportBuktiQuery(nobukti: string, db: any) {
     return db('vkasgantungdetail as d')
       .select(['d.nobukti', 'd.keterangan', 'd.nominal'])
@@ -1221,7 +1197,6 @@ export class KasgantungheaderService {
       .orderBy('d.id', 'asc');
   }
 
-  /** Jumlah baris rincian — dipakai untuk progres export yang nyata. */
   async countExportBuktiRows(nobukti: string, db: any): Promise<number> {
     const result = await db('vkasgantungdetail as d')
       .count('d.id as total')
@@ -1231,7 +1206,6 @@ export class KasgantungheaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Sheet export per transaksi: blok master di atas, rincian + TOTAL di bawah. */
   buildExportBuktiSheet(header: any): ExportSheetDefinition {
     return {
       sheetName: 'Kas Gantung',

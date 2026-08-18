@@ -9,14 +9,6 @@ import {
 import { ZodError } from 'zod';
 import { GENERIC_ERROR_MESSAGE, toSafeErrorMessage } from './error-message';
 
-/**
- * Filter terakhir sebelum respons keluar. Bentuk body TIDAK diubah — hanya
- * `message` yang disaring — supaya frontend yang sudah membaca
- * `statusCode` + `message` (dan array issue zod pada 400) tetap jalan.
- *
- * ZodError ditangani di sini dengan body yang sama persis seperti ZodFilter,
- * jadi hasilnya tidak bergantung pada urutan pendaftaran filter.
- */
 @Catch()
 export class SafeExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(SafeExceptionFilter.name);

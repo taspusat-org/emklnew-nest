@@ -224,17 +224,6 @@ export class BiayaExtraHeaderController {
     }
   }
 
-  /**
-   * POST /biayaextraheader/export
-   *
-   * Export Excel DAFTAR biaya extra (bukan satu bukti seperti
-   * GET /export/:id) di background. Request langsung balas { jobId };
-   * progresnya dikirim lewat socket namespace `/report` (kanal yang sama
-   * dengan cetak laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(
@@ -278,17 +267,6 @@ export class BiayaExtraHeaderController {
     });
   }
 
-  /**
-   * POST /biayaextraheader/report
-   *
-   * Cetak bukti biaya extra di background. Request langsung balas { jobId };
-   * progres render dikirim lewat socket namespace `/report` (room = jobId), dan
-   * PDF-nya diambil di GET /report/download/:jobId.
-   *
-   * Beda dengan export di atas yang mengambil seluruh baris hasil filter:
-   * LaporanBiayaExtra.mrt adalah bukti PER TRANSAKSI, jadi yang dikirim
-   * frontend hanya id baris yang dicentang.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(

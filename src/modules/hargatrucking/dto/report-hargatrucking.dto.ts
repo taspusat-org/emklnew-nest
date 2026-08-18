@@ -14,7 +14,6 @@ export const ReportHargatruckingSchema = z.object({
   filters: z.record(z.union([z.string(), z.number()]).nullable()).optional(),
   sortBy: z.string().optional(),
   sortDirection: z.enum(['asc', 'desc']).optional(),
-  /** Judul yang dicetak di header laporan. */
   judullaporan: z.string().optional(),
 });
 

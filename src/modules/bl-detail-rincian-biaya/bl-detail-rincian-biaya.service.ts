@@ -27,7 +27,12 @@ export class BlDetailRincianBiayaService {
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
       const orderanmuatan_nobukti = details[0].orderanmuatan_nobukti;
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      // Tanpa prefiks '##' (global temp ala MSSQL). createTempTable() MEMBUANG
+      // '#' saat membuat tabelnya (`CREATE TEMP TABLE "temp_xxx"`), jadi kalau
+      // variabel ini masih membawa '##', setiap referensi setelahnya menunjuk
+      // nama yang tidak pernah ada: `relation "##temp_xxx" does not exist`.
+      // Sama seperti BlDetailService & ShippingInstructionDetailService.
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -86,44 +91,52 @@ export class BlDetailRincianBiayaService {
       }
 
       await trx.raw(tableTemp);
+
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
-
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
+      // OPENJSON + jsonExtract adalah bentuk SQL Server; di Postgres fungsinya
+      // tidak ada ("function openjson(unknown) does not exist"). Padanannya
+      // jsonb_populate_recordset(null::<tabel>, ...): satu baris per elemen
+      // array, kolom & tipenya mengikuti tabel base — temp dibuat dari
+      // `SELECT * ... WHERE 1=0` sehingga bentuknya identik. Pola yang sama
+      // sudah dipakai BlDetailService, BlDetailRincianService, dan
+      // ShippingInstructionDetailService.
+      //
+      // Bonus: tidak lagi membaca `mainDataToInsert[0]` untuk menyusun mapping,
+      // yang berarti array kosong tidak lagi melempar TypeError.
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
       // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          bldetail_id: trx.raw(`${tempTableName}.bldetail_id`),
-          bldetail_nobukti: trx.raw(`${tempTableName}.bldetail_nobukti`),
-          orderanmuatan_nobukti: trx.raw(
-            `${tempTableName}.orderanmuatan_nobukti`,
-          ),
-          nominal: trx.raw(`${tempTableName}.nominal`),
-          biayaemkl_id: trx.raw(`${tempTableName}.biayaemkl_id`),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*')
-        .then((result: any) => result[0])
+      // UPDATE ... FROM — alasannya sama dengan BlDetailService: di Postgres
+      // knex mengabaikan join pada update sehingga temp table tidak pernah
+      // masuk klausa FROM ("missing FROM-clause entry", SQLSTATE 42P01).
+      const updatedResult = await trx
+        .raw(
+          `update ${this.tableName} as t set
+             nobukti = tmp.nobukti,
+             bldetail_id = tmp.bldetail_id,
+             bldetail_nobukti = tmp.bldetail_nobukti,
+             orderanmuatan_nobukti = tmp.orderanmuatan_nobukti,
+             nominal = tmp.nominal,
+             biayaemkl_id = tmp.biayaemkl_id,
+             info = tmp.info,
+             modifiedby = tmp.modifiedby,
+             created_at = tmp.created_at,
+             updated_at = tmp.updated_at
+           from "${tempTableName}" as tmp
+           where t.id = tmp.id
+           returning t.*`,
+        )
         .catch((error: any) => {
           console.error('Error updated data bl detail rincian biaya:', error);
           throw error;
         });
+      // Pemanggil hanya memakai baris pertama (perilaku .then(result => result[0])
+      // sebelumnya dipertahankan).
+      const updatedData = updatedResult?.rows?.[0];
 
       // Handle insertion if no update occurs
       const insertedDataQuery = await trx(tempTableName)

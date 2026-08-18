@@ -213,12 +213,6 @@ export class BlHeaderService {
 
   // ─── Session context ───────────────────────────────────────────────────────
 
-  /**
-   * Rentang tanggal dititipkan ke view lewat GUC per-transaksi
-   * (set_config(..., is_local = true) → otomatis reset saat transaksi selesai,
-   * jadi tidak bocor ke request lain lewat connection pool). '' = tanpa filter.
-   * Pola sama dengan ShippingInstructionService / PanjarheaderService.
-   */
   private async setSessionContext(
     trx: any,
     filters: Record<string, any> | undefined,
@@ -239,12 +233,6 @@ export class BlHeaderService {
 
   // ─── Query dasar ───────────────────────────────────────────────────────────
 
-  /**
-   * Query dasar dipakai findAll dan COUNT supaya keduanya melihat dataset yang
-   * PERSIS sama. COUNT versi lama menghitung SELURUH isi tabel base tanpa
-   * filter apa pun, jadi totalPages dan posisi baris ikut salah begitu ada
-   * filter kolom / search / periode yang aktif.
-   */
   private baseQuery(trx: any) {
     return trx(`${this.viewName} as u`);
   }
@@ -270,12 +258,6 @@ export class BlHeaderService {
     ];
   }
 
-  /**
-   * ilike, BUKAN like: Postgres case-sensitive sehingga `like` membuat
-   * pencarian 'bahari' tidak menemukan 'BAHARI'. Escaping `[` peninggalan
-   * MSSQL juga dibuang — di Postgres kurung siku bukan wildcard LIKE, jadi
-   * mengubahnya jadi '[[]' justru membuat teksnya tidak pernah cocok.
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any> | undefined,
@@ -341,11 +323,6 @@ export class BlHeaderService {
     });
   }
 
-  /**
-   * Kolom urut sebenarnya. Grid mengurutkan kolom pelayaran / kapal / tujuan
-   * kapal memakai TEKS lookup-nya, bukan id-nya. Semua kolom itu kini ada di
-   * view, jadi tidak perlu alias tabel join lagi.
-   */
   private resolveSortColumn(sortBy: string): string {
     switch (sortBy) {
       case 'pelayaran_text':
@@ -365,6 +342,12 @@ export class BlHeaderService {
   ) {
     try {
       const { page = 1 } = pagination ?? {};
+      // customOffset: offset absolut, dipakai grid saat window pagination harus
+      // mulai dari halaman yang BUKAN kelipatan ukuran window (mis. setelah
+      // simpan, baris baru ada di halaman terakhir dan window digeser mundur
+      // supaya tidak cuma berisi satu baris). Tanpa ini offset selalu
+      // (page - 1) * limit sehingga awal window terkunci ke kelipatan saja.
+      const customOffset = pagination?.customOffset;
       let limit = pagination?.limit ?? 0;
 
       const sortBy = sort?.sortBy || 'nobukti';
@@ -411,7 +394,11 @@ export class BlHeaderService {
       }
 
       if (limit > 0) {
-        query.offset((page - 1) * limit).limit(limit);
+        const offset =
+          typeof customOffset === 'number' && customOffset >= 0
+            ? customOffset
+            : (page - 1) * limit;
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
@@ -481,14 +468,6 @@ export class BlHeaderService {
     'u.modifiedby',
   ];
 
-  /**
-   * Periode ditulis EKSPLISIT di sini, TIDAK lewat setSessionContext:
-   * set_config(..., true) itu transaction-local, sedangkan export mengalirkan
-   * baris lewat cursor DI LUAR transaksi. Tanpa session context guard di view
-   * `vblheader` bernilai true sehingga view memulangkan SEMUA periode —
-   * persis kebalikan dari yang tampil di grid. Alasan & pola sama dengan
-   * ShippingInstructionService.buildExportQuery.
-   */
   private applyExportDateRange(
     qb: any,
     filters: Record<string, any> | undefined,
@@ -533,10 +512,6 @@ export class BlHeaderService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -550,7 +525,6 @@ export class BlHeaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — kolomnya mengikuti kolom grid header BL. */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
@@ -859,6 +833,27 @@ export class BlHeaderService {
     }
   }
 
+  private async hitungNominalRincianBiaya(
+    daftarBiaya: { id: any; nama?: string }[],
+    _trx: any,
+  ): Promise<Map<string, number>> {
+    const NOMINAL_SEMENTARA_PER_NAMA: Record<string, number> = {
+      'BIAYA TRUCKING MUAT': 1500000,
+      'OPERATIONAL PELABUHAN': 750000,
+      'DOKUMEN BL': 250000,
+      SEAL: 100000,
+    };
+    const NOMINAL_SEMENTARA_DEFAULT = 0;
+
+    return new Map(
+      daftarBiaya.map((biaya) => [
+        String(biaya.id),
+        NOMINAL_SEMENTARA_PER_NAMA[String(biaya.nama ?? '').toUpperCase()] ??
+          NOMINAL_SEMENTARA_DEFAULT,
+      ]),
+    );
+  }
+
   async processBlRincianBiaya(trx: any) {
     try {
       const getIdStatusYa = await trx
@@ -874,7 +869,18 @@ export class BlHeaderService {
         .select(['u.id', 'u.nama', 'u.keterangan', 'u.statusbiayabl'])
         .where('u.statusbiayabl', getIdStatusYa.id);
 
-      const data = await query;
+      const daftarBiaya = await query;
+      const nominalPerBiaya = await this.hitungNominalRincianBiaya(
+        daftarBiaya,
+        trx,
+      );
+
+      // `nominal` ikut dikirim supaya form BL tinggal memakainya apa adanya —
+      // tidak ada perhitungan yang diduplikasi di frontend.
+      const data = daftarBiaya.map((biaya: any) => ({
+        ...biaya,
+        nominal: nominalPerBiaya.get(String(biaya.id)) ?? 0,
+      }));
 
       return {
         data,

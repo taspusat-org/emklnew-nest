@@ -35,12 +35,6 @@ export class TypeAkuntansiService {
     private readonly utilsService: UtilsService,
   ) {}
 
-  /**
-   * Tabel `typeakuntansi` tidak punya view turunan seperti `valatbayar`, jadi
-   * kolom teks status (p.text) dan nama akuntansi (ak.nama) diambil lewat LEFT
-   * JOIN. Query dasar ini dipakai findAll, COUNT, dan perhitungan posisi baris
-   * supaya ketiganya melihat dataset yang PERSIS sama.
-   */
   private baseQuery(trx: any) {
     return trx(`${this.tableName} as u`)
       .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
@@ -129,14 +123,6 @@ export class TypeAkuntansiService {
     });
   }
 
-  /**
-   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
-   * bantu dari frontend (sortBy, filters, statusaktif_text, akuntansi_nama,
-   * method, dll) tidak ikut ditulis -> "Invalid column name". Uppercase HANYA
-   * nama & keterangan: id, akuntansi_id, dan statusaktif adalah uuid v7 HURUF
-   * KECIL — meng-uppercase-nya menulis id yang tidak ada sehingga relasi
-   * akuntansi/status tampil kosong dan perubahan terlihat "tidak tersimpan".
-   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
@@ -152,12 +138,6 @@ export class TypeAkuntansiService {
     };
   }
 
-  /**
-   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
-   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
-   * TEKS parameter (p.text) dan kolom akuntansi memakai ak.nama, bukan id
-   * UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -177,13 +157,6 @@ export class TypeAkuntansiService {
     }
   }
 
-  /**
-   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
-   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
-   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
-   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
-   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
-   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -214,11 +187,6 @@ export class TypeAkuntansiService {
     return posisi > 0 ? posisi : 1;
   }
 
-  /**
-   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
-   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
-   * SELURUH tabel lalu findIndex seperti implementasi lama.
-   */
   private async buildPagedResult(
     trx: any,
     posisi: number,

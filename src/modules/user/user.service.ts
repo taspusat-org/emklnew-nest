@@ -27,7 +27,6 @@ import { Workbook, Column } from 'exceljs';
 export class UserService {
   private readonly logger = new Logger(UserService.name);
   private readonly tableName = 'users';
-  /** Password awal user baru — user mengganti sendiri setelah login pertama. */
   private readonly DEFAULT_PASSWORD = '12345678';
 
   constructor(
@@ -38,12 +37,6 @@ export class UserService {
     private readonly locksService: LocksService,
   ) {}
 
-  /**
-   * Tabel `users` tidak punya view turunan, jadi kolom teks status
-   * (p.text / p.memo) dan nama karyawan diambil lewat LEFT JOIN. Query dasar
-   * ini dipakai findAll, COUNT, dan perhitungan posisi baris supaya ketiganya
-   * melihat dataset yang PERSIS sama.
-   */
   private baseQuery(trx: any) {
     return trx(`${this.tableName} as u`).leftJoin(
       'parameter as p',
@@ -67,11 +60,6 @@ export class UserService {
     ];
   }
 
-  /**
-   * Kolom yang berada di tabel selain `users`. Dipakai applyFilters supaya
-   * filter/search-nya di-prefix ke alias yang benar — `u.namakaryawan` tidak
-   * ada dan langsung melempar "column does not exist".
-   */
   private readonly JOINED_COLUMNS: Record<string, string> = {
     text: 'p.text',
     memo: 'p.memo',
@@ -127,18 +115,6 @@ export class UserService {
     });
   }
 
-  /**
-   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
-   * bantu dari frontend (sortBy, filters, namakaryawan, userId, text, dll)
-   * tidak ikut ditulis -> "Invalid column name". Uppercase HANYA kolom teks
-   * manusiawi: id, statusaktif, dan karyawan_id adalah uuid v7 HURUF KECIL,
-   * meng-uppercase-nya menulis id yang tidak ada sehingga lookup tampil kosong
-   * (lihat pengeluaranheader).
-   *
-   * `username` juga TIDAK di-uppercase walau berupa teks: login mencocokkannya
-   * dengan `where({ username })` yang case-sensitive di Postgres, jadi
-   * mengubah huruf saat simpan akan mengunci user dari akunnya sendiri.
-   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
@@ -152,12 +128,6 @@ export class UserService {
     };
   }
 
-  /**
-   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
-   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
-   * TEKS parameter (p.text) dan kolom karyawan memakai k.namakaryawan, bukan
-   * id UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -172,13 +142,6 @@ export class UserService {
     }
   }
 
-  /**
-   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
-   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
-   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
-   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
-   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
-   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -209,11 +172,6 @@ export class UserService {
     return posisi > 0 ? posisi : 1;
   }
 
-  /**
-   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
-   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
-   * SELURUH tabel lalu findIndex seperti implementasi lama.
-   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
@@ -268,12 +226,6 @@ export class UserService {
     };
   }
 
-  /**
-   * Menyalin hak akses (useracl + userrole) dari `sourceUserId` ke
-   * `targetUserId`, lalu menyusun ulang string menu milik target sesuai
-   * ability hasil salinan. Dipakai create() maupun update() — dulu logikanya
-   * digandakan di kedua tempat.
-   */
   private async copyAccessFromUser(
     trx: any,
     targetUserId: string,
@@ -667,7 +619,6 @@ export class UserService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
   private readonly EXPORT_COLUMNS = [
     'u.username',
     'u.name',
@@ -675,14 +626,6 @@ export class UserService {
     'p.text',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -703,11 +646,6 @@ export class UserService {
       .orderBy(orderCol, sortDirection);
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. JOIN ke `parameter` & `karyawan` tetap dipakai karena filter
-   * menyaring lewat p.text / k.namakaryawan.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -720,7 +658,6 @@ export class UserService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

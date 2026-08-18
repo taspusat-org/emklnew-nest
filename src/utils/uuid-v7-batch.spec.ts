@@ -1,12 +1,6 @@
 import { uuidV7Many, withUuidV7 } from './utils.service';
 
-/**
- * Insert massal (mis. PUT /roleacl dengan 591 ACO) dulu memanggil uuidV7() per
- * baris -> 2 round-trip DB per baris -> request timeout. Spec ini mengunci agar
- * pembuatan uuid tetap satu query batch.
- */
 type FakeTrxOptions = {
-  /** Kembalikan uuid duplikat pada query batch (simulasi get_uuid_v7 di-fold). */
   duplicateBatch?: boolean;
 };
 

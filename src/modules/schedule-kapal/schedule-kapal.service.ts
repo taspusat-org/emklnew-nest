@@ -170,6 +170,14 @@ export class ScheduleKapalService {
         'tglSampai',
         'statusaktif_nama',
         'statusaktif',
+        // 'join' & 'notIn' adalah PARAMETER KONTROL, bukan kolom. Keduanya ikut
+        // masuk ke `filters` karena controller menampung sisa query dengan
+        // `...filters`. Blok filter di atas sudah melewatinya, tapi blok search
+        // ini belum — akibatnya begitu lookup mengirim `search` (mis. saat mode
+        // EDIT me-resolve nilai yang sedang tampil), query mencoba
+        // `u."join" ilike ...` dan gagal 42703 → API balas 500.
+        'join',
+        'notIn',
       ];
       const searchFields = Object.keys(filters || {}).filter(
         (k) => !excludeSearchKeys.includes(k),

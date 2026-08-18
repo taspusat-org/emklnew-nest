@@ -196,19 +196,6 @@ export class JurnalumumheaderController {
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
-  /**
-   * POST /jurnalumumheader/report
-   *
-   * Cetak bukti jurnal umum di background. Request langsung balas { jobId };
-   * progres render dikirim lewat socket namespace `/report` (event
-   * `report:progress`, room = jobId), dan PDF-nya diambil di
-   * GET /report/download/:jobId.
-   *
-   * Beda dengan laporan daftar (mis. Group Biaya Extra) yang mencetak seluruh
-   * baris hasil filter grid: LaporanJurnalUmum.mrt adalah bukti PER TRANSAKSI,
-   * jadi yang dikirim frontend hanya id baris yang dicentang. Datanya dua tabel
-   * — `data` (header) dan `detail` (rincian) — sesuai datasource template.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
@@ -233,19 +220,6 @@ export class JurnalumumheaderController {
     });
   }
 
-  /**
-   * POST /jurnalumumheader/export
-   *
-   * Export Excel daftar jurnal umum di background. Request langsung balas
-   * { jobId }; progresnya dikirim lewat socket namespace `/report` (kanal yang
-   * sama dengan cetak laporan), dan file-nya diambil di
-   * GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris. Jangan disamakan dengan GET /export/:id di
-   * bawah: yang itu mengekspor SATU bukti beserta rinciannya, yang ini seluruh
-   * baris yang lolos filter grid.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

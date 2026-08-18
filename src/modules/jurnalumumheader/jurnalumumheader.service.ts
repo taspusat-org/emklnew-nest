@@ -843,11 +843,6 @@ export class JurnalumumheaderService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
-  /**
-   * Data untuk cetak bukti jurnal umum di background: satu header beserta
-   * rinciannya, dipetakan ke dua datasource LaporanJurnalUmum.mrt — `data`
-   * (header) dan `detail` (rincian coa/nominal).
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
@@ -900,14 +895,6 @@ export class JurnalumumheaderService {
     };
   }
 
-  /**
-   * Query dasar export daftar: filter & sort yang sama dengan findAll, TANPA
-   * paging dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -945,7 +932,6 @@ export class JurnalumumheaderService {
     return query;
   }
 
-  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -958,7 +944,6 @@ export class JurnalumumheaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

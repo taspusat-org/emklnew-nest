@@ -89,6 +89,9 @@ export class BookingOrderanHeaderController {
   //@BOOKINGORDERANMUATAN
   @UsePipes(new ZodValidationPipe(FindAllSchema))
   async findAll(@Query() query: any) {
+    // customOffset WAJIB ikut di-destructure. Sisa query masuk ke `...filters`
+    // dan diperlakukan sebagai filter kolom — kalau tidak dikeluarkan di sini,
+    // grid akan memfilter kolom bernama "customOffset" yang tidak ada.
     const {
       search,
       page,
@@ -97,6 +100,7 @@ export class BookingOrderanHeaderController {
       sortDirection,
       isLookUp,
       jenisOrderan,
+      customOffset,
       ...filters
     } = query;
     let service: any;
@@ -106,9 +110,16 @@ export class BookingOrderanHeaderController {
       sortDirection: sortDirection || 'asc',
     };
 
+    const offsetAngka = Number(customOffset);
     const pagination = {
       page: page || 1,
       limit: limit === 0 || !limit ? undefined : limit,
+      customOffset:
+        customOffset !== undefined &&
+        Number.isFinite(offsetAngka) &&
+        offsetAngka >= 0
+          ? offsetAngka
+          : undefined,
     };
 
     const params = {

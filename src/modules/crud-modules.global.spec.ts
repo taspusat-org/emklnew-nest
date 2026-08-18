@@ -17,9 +17,6 @@ import * as path from 'path';
 const LOG_DIR = path.join(process.cwd(), 'test-logs');
 const LOG_FILE = path.join(LOG_DIR, 'crud-validation.log');
 
-/**
- * Logger utility for writing test results to file
- */
 class TestLogger {
   private logs: string[] = [];
   private startTime: Date;
@@ -198,9 +195,6 @@ interface ValidationResult {
   details?: any;
 }
 
-/**
- * Scans the modules directory and returns information about each module
- */
 function scanModulesDirectory(): ModuleInfo[] {
   const modulesPath = path.join(__dirname);
   const modules: ModuleInfo[] = [];
@@ -241,9 +235,6 @@ function scanModulesDirectory(): ModuleInfo[] {
   return modules;
 }
 
-/**
- * Validates service file for required methods and patterns
- */
 function validateServiceFile(moduleInfo: ModuleInfo): ValidationResult[] {
   const results: ValidationResult[] = [];
 
@@ -382,9 +373,6 @@ function validateServiceFile(moduleInfo: ModuleInfo): ValidationResult[] {
   return results;
 }
 
-/**
- * Validates controller file for required endpoints and patterns
- */
 function validateControllerFile(moduleInfo: ModuleInfo): ValidationResult[] {
   const results: ValidationResult[] = [];
 
@@ -480,9 +468,6 @@ function validateControllerFile(moduleInfo: ModuleInfo): ValidationResult[] {
   return results;
 }
 
-/**
- * Validates module file for proper configuration
- */
 function validateModuleFile(moduleInfo: ModuleInfo): ValidationResult[] {
   const results: ValidationResult[] = [];
 
@@ -558,9 +543,6 @@ function validateModuleFile(moduleInfo: ModuleInfo): ValidationResult[] {
   return results;
 }
 
-/**
- * Main test suite
- */
 describe('Global CRUD Modules Validation', () => {
   const logger = new TestLogger();
   const modules: ModuleInfo[] = scanModulesDirectory();

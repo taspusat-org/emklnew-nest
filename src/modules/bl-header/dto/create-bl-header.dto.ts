@@ -1,4 +1,4 @@
-export class CreateBlHeaderDto {}
+export class CreateBlHeaderDto { }
 import { z } from 'zod';
 import { isRecordExist } from 'src/utils/utils.service';
 
@@ -12,7 +12,7 @@ const baseFields = {
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
   schedule_id: z
-    .number({
+    .string({
       required_error: 'SCHEDULE WAJIB DIISI',
     })
     .min(1, { message: 'SCHEDULE WAJIB DIISI' }),
@@ -22,7 +22,7 @@ const baseFields = {
     .nonempty({ message: 'VOY BERANGKAT WAJIB DIISI' }),
 
   kapal_id: z
-    .number({
+    .string({
       required_error: 'KAPAL WAJIB DIISI',
     })
     .min(1, { message: 'KAPAL WAJIB DIISI' }),
@@ -33,7 +33,7 @@ const baseFields = {
     .nonempty({ message: 'TGL BERANGKAT WAJIB DIISI' }),
 
   tujuankapal_id: z
-    .number({
+    .string({
       required_error: 'TUJUAN WAJIB DIISI',
     })
     .min(1, { message: 'TUJUAN WAJIB DIISI' }),
@@ -43,10 +43,12 @@ const baseFields = {
 };
 
 const baseDetailsFields = z.object({
-  id: z.number().optional(),
+  // Semua id BERTIPE TEKS sejak migrasi UUID. Baris baru dari form dikirim
+  // sebagai '0' (STRING, bukan angka) — lihat processOnReload di FormBlHeader.
+  id: z.string().optional(),
   nobukti: z.string().nullable().optional(),
 
-  bl_id: z.number().nullable().optional(),
+  bl_id: z.string().nullable().optional(),
 
   bl_nobukti: z
     .string({ message: 'NO BL CONECTING WAJIB DIISI' })
@@ -79,7 +81,7 @@ export type CreateBlDto = z.infer<typeof CreateBlSchema>;
 export const UpdateBlSchema = z.object({
   ...baseFields,
   details: z.array(baseDetailsFields).min(1),
-  id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+  id: z.string({ required_error: 'Id wajib diisi untuk update' }),
   // Field atau aturan khusus update bisa ditambah di sini
 });
 export type UpdateBlDto = z.infer<typeof UpdateBlSchema>;

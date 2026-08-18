@@ -17,15 +17,6 @@ import { Workbook } from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
 
-/**
- * Kolom `karyawan.karyawan_id` punya FK self-reference ke `karyawan(id)` yang
- * sebenarnya artefak migrasi — maksud aslinya menunjuk tabel karyawan di server
- * HR terpisah. Seluruh baris lama memakai sentinel '0' yang tak pernah ada di
- * tabel; constraint-nya NOT VALID sehingga baris lama lolos, TAPI setiap
- * insert/update baru diperiksa → "violates foreign key constraint" (500).
- * Sentinel dan string kosong diperlakukan sebagai "tak ada tautan HR" = NULL,
- * satu-satunya nilai yang lolos FK. Baris lama ikut bersih saat diedit.
- */
 async function resolveKaryawanId(trx: any, value: any): Promise<string | null> {
   const normalized = typeof value === 'string' ? value.trim() : value;
   if (!normalized || normalized === '0') {

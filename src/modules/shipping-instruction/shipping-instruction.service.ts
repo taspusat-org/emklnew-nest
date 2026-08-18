@@ -835,13 +835,6 @@ export class ShippingInstructionService {
     'u.modifiedby',
   ];
 
-  /**
-   * Query baris export. Filter tanggal ditulis eksplisit di sini, TIDAK lewat
-   * setDateRangeSessionContext: set_config(..., true) itu transaction-local,
-   * sedangkan export mengalirkan baris lewat cursor di luar transaksi. Tanpa
-   * session context, guard di view `vshippinginstructionheader` bernilai true
-   * sehingga view mengembalikan semua baris — periode-nya dibatasi di sini.
-   */
   buildExportQuery(
     {
       search,
@@ -882,7 +875,6 @@ export class ShippingInstructionService {
     return query;
   }
 
-  /** Periode grid (tglDari/tglSampai) — lihat catatan di buildExportQuery. */
   private applyDateRange(
     qb: any,
     filters: Record<string, any> | undefined,
@@ -895,10 +887,6 @@ export class ShippingInstructionService {
     ]);
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -912,7 +900,6 @@ export class ShippingInstructionService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

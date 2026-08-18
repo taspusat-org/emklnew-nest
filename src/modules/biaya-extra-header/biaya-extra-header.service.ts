@@ -229,12 +229,6 @@ export class BiayaExtraHeaderService {
     }
   }
 
-  /**
-   * Jenis order yang sedang dilihat grid. Kalau frontend tidak mengirim
-   * filter `jenisOrderan`, default-nya MUATAN — sama seperti tampilan awal
-   * grid. Dipakai findAll maupun export supaya keduanya melihat dataset yang
-   * PERSIS sama.
-   */
   async resolveJenisOrderId(filters: any, trx: any): Promise<string> {
     if (
       filters?.jenisOrderan &&
@@ -940,17 +934,6 @@ export class BiayaExtraHeaderService {
     }
   }
 
-  /**
-   * Query dasar export daftar Biaya Extra: filter, jenis order, dan sort yang
-   * sama dengan findAll, TANPA paging dan hanya kolom yang dipakai file Excel.
-   *
-   * `jenisorderId` sudah diresolusi di controller (lewat resolveJenisOrderId)
-   * karena ExportJobService meminta stream secara sinkron.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -995,11 +978,6 @@ export class BiayaExtraHeaderService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. JOIN-nya tetap dipakai karena filter menyaring lewat kolom
-   * turunan (p.nama, q.nama).
-   */
   async countExportRows(
     {
       search,
@@ -1021,7 +999,6 @@ export class BiayaExtraHeaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

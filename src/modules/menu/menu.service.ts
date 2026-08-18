@@ -28,12 +28,6 @@ export class MenuService {
     private readonly logTrailService: LogtrailService,
   ) {}
 
-  /**
-   * Tabel `menus` tidak punya view turunan seperti `valatbayar`, jadi kolom
-   * teks status (p.text), nama aco (a.nama), dan judul parent (parent.title)
-   * diambil lewat LEFT JOIN. Query dasar ini dipakai findAll, COUNT, dan
-   * perhitungan posisi baris supaya ketiganya melihat dataset yang PERSIS sama.
-   */
   private baseQuery(trx: any) {
     return trx(`${this.tableName} as u`)
       .leftJoin(`${this.tableName} as parent`, 'u.parentid', 'parent.id')
@@ -138,14 +132,6 @@ export class MenuService {
     });
   }
 
-  /**
-   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
-   * bantu dari frontend (sortBy, filters, parent_nama, acos_nama, dll) tidak
-   * ikut ditulis -> "Invalid column name". Uppercase HANYA title & icon:
-   * id, aco_id, parentId, dan statusaktif adalah uuid v7 HURUF KECIL —
-   * meng-uppercase-nya menulis id yang tidak ada sehingga relasi parent/aco/
-   * status tampil kosong dan perubahan terlihat "tidak tersimpan".
-   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
@@ -167,12 +153,6 @@ export class MenuService {
     };
   }
 
-  /**
-   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
-   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
-   * TEKS parameter (p.text) dan kolom parent memakai parent.title, bukan id
-   * UUID-nya. Kalau tidak sama, fokus baris setelah simpan akan meleset.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -193,13 +173,6 @@ export class MenuService {
     }
   }
 
-  /**
-   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
-   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
-   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
-   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
-   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
-   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -230,11 +203,6 @@ export class MenuService {
     return posisi > 0 ? posisi : 1;
   }
 
-  /**
-   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
-   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
-   * SELURUH tabel lalu findIndex seperti implementasi lama.
-   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
@@ -778,7 +746,6 @@ export class MenuService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
   private exportColumns(db: any) {
     return [
       'u.title',
@@ -792,14 +759,6 @@ export class MenuService {
     ];
   }
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -820,11 +779,6 @@ export class MenuService {
       .orderBy(orderCol, sortDirection);
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya. JOIN-nya tetap dipakai karena filter menyaring lewat kolom
-   * turunan (p.text, parent.title, a.nama).
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -837,7 +791,6 @@ export class MenuService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

@@ -1047,25 +1047,6 @@ export class OrderanMuatanService {
     }
   }
 
-  /**
-   * PROSES SHIPPING — satu query GROUP BY, tidak menulis apa pun.
-   *
-   * Dikelompokkan per `daftarbl_id` (satu grup = satu baris DETAIL shipping
-   * instruction), dan tiap grup membawa daftar orderan muatannya sebagai
-   * `detailsrincian` lewat json_agg — jadi tidak perlu lagi N+1 request ke
-   * /orderanheader untuk mengambil rincian tiap grup seperti sebelumnya.
-   *
-   * Kolom detail yang bisa diturunkan dari orderanmuatan hanya:
-   *   asalpelabuhan <- u.asalmuatan
-   *   shipper       <- shipper.nama (lewat u.shipper_id)
-   *   comodity      <- default parameter (GENERAL CARGO)
-   * `consignee`, `notifyparty`, dan `totalgw` TIDAK punya kolom sumber di
-   * orderanmuatan maupun daftarbl, jadi tidak diisi di sini — lihat catatan di
-   * form: ketiganya tetap bisa diisi user dan dipertahankan saat proses ulang.
-   *
-   * MAX(...) dipakai untuk kolom non-group supaya tetap valid di GROUP BY;
-   * dalam satu daftarbl nilainya memang seragam.
-   */
   async processShipping(schedule_id: any, trx: any) {
     try {
       // Default comodity diambil dari parameter supaya bisa diubah tanpa deploy.

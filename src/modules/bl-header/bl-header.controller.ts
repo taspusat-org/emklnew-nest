@@ -93,17 +93,33 @@ export class BlHeaderController {
   //@BL-HEADER
   @UsePipes(new ZodValidationPipe(FindAllSchema))
   async findAll(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+    // customOffset WAJIB ikut di-destructure. Sisa query masuk ke `...filters`
+    // dan diperlakukan sebagai filter kolom — kalau tidak dikeluarkan di sini,
+    // grid akan memfilter kolom bernama "customOffset" yang tidak ada.
+    const {
+      search,
+      page,
+      limit,
+      sortBy,
+      sortDirection,
+      isLookUp,
+      customOffset,
+      ...filters
+    } = query as typeof query & { customOffset?: string | number };
 
     const sortParams = {
       sortBy: sortBy || 'nobukti',
       sortDirection: sortDirection || 'asc',
     };
 
+    const offsetAngka = Number(customOffset);
     const pagination = {
       page: page || 1,
       limit: limit === 0 || !limit ? undefined : limit,
+      customOffset:
+        customOffset !== undefined && Number.isFinite(offsetAngka) && offsetAngka >= 0
+          ? offsetAngka
+          : undefined,
     };
 
     const params: FindAllParams = {
@@ -240,18 +256,6 @@ export class BlHeaderController {
     }
   }
 
-  /**
-   * POST /blheader/report
-   *
-   * Cetak laporan di background. Request langsung balas { jobId }; progres
-   * render dikirim lewat socket namespace `/report` (event `report:progress`,
-   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
-   *
-   * Data laporan diambil lewat findOne() milik service ini — hasilnya sudah
-   * BARIS DATAR (header di-join ke rincian + orderan muatan), bentuk yang
-   * diharapkan datasource `data` di LaporanBL.mrt dan yang dulu dirakit di
-   * browser.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
@@ -296,16 +300,6 @@ export class BlHeaderController {
     });
   }
 
-  /**
-   * POST /blheader/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

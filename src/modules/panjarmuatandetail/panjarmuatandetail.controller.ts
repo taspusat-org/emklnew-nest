@@ -18,14 +18,6 @@ export class PanjarmuatandetailController {
     private readonly panjarmuatandetailService: PanjarmuatandetailService,
   ) {}
 
-  /**
-   * `id` = panjar_id header yang sedang dipilih di grid.
-   *
-   * Endpoint POST/PATCH lama DIHAPUS: keduanya stub yang tidak pernah jalan
-   * (create dipanggil tanpa trx, update hanya memulangkan template string) dan
-   * tidak dipakai frontend. Detail panjar SELALU ditulis lewat
-   * PanjarheaderService (satu transaksi bersama header-nya).
-   */
   @Get(':id')
   async findAll(@Param('id') id: string, @Query() query: FindAllDto) {
     const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =

@@ -145,14 +145,6 @@ export class JenisOrderanService {
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (par.text/format.text), bukan id
-   * (varchar UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau
-   * tidak fokus baris setelah simpan akan meleset. `col` = ref SQL untuk WHERE/
-   * ORDER, `valueKey` = nama field di baris hasil join untuk membaca nilainya.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,

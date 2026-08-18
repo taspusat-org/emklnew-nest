@@ -299,10 +299,6 @@ export class ParameterController {
     }
   }
 
-  /**
-   * Pra-cek sebelum EDIT (ambil lock baris). Untuk DELETE tidak ada tabel
-   * referensi tunggal yang bisa dicek — lihat ParameterService.checkValidasi.
-   */
   @UseGuards(AuthGuard)
   @Post('check-validation')
   async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
@@ -394,15 +390,6 @@ export class ParameterController {
     });
   }
 
-  /**
-   * POST /parameter/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

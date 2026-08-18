@@ -17,14 +17,6 @@ export class ReportController {
 
   constructor(private readonly jobStore: ReportJobStore) {}
 
-  /**
-   * Unduh hasil render. Dipanggil client setelah menerima event socket
-   * `report:progress` berstatus `done`.
-   *
-   * Sengaja tanpa AuthGuard: jobId adalah UUID acak yang hanya diketahui
-   * pemanggil endpoint report, umurnya 10 menit, dan hasilnya dibuang tepat
-   * setelah diunduh.
-   */
   @Get('download/:jobId')
   download(@Param('jobId') jobId: string, @Res() res: Response): void {
     const job = this.jobStore.get(jobId);

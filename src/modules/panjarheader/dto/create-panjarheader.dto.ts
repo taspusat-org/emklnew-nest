@@ -1,19 +1,7 @@
 import { z } from 'zod';
 
-/**
- * Semua id (PK & FK) di database sudah bertipe TEXT (uuid v7), bukan integer
- * lagi. Yang perlu diwaspadai: grid mengirim `id: 0` untuk baris detail BARU —
- * angka, bukan string — sehingga `z.string()` polos menolaknya dengan 400
- * "Expected string, received number" dan simpan gagal tanpa penjelasan di UI.
- * Karena itu id detail diterima sebagai string ATAU number.
- */
 const idBaris = z.union([z.string(), z.number()]).nullable().optional();
 
-/**
- * estimasi & nominal dikirim InputCurrency sebagai string ter-format
- * ("100,000.00"), tapi bisa juga sudah berupa number saat payload dirakit
- * ulang. Keduanya diterima; yang ditolak hanya nilai kosong.
- */
 const nominalWajib = (label: string) =>
   z
     .union([z.string(), z.number()])

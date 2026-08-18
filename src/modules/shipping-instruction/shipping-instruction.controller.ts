@@ -247,18 +247,6 @@ export class ShippingInstructionController {
     }
   }
 
-  /**
-   * POST /shippinginstruction/report
-   *
-   * Cetak laporan di background. Request langsung balas { jobId }; progres
-   * render dikirim lewat socket namespace `/report` (event `report:progress`,
-   * room = jobId), dan PDF-nya diambil di GET /report/download/:jobId.
-   *
-   * Data laporan diambil lewat findOne() milik service ini — laporan Shipping
-   * Instruction berbentuk dokumen master-detail, jadi header masuk tabel
-   * `data` dan baris rincian diratakan ke tabel `detail`, sama seperti yang
-   * dulu dirakit di browser.
-   */
   @UseGuards(AuthGuard)
   @Post('report')
   async report(
@@ -271,10 +259,6 @@ export class ShippingInstructionController {
     const username = req.user?.user?.username ?? 'unknown';
     const cabang = req.user?.user?.cabang ?? '';
     const pelabuhan = req.user?.user?.pelabuhan ?? '';
-
-    // Diisi saat loadData, lalu dipakai loadExtraTables — supaya findOne
-    // hanya dijalankan sekali walau datanya dipakai dua tabel.
-    let detailRows: any[] = [];
 
     return this.reportJobService.start({
       mrtName,
@@ -301,7 +285,7 @@ export class ShippingInstructionController {
 
         // Satu baris per rincian, kolom detail induknya ikut diulang —
         // bentuk yang sama dengan yang dipakai template .mrt.
-        detailRows = detail.flatMap((item: any) =>
+        const detailRows = detail.flatMap((item: any) =>
           (item.rincian || []).map((rincian: any) => ({
             ...item,
             rincian_id: rincian.id,
@@ -325,31 +309,23 @@ export class ShippingInstructionController {
           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 
         // Kolom tambahan di bawah dipakai header template .mrt.
-        return header.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
-          usercetak: username,
-          tglcetak,
-          judul: 'EKSPEDISI MUATAN KAPAL LAUT',
-          judul2: 'SHIPPING INSTRUCTION',
-          cabang,
-          pelabuhan,
-        }));
+        return {
+          data: header.map((row: any) => ({
+            ...row,
+            judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+            usercetak: username,
+            tglcetak,
+            judul: 'EKSPEDISI MUATAN KAPAL LAUT',
+            judul2: 'SHIPPING INSTRUCTION',
+            cabang,
+            pelabuhan,
+          })),
+          detail: detailRows,
+        };
       },
-      loadExtraTables: async () => ({ detail: detailRows }),
     });
   }
 
-  /**
-   * POST /shippinginstruction/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(
