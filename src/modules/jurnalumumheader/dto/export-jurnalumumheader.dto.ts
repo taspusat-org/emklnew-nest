@@ -1,18 +1,13 @@
 import { z } from 'zod';
 
 /**
- * Payload export Excel daftar Jurnal Umum (background job).
- *
- * Bentuknya sengaja sama dengan state `filters` di grid frontend (search
- * global + filter per kolom + sort), termasuk tglDari/tglSampai dari filter
- * periode. `page` dan `limit` tidak dipakai: export selalu mengambil SELURUH
- * baris yang lolos filter, bukan hanya halaman yang sedang tampil.
+ * Payload export Excel Jurnal Umum (background job): SATU bukti beserta
+ * rinciannya, bukan daftar. `id` diambil dari baris yang dicentang di grid —
+ * aturannya sama dengan cetak bukti, jadi keduanya selalu memuat transaksi
+ * yang sama.
  */
 export const ExportJurnalumumheaderSchema = z.object({
-  search: z.string().optional(),
-  filters: z.record(z.union([z.string(), z.number()]).nullable()).optional(),
-  sortBy: z.string().optional(),
-  sortDirection: z.enum(['asc', 'desc']).optional(),
+  id: z.union([z.string(), z.number()]).transform((value) => String(value)),
 });
 
 export type ExportJurnalumumheaderDto = z.infer<
