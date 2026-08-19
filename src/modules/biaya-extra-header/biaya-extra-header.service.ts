@@ -127,32 +127,75 @@ export class BiayaExtraHeaderService {
     return key === 'tglbukti' ? 'DD-MM-YYYY' : 'DD-MM-YYYY HH24:MI:SS';
   }
 
+  private periodBounds(filters: Record<string, any>) {
+    return {
+      tglDari: filters?.tglDari
+        ? formatDateToSQL(String(filters.tglDari))
+        : null,
+      tglSampai: filters?.tglSampai
+        ? formatDateToSQL(String(filters.tglSampai))
+        : null,
+    };
+  }
+
   /**
-   * Search global + filter per kolom + rentang tanggal + batas jenis order.
-   * Dipakai findAll, hitung total, resolvePosition, dan export supaya keempatnya
-   * TIDAK MUNGKIN berbeda penyaringan.
+   * Periode dan jenis order diturunkan ke vbiayaextraheader lewat GUC
+   * (`tas.tgldari`, `tas.tglsampai`, `tas.jenisorder_id`), bukan sebagai
+   * predikat di query luar: view menyaring biayaextraheader SEBELUM LEFT JOIN
+   * jenisorder/biayaemkl, jadi kedua join hanya kena baris satu periode.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi — jalur tanpa trx
+   * (export background) wajib memakai applyPeriodFilters.
    */
-  private applyFilters(
+  private async setGridSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+    jenisorderId?: string,
+  ): Promise<void> {
+    const { tglDari, tglSampai } = this.periodBounds(filters);
+
+    await trx.raw(
+      `SELECT set_config('tas.jenisorder_id', ?, true),
+              set_config('tas.tgldari', ?, true),
+              set_config('tas.tglsampai', ?, true)`,
+      [jenisorderId ?? '', tglDari ?? '', tglSampai ?? ''],
+    );
+  }
+
+  /** Padanan setGridSessionContext untuk jalur tanpa transaksi. */
+  private applyPeriodFilters(
     qb: any,
     filters: Record<string, any>,
-    search?: string,
     jenisorderId?: string,
   ): void {
     if (jenisorderId) {
       qb.where('u.jenisorder_id', jenisorderId);
     }
 
-    const excludeSearchKeys = ['tglDari', 'tglSampai', 'jenisOrderan'];
-
-    if (filters?.tglDari && filters?.tglSampai) {
-      // tglbukti di sini timestamptz (jurnalumumheader date), jadi batas atas
-      // memakai < hari+1 — `<= tglsampai` membuang seluruh baris hari terakhir
-      // yang jamnya bukan 00:00.
-      qb.where('u.tglbukti', '>=', formatDateToSQL(String(filters.tglDari)));
-      qb.whereRaw("u.tglbukti < ?::date + INTERVAL '1 day'", [
-        formatDateToSQL(String(filters.tglSampai)),
-      ]);
+    // Tiap batas berdiri sendiri, sama seperti view — bukan "kalau dua-duanya
+    // ada" — supaya export dan grid menyaring identik.
+    const { tglDari, tglSampai } = this.periodBounds(filters);
+    if (tglDari) {
+      qb.where('u.tglbukti', '>=', tglDari);
     }
+    if (tglSampai) {
+      // tglbukti bertipe datetime: `<= tglsampai` membuang baris hari terakhir
+      // yang jamnya bukan 00:00.
+      qb.whereRaw("u.tglbukti < ?::date + INTERVAL '1 day'", [tglSampai]);
+    }
+  }
+
+  /**
+   * Search global + filter per kolom. Periode/jenis order TIDAK di sini —
+   * keduanya urusan setGridSessionContext (jalur transaksi) atau
+   * applyPeriodFilters (export).
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys = ['tglDari', 'tglSampai', 'jenisOrderan'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -219,21 +262,20 @@ export class BiayaExtraHeaderService {
     search: string | undefined,
     sortBy: string,
     sortDirection: string,
-    jenisorderId: string,
   ): Promise<number> {
     const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
 
     const existingData = await trx(`${this.viewName} as u`)
       .select({ posval: orderCol })
       .where('u.id', id)
-      .modify((qb) => this.applyFilters(qb, filters, search, jenisorderId))
+      .modify((qb) => this.applyFilters(qb, filters, search))
       .first();
     if (!existingData || existingData.posval === null) return 1;
 
     const resultposition = await trx(`${this.viewName} as u`)
       .count('* as posisi')
       .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
-      .modify((qb) => this.applyFilters(qb, filters, search, jenisorderId))
+      .modify((qb) => this.applyFilters(qb, filters, search))
       .first();
 
     const posisi = Number(resultposition?.posisi ?? 0);
@@ -382,11 +424,10 @@ export class BiayaExtraHeaderService {
       if (withGridPosition) {
         try {
           const jenisorderId = newItem.jenisorder_id;
+          await this.setGridSessionContext(trx, filters || {}, jenisorderId);
           const totalRecords = await trx(`${this.viewName} as u`)
             .count('u.id as total')
-            .modify((qb) =>
-              this.applyFilters(qb, filters, search, jenisorderId),
-            )
+            .modify((qb) => this.applyFilters(qb, filters, search))
             .first();
           const totalItems = Number(totalRecords?.total ?? 0);
 
@@ -397,7 +438,6 @@ export class BiayaExtraHeaderService {
             search,
             sortBy,
             sortDirection,
-            jenisorderId,
           );
 
           paged = await this.buildPagedResult(
@@ -463,15 +503,14 @@ export class BiayaExtraHeaderService {
         sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
       const safeFilters = filters || {};
       const jenisorderId = await this.resolveJenisOrderId(safeFilters, trx);
+      await this.setGridSessionContext(trx, safeFilters, jenisorderId);
 
       // Total dihitung DENGAN filter yang sama seperti datanya; sebelumnya
       // COUNT jalan tanpa filter sehingga totalPages grid selalu memakai jumlah
       // seluruh tabel.
       const countResult = await trx(`${this.viewName} as u`)
         .count('u.id as total')
-        .modify((qb) =>
-          this.applyFilters(qb, safeFilters, search, jenisorderId),
-        )
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
 
@@ -493,9 +532,7 @@ export class BiayaExtraHeaderService {
       }
 
       const query = trx(`${this.viewName} as u`).select(this.viewColumns(trx));
-      query.modify((qb) =>
-        this.applyFilters(qb, safeFilters, search, jenisorderId),
-      );
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
       const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
       query.orderBy(orderCol, sortDirection);
 
@@ -511,7 +548,7 @@ export class BiayaExtraHeaderService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
-
+      console.log(query.toQuery());
       const data = await query;
       const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
       const responseType = total > 500 ? 'json' : 'local';
@@ -671,7 +708,9 @@ export class BiayaExtraHeaderService {
       }
 
       // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
-      // walau hasil edit tak lagi cocok dengan filter aktif.
+      // walau hasil edit tak lagi cocok dengan filter aktif. HARUS sebelum
+      // setGridSessionContext: begitu GUC periode terpasang, view sendiri yang
+      // menyaring dan baris di luar periode balik null.
       const updatedData = await trx(`${this.viewName} as u`)
         .select(this.viewColumns(trx))
         .where('u.id', id)
@@ -686,11 +725,10 @@ export class BiayaExtraHeaderService {
       if (withGridPosition) {
         try {
           const jenisorderId = updatePayload.jenisorder_id;
+          await this.setGridSessionContext(trx, filters || {}, jenisorderId);
           const totalRecords = await trx(`${this.viewName} as u`)
             .count('u.id as total')
-            .modify((qb) =>
-              this.applyFilters(qb, filters, search, jenisorderId),
-            )
+            .modify((qb) => this.applyFilters(qb, filters, search))
             .first();
           const totalItems = Number(totalRecords?.total ?? 0);
 
@@ -701,7 +739,6 @@ export class BiayaExtraHeaderService {
             search,
             sortBy || 'nobukti',
             sortDirection || 'asc',
-            jenisorderId,
           );
 
           paged = await this.buildPagedResult(
@@ -887,9 +924,10 @@ export class BiayaExtraHeaderService {
         db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
         db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
       ])
-      .modify((qb: any) =>
-        this.applyFilters(qb, filters || {}, search, jenisorderId),
-      );
+      .modify((qb: any) => {
+        this.applyPeriodFilters(qb, filters || {}, jenisorderId);
+        this.applyFilters(qb, filters || {}, search);
+      });
 
     // Urutan HARUS deterministik: tanpa tiebreak, dua baris dengan nilai sort
     // yang sama bisa bertukar posisi antar-batch cursor.
@@ -910,9 +948,10 @@ export class BiayaExtraHeaderService {
   ): Promise<number> {
     const result = await db(`${this.viewName} as u`)
       .count('u.id as total')
-      .modify((qb: any) =>
-        this.applyFilters(qb, filters || {}, search, jenisorderId),
-      )
+      .modify((qb: any) => {
+        this.applyPeriodFilters(qb, filters || {}, jenisorderId);
+        this.applyFilters(qb, filters || {}, search);
+      })
       .first();
 
     return Number(result?.total ?? 0);

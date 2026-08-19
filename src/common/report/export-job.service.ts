@@ -104,7 +104,8 @@ export interface ExportSheetDefinition {
   infoLines?: ExportInfoLine[];
   /**
    * Baris TOTAL di bawah data. `sumColumns` berisi indeks kolom (sejajar
-   * `headers`) yang dijumlahkan sambil baris mengalir — bukan query terpisah.
+   * `headers`) yang ditotal; sel-nya diisi rumus `SUM()` sepanjang baris data,
+   * jadi definisi sheet tidak perlu menghitung apa pun sendiri.
    */
   totalRow?: { label?: string; sumColumns: number[] };
   headers: string[];
@@ -152,6 +153,20 @@ function toNumericCell(
 
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : value;
+}
+
+/** Nomor kolom → huruf kolom Excel (1 → A, 27 → AA). */
+function columnLetter(columnNumber: number): string {
+  let letter = '';
+  let remaining = columnNumber;
+
+  while (remaining > 0) {
+    const index = (remaining - 1) % 26;
+    letter = String.fromCharCode(65 + index) + letter;
+    remaining = Math.floor((remaining - 1) / 26);
+  }
+
+  return letter;
 }
 
 /**
@@ -397,7 +412,12 @@ export class ExportJobService {
       const widths = this.createWidthMeasurer(sheet, formats);
       const pending: (string | number | null)[][] = [];
       const sumColumns = sheet.totalRow?.sumColumns ?? [];
-      const totals = new Map<number, number>();
+      // Nilai cache rumus TOTAL, lihat writeTotalRow. Di-seed 0 supaya
+      // `totals.has(index)` sekaligus jadi penanda kolom mana yang ditotal —
+      // pengecekannya dilewati sekali per sel, jutaan kali pada export besar.
+      const totals = new Map<number, number>(
+        sumColumns.map((index) => [index, 0]),
+      );
       let headerWritten = false;
       let flushed = 0;
 
@@ -408,7 +428,13 @@ export class ExportJobService {
         }
         for (const values of pending) {
           flushed += 1;
-          this.writeDataRow(worksheet, formats, values, headerOffset + flushed);
+          this.writeDataRow(
+            worksheet,
+            formats,
+            values,
+            headerOffset + flushed,
+            totals,
+          );
         }
         pending.length = 0;
       };
@@ -422,12 +448,6 @@ export class ExportJobService {
 
           written += 1;
           const values = sheet.mapRow(row, written);
-          sumColumns.forEach((index) => {
-            const numeric = toNumericCell(values[index]);
-            if (typeof numeric === 'number') {
-              totals.set(index, (totals.get(index) ?? 0) + numeric);
-            }
-          });
 
           if (headerWritten) {
             flushed += 1;
@@ -436,6 +456,7 @@ export class ExportJobService {
               formats,
               values,
               headerOffset + flushed,
+              totals,
             );
           } else {
             widths.add(values);
@@ -473,6 +494,7 @@ export class ExportJobService {
           sheet,
           formats,
           totals,
+          headerOffset + 1,
           headerOffset + flushed + 1,
         );
       }
@@ -610,7 +632,7 @@ export class ExportJobService {
     columnWidths: number[],
   ): void {
     const columnCount = sheet.headers.length;
-    const lastColumn = String.fromCharCode(64 + columnCount); // 7 kolom -> 'G'
+    const lastColumn = columnLetter(columnCount);
     const titleLines = sheet.titleLines ?? [];
 
     // WAJIB sebelum baris mana pun di-commit. ExcelJS menulis elemen `<cols>`
@@ -686,12 +708,24 @@ export class ExportJobService {
    * Baris TOTAL di bawah data. Label-nya di-merge dari kolom pertama sampai
    * tepat sebelum kolom angka pertama yang dijumlahkan, meniru bentuk laporan
    * yang sudah dipakai sebelumnya.
+   *
+   * Isinya rumus `SUM()` — di formula bar Excel tampil `=SUM(...)` dan totalnya
+   * ikut berubah saat rincian disunting.
+   *
+   * `result` BUKAN total tandingan, melainkan nilai cache rumus, dan angkanya
+   * diambil dari nilai sel yang memang sudah ditulis (lihat writeDataRow) jadi
+   * tidak mungkin beda dengan isi kolomnya. Ini yang dilakukan PhpSpreadsheet
+   * lewat `setPreCalculateFormulas` (default true) dan Excel sendiri di setiap
+   * file yang disimpannya. Tanpa cache itu Excel wajib menghitung saat file
+   * dibuka, workbook langsung ditandai berubah, dan Excel 2007 menanyakan
+   * "save?" saat ditutup padahal pemakai tidak mengubah apa pun.
    */
   private writeTotalRow(
     worksheet: any,
     sheet: ExportSheetDefinition,
     formats: ResolvedColumnFormat[],
     totals: Map<number, number>,
+    firstDataRow: number,
     rowNumber: number,
   ): void {
     const border = {
@@ -710,9 +744,18 @@ export class ExportJobService {
     label.alignment = { horizontal: 'left', vertical: 'middle' };
     label.border = border;
 
+    // Dijaga tidak pernah terbalik: kalau ternyata tak ada baris data sama
+    // sekali, rentangnya menunjuk satu sel kosong dan SUM-nya jadi 0.
+    const lastDataRow = Math.max(rowNumber - 1, firstDataRow);
+
     sumColumns.forEach((index) => {
       const cell = row.getCell(index + 1);
-      cell.value = totals.get(index) ?? 0;
+      const column = columnLetter(index + 1);
+
+      cell.value = {
+        formula: `SUM(${column}${firstDataRow}:${column}${lastDataRow})`,
+        result: totals.get(index) ?? 0,
+      };
       if (formats[index]?.numFmt) cell.numFmt = formats[index].numFmt;
       cell.font = { name: 'Tahoma', size: 10, bold: true };
       cell.alignment = { horizontal: 'right', vertical: 'middle' };
@@ -732,6 +775,7 @@ export class ExportJobService {
     formats: ResolvedColumnFormat[],
     values: (string | number | null)[],
     rowNumber: number,
+    totals: Map<number, number>,
   ): void {
     const row = worksheet.getRow(rowNumber);
     values.forEach((value, index) => {
@@ -739,7 +783,20 @@ export class ExportJobService {
       const cell = row.getCell(index + 1);
       // Konversi ke angka hanya untuk kolom yang memang diformat sebagai
       // angka — kolom teks seperti nomor bukti ('0012') harus tetap apa adanya.
-      cell.value = format.numFmt ? toNumericCell(value) : (value ?? '');
+      const cellValue = format.numFmt ? toNumericCell(value) : (value ?? '');
+      cell.value = cellValue;
+
+      // Cache rumus TOTAL diambil dari nilai sel yang BARU SAJA ditulis, jadi
+      // tidak bisa melenceng dari isi kolomnya; tambahannya satu penjumlahan,
+      // tanpa parsing ulang.
+      if (totals.has(index)) {
+        const numeric =
+          typeof cellValue === 'number' ? cellValue : toNumericCell(cellValue);
+        if (typeof numeric === 'number') {
+          totals.set(index, totals.get(index)! + numeric);
+        }
+      }
+
       if (format.numFmt) cell.numFmt = format.numFmt;
       cell.font = { name: 'Tahoma', size: 10 };
       cell.alignment = {

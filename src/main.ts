@@ -34,10 +34,12 @@ async function bootstrap() {
       origin: [
         'http://localhost:3001',
         'http://localhost:5000',
+        'https://emkldemo.transporindo.com',
         '*',
         'http://192.168.3.211:3001',
         'http://192.168.3.21:3000',
         'http://localhost:3000',
+        'http://192.168.4.59:5000',
         'http://localhost:3002',
         'http://localhost:5173',
         'http://192.168.3.217:3000',
