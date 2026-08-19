@@ -35,9 +35,9 @@
             "Type": "System.String"
           },
           "1": {
-            "Name": "nama",
-            "NameInSource": "nama",
-            "Alias": "nama",
+            "Name": "text",
+            "NameInSource": "text",
+            "Alias": "text",
             "Type": "System.String"
           },
           "2": {
@@ -179,15 +179,15 @@
             "Type": "System.String"
           },
           "25": {
-            "Name": "statusaktif_nama",
-            "NameInSource": "statusaktif_nama",
-            "Alias": "statusaktif_nama",
+            "Name": "nama",
+            "NameInSource": "nama",
+            "Alias": "nama",
             "Type": "System.String"
           },
           "26": {
-            "Name": "statusaktif_memo",
-            "NameInSource": "statusaktif_memo",
-            "Alias": "statusaktif_memo",
+            "Name": "memo",
+            "NameInSource": "memo",
+            "Alias": "memo",
             "Type": "System.String"
           },
           "27": {
@@ -1787,7 +1787,7 @@
               },
               "MaxNumberOfLines": 6,
               "Text": {
-                "Value": "{data.statusaktif_nama}"
+                "Value": "{data.text}"
               },
               "VertAlignment": "Center",
               "Font": "Tahoma;;;",

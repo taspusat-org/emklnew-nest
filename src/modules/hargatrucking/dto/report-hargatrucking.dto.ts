@@ -1,13 +1,5 @@
 import { z } from 'zod';
 
-/**
- * Payload cetak laporan Group Biaya Extra.
- *
- * Bentuknya sengaja sama dengan state `filters` di grid frontend (search
- * global + filter per kolom + sort), ditambah nama template .mrt-nya. `page`
- * dan `limit` tidak dipakai: laporan selalu mengambil SELURUH baris yang lolos
- * filter, bukan hanya halaman yang sedang tampil.
- */
 export const ReportHargatruckingSchema = z.object({
   mrtName: z.string().min(1, { message: 'mrtName wajib diisi' }),
   search: z.string().optional(),

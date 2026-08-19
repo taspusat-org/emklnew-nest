@@ -226,80 +226,81 @@ export class JurnalumumheaderController {
     @Body(new ZodValidationPipe(ExportJurnalumumheaderSchema))
     body: ExportJurnalumumheaderDto,
   ) {
-    const { search, filters, sortBy, sortDirection } = body;
+    const header = await this.jurnalumumheaderService.loadExportBuktiHeader(
+      body.id,
+      dbMssql,
+    );
 
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
     const stamp =
       `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
       `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-    const queryParams = {
-      search,
-      filters: (filters ?? {}) as Record<string, string | number>,
-      sort: {
-        sortBy: sortBy || 'nobukti',
-        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
-      },
-    };
+    const nobukti = String(header.nobukti ?? '').replace(
+      /[^A-Za-z0-9_-]+/g,
+      '',
+    );
 
     return this.exportJobService.start({
-      filename: `laporan_jurnal_umum_${stamp}.xlsx`,
+      filename: `jurnal_umum_${nobukti}_${stamp}.xlsx`,
       countRows: () =>
-        this.jurnalumumheaderService.countExportRows(queryParams, dbMssql),
+        this.jurnalumumheaderService.countExportBuktiRows(
+          header.nobukti,
+          dbMssql,
+        ),
       streamRows: () =>
         this.jurnalumumheaderService
-          .buildExportQuery(queryParams, dbMssql)
+          .buildExportBuktiQuery(header.nobukti, dbMssql)
           .stream(),
-      sheet: this.jurnalumumheaderService.exportSheet,
+      sheet: this.jurnalumumheaderService.buildExportBuktiSheet(header),
     });
   }
 
-  @Get('/export/:id')
-  async exportToExcel(@Param('id') id: string, @Res() res: Response) {
-    try {
-      // Ambil data
-      const trx = await dbMssql.transaction();
-      const { data } = await this.jurnalumumheaderService.findOne(id, trx);
+  // @Get('/export/:id')
+  // async exportToExcel(@Param('id') id: string, @Res() res: Response) {
+  //   try {
+  //     // Ambil data
+  //     const trx = await dbMssql.transaction();
+  //     const { data } = await this.jurnalumumheaderService.findOne(id, trx);
 
-      if (!Array.isArray(data)) {
-        return res
-          .status(HttpStatus.BAD_REQUEST)
-          .send('Data is not an array or is undefined.');
-      }
+  //     if (!Array.isArray(data)) {
+  //       return res
+  //         .status(HttpStatus.BAD_REQUEST)
+  //         .send('Data is not an array or is undefined.');
+  //     }
 
-      // Buat Excel file
-      const tempFilePath = await this.jurnalumumheaderService.exportToExcel(
-        data,
-        trx,
-      );
+  //     // Buat Excel file
+  //     const tempFilePath = await this.jurnalumumheaderService.exportToExcel(
+  //       data,
+  //       trx,
+  //     );
 
-      // Stream file ke response
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="laporan_jurnal_umum.xlsx"',
-      );
+  //     // Stream file ke response
+  //     res.setHeader(
+  //       'Content-Type',
+  //       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  //     );
+  //     res.setHeader(
+  //       'Content-Disposition',
+  //       'attachment; filename="laporan_jurnal_umum.xlsx"',
+  //     );
 
-      const fileStream = fs.createReadStream(tempFilePath);
-      fileStream.pipe(res);
+  //     const fileStream = fs.createReadStream(tempFilePath);
+  //     fileStream.pipe(res);
 
-      // Optional: hapus file temp setelah selesai streaming
-      fileStream.on('end', () => {
-        fs.unlink(tempFilePath, (err) => {
-          if (err) console.error('Error deleting temp file:', err);
-        });
-      });
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      return res
-        .status(HttpStatus.INTERNAL_SERVER_ERROR)
-        .send('Failed to export file');
-    }
-  }
+  //     // Optional: hapus file temp setelah selesai streaming
+  //     fileStream.on('end', () => {
+  //       fs.unlink(tempFilePath, (err) => {
+  //         if (err) console.error('Error deleting temp file:', err);
+  //       });
+  //     });
+  //   } catch (error) {
+  //     console.error('Error exporting to Excel:', error);
+  //     return res
+  //       .status(HttpStatus.INTERNAL_SERVER_ERROR)
+  //       .send('Failed to export file');
+  //   }
+  // }
   @Post('check-validation')
   @UseGuards(AuthGuard)
   async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {

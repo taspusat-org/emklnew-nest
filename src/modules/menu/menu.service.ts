@@ -22,6 +22,7 @@ import { Workbook } from 'exceljs';
 export class MenuService {
   private readonly logger = new Logger(MenuService.name);
   private readonly tableName = 'menus';
+  private readonly viewName = 'vmenus';
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
@@ -29,10 +30,7 @@ export class MenuService {
   ) {}
 
   private baseQuery(trx: any) {
-    return trx(`${this.tableName} as u`)
-      .leftJoin(`${this.tableName} as parent`, 'u.parentid', 'parent.id')
-      .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-      .leftJoin('acos as a', 'u.aco_id', 'a.id');
+    return trx(`${this.viewName} as u`);
   }
 
   private selectColumns(trx: any) {
@@ -51,10 +49,10 @@ export class MenuService {
       'u.modifiedby',
       trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
       trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-      'p.memo',
-      'p.text',
-      'a.nama as acos_nama',
-      'parent.title as parent_nama',
+      'u.statusaktif_memo as memo',
+      'u.statusaktif_text as text',
+      'u.acos_nama',
+      'u.parent_nama',
     ];
   }
 
@@ -75,13 +73,12 @@ export class MenuService {
     // text`, jadi harus di-CAST dulu sebelum dicocokkan sebagai teks.
     const numericFields = ['order'];
 
-    // Kolom turunan dari JOIN -> harus dicocokkan ke kolom tabel asalnya,
-    // bukan ke `u.<key>` yang tidak ada.
+    // Key dari frontend yang namanya berbeda dengan nama kolom di view.
     const joinedFields: Record<string, string> = {
-      parent_nama: 'parent.title',
-      parentId: 'parent.title',
-      parentid: 'parent.title',
-      acos_nama: 'a.nama',
+      parent_nama: 'u.parent_nama',
+      parentId: 'u.parent_nama',
+      parentid: 'u.parent_nama',
+      acos_nama: 'u.acos_nama',
     };
 
     if (search && searchFields.length > 0) {
@@ -123,7 +120,7 @@ export class MenuService {
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'text' || key === 'memo') {
-        qb.andWhere(`p.${key}`, '=', sanitizedValue);
+        qb.andWhere(`u.statusaktif_${key}`, '=', sanitizedValue);
       } else if (joinedFields[key]) {
         qb.andWhere(joinedFields[key], 'ilike', `%${sanitizedValue}%`);
       } else {
@@ -161,13 +158,13 @@ export class MenuService {
     switch (sortBy) {
       case 'statusaktif':
       case 'text':
-        return { orderCol: 'p.text', dir };
+        return { orderCol: 'u.statusaktif_text', dir };
       case 'parent_nama':
       case 'parentId':
       case 'parentid':
-        return { orderCol: 'parent.title', dir };
+        return { orderCol: 'u.parent_nama', dir };
       case 'acos_nama':
-        return { orderCol: 'a.nama', dir };
+        return { orderCol: 'u.acos_nama', dir };
       default:
         return { orderCol: `u.${sortBy}`, dir };
     }
@@ -702,23 +699,22 @@ export class MenuService {
         ...roleAcls.map((acl) => acl.aco_id),
       ]);
 
-      let query = dbMssql('menus')
+      let query = dbMssql(`${this.viewName} as u`)
         .select(
-          'menus.id as id',
-          'title',
-          'icon',
-          'menus.parentid as parentId',
-          'order',
-          'a.class as url',
+          'u.id as id',
+          'u.title',
+          'u.icon',
+          'u.parentid as parentId',
+          'u.order',
+          'u.acos_class as url',
         )
-        .leftJoin('acos as a', 'menus.aco_id', 'a.id')
-        .whereIn('aco_id', Array.from(userAcoIds))
-        .orderBy('parentid')
-        .orderBy('order');
+        .whereIn('u.aco_id', Array.from(userAcoIds))
+        .orderBy('u.parentid')
+        .orderBy('u.order');
 
       if (search) {
         const sanitizedValue = String(search).replace(/\[/g, '[[]');
-        query = query.andWhere('title', 'ilike', `%${sanitizedValue}%`);
+        query = query.andWhere('u.title', 'ilike', `%${sanitizedValue}%`);
       }
 
       const menus = await query;
@@ -749,11 +745,11 @@ export class MenuService {
   private exportColumns(db: any) {
     return [
       'u.title',
-      'parent.title as parent_nama',
+      'u.parent_nama',
       'u.icon',
-      'a.nama as acos_nama',
+      'u.acos_nama',
       'u.order',
-      'p.text',
+      'u.statusaktif_text as text',
       db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
       db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
     ];

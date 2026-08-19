@@ -26,6 +26,7 @@ import { LocksService } from '../locks/locks.service';
 export class TypeAkuntansiService {
   private readonly logger = new Logger(TypeAkuntansiService.name);
   private readonly tableName: string = 'typeakuntansi';
+  private readonly viewName: string = 'vtypeakuntansi';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -35,10 +36,14 @@ export class TypeAkuntansiService {
     private readonly utilsService: UtilsService,
   ) {}
 
+  /**
+   * Teks status (statusaktif_text/_memo) dan nama akuntansi sudah dirangkai di
+   * `vtypeakuntansi`, jadi join-nya tidak diulang di sini. Query dasar ini
+   * dipakai findAll, COUNT, dan perhitungan posisi baris supaya ketiganya
+   * melihat dataset yang PERSIS sama.
+   */
   private baseQuery(trx: any) {
-    return trx(`${this.tableName} as u`)
-      .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-      .leftJoin('akuntansi as ak', 'u.akuntansi_id', 'ak.id');
+    return trx(`${this.viewName} as u`);
   }
 
   private selectColumns(trx: any) {
@@ -52,9 +57,9 @@ export class TypeAkuntansiService {
       'u.modifiedby',
       trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
       trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-      'p.memo',
-      'p.text as statusaktif_text',
-      'ak.nama as akuntansi_nama',
+      'u.statusaktif_memo as memo',
+      'u.statusaktif_text',
+      'u.akuntansi_nama',
     ];
   }
 
@@ -90,7 +95,7 @@ export class TypeAkuntansiService {
               `%${sanitizedValue}%`,
             ]);
           } else if (field === 'akuntansi') {
-            query.orWhere('ak.nama', 'ilike', `%${sanitizedValue}%`);
+            query.orWhere('u.akuntansi_nama', 'ilike', `%${sanitizedValue}%`);
           } else {
             query.orWhere(`u.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
@@ -114,9 +119,9 @@ export class TypeAkuntansiService {
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'statusaktif_text' || key === 'memo') {
-        qb.andWhere('p.text', '=', sanitizedValue);
+        qb.andWhere('u.statusaktif_text', '=', sanitizedValue);
       } else if (key === 'akuntansi') {
-        qb.andWhere('ak.nama', 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere('u.akuntansi_nama', 'ilike', `%${sanitizedValue}%`);
       } else {
         qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
@@ -138,6 +143,13 @@ export class TypeAkuntansiService {
     };
   }
 
+  /**
+   * Kolom + arah urut yang dipakai untuk menghitung posisi baris. WAJIB
+   * mereplikasi orderBy di findAll(): grid mengurutkan kolom status memakai
+   * TEKS parameter (statusaktif_text) dan kolom akuntansi memakai
+   * akuntansi_nama, bukan id UUID-nya. Kalau tidak sama, fokus baris setelah
+   * simpan akan meleset.
+   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
@@ -147,11 +159,11 @@ export class TypeAkuntansiService {
       case 'statusaktif':
       case 'statusaktif_text':
       case 'text':
-        return { orderCol: 'p.text', dir };
+        return { orderCol: 'u.statusaktif_text', dir };
       case 'akuntansi':
       case 'akuntansi_nama':
       case 'akuntansi_text':
-        return { orderCol: 'ak.nama', dir };
+        return { orderCol: 'u.akuntansi_nama', dir };
       default:
         return { orderCol: `u.${sortBy}`, dir };
     }
@@ -545,6 +557,87 @@ export class TypeAkuntansiService {
       throw new InternalServerErrorException('Failed to check validation');
     }
   }
+
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
+  private readonly EXPORT_COLUMNS = [
+    'u.nama',
+    'u.order',
+    'u.keterangan',
+    'u.akuntansi_nama',
+    'u.statusaktif_text',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const { orderCol } = this.resolvePositionOrder(sortBy, sortDirection);
+
+    return db(`${this.viewName} as u`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .orderBy(orderCol, sortDirection);
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
+   * sebenarnya. Memakai view yang sama dengan findAll supaya filter status
+   * dan akuntansi menyaring dataset yang identik.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN TYPE AKUNTANSI',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'ORDER',
+      'KETERANGAN',
+      'AKUNTANSI',
+      'STATUS AKTIF',
+    ],
+    columnWidths: [5, 25, 10, 30, 25, 20],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.order,
+      row.keterangan,
+      row.akuntansi_nama,
+      row.statusaktif_text,
+    ],
+  };
 
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();

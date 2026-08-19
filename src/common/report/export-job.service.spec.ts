@@ -183,6 +183,86 @@ describe('ExportJobService', () => {
     cleanup();
   });
 
+  /**
+   * Baris TOTAL diisi rumus SUM, bukan angka mati, supaya totalnya ikut berubah
+   * saat rincian disunting. Nilai cache-nya WAJIB ikut ditulis: tanpa itu Excel
+   * menghitung ulang saat file dibuka lalu menanyakan "save?" waktu ditutup.
+   */
+  it('menulis baris TOTAL sebagai rumus SUM beserta nilai cache-nya', async () => {
+    const buktiSheet = {
+      sheetName: 'Kas Gantung',
+      titleLines: ['PT. TRANSPORINDO AGUNG SEJAHTERA', 'LAPORAN KAS GANTUNG'],
+      infoLines: [{ label: 'NO BUKTI', value: 'KG.001' }],
+      headers: ['NO.', 'KETERANGAN', 'NOMINAL'],
+      columnFormats: [null, null, { numFmt: '#,##0.00' }],
+      totalRow: { sumColumns: [2] },
+      mapRow: (row: any, rowNumber: number) => [
+        rowNumber,
+        row.keterangan,
+        row.nominal,
+      ],
+    };
+
+    const { worksheet, cleanup } = await runExport(buktiSheet, [
+      { keterangan: 'BIAYA A', nominal: 1_500_000 },
+      { keterangan: 'BIAYA B', nominal: '2500000.50' },
+      { keterangan: 'BIAYA C', nominal: 1_000 },
+    ]);
+
+    // 2 judul + kosong + 1 info + kosong + header = baris data mulai di 7.
+    const firstDataRow = 7;
+    const totalRow = worksheet.getRow(firstDataRow + 3);
+
+    expect(totalRow.getCell(1).value).toBe('TOTAL');
+    expect(totalRow.getCell(3).value).toEqual({
+      formula: 'SUM(C7:C9)',
+      result: 4_001_000.5,
+    });
+    // Nominal yang datang sebagai string tetap ditulis sebagai angka, kalau
+    // tidak SUM-nya melewatkan barisnya.
+    expect(worksheet.getRow(firstDataRow + 1).getCell(3).value).toBe(
+      2_500_000.5,
+    );
+
+    cleanup();
+  });
+
+  /**
+   * Baris ditulis lewat dua jalur: yang di-sample untuk lebar kolom ditahan
+   * dulu lalu di-flush, sisanya ditulis langsung di dalam loop. Rentang SUM
+   * harus menutup kedua jalur itu, bukan cuma baris yang di-sample.
+   */
+  it('merentang rumus TOTAL sampai baris terakhir yang ditulis', async () => {
+    const rows = Array.from({ length: 600 }, () => ({
+      keterangan: 'BIAYA',
+      nominal: 1_000,
+    }));
+    const { worksheet, cleanup } = await runExport(
+      {
+        sheetName: 'Data Export',
+        titleLines: ['LAPORAN'],
+        headers: ['NO.', 'KETERANGAN', 'NOMINAL'],
+        columnFormats: [null, null, { numFmt: '#,##0' }],
+        totalRow: { sumColumns: [2] },
+        mapRow: (row: any, rowNumber: number) => [
+          rowNumber,
+          row.keterangan,
+          row.nominal,
+        ],
+      },
+      rows,
+    );
+
+    // 1 judul + kosong + header = baris data mulai di 4.
+    const totalRow = worksheet.getRow(4 + rows.length);
+    expect(totalRow.getCell(3).value).toEqual({
+      formula: 'SUM(C4:C603)',
+      result: 600_000,
+    });
+
+    cleanup();
+  });
+
   it('menolak export yang melebihi batas baris xlsx tanpa menyentuh data', async () => {
     const { service, store, emitted, finished } = makeHarness();
     const streamRows = jest.fn();

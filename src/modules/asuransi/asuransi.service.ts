@@ -94,7 +94,6 @@ export class AsuransiService {
           `%${sanitizedValue}%`,
         ]);
       } else {
-        // ✅ prefix va. agar konsisten dengan alias view
         qb.andWhereRaw('va.??::text ilike ?', [key, `%${sanitizedValue}%`]);
       }
     });
@@ -141,7 +140,7 @@ export class AsuransiService {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
     switch (sortBy) {
       case 'statusaktif':
-        return { col: 'statusaktif_nama', dir: 'asc' }; // findAll: hardcode 'asc' on va.nama
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on va.nama
       case 'statusbank':
         return { col: 'statusbank_nama', dir };
       case 'statusdefault':
@@ -326,8 +325,8 @@ export class AsuransiService {
         'va.materai2',
         'va.materai3',
         'va.statusaktif',
-        'va.statusaktif_nama', // Status aktif text dari join parameter view
-        'va.statusaktif_memo', // Status aktif text dari join parameter view
+        'va.text',
+        'va.memo',
         'va.info',
         'va.modifiedby',
         trx.raw(
@@ -340,9 +339,8 @@ export class AsuransiService {
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .statusaktif_text)
       if (sortBy === 'statusaktif') {
-        query.orderBy('va.statusaktif_nama', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
+        query.orderBy('va.text', sortDirection);
       } else {
         query.orderBy(`va.${sortBy}`, sortDirection);
       }
@@ -422,8 +420,6 @@ export class AsuransiService {
         .first();
       totalItems = Number(totalRecords?.total ?? 0);
       if (existingData) {
-        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
-        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
         const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
@@ -556,7 +552,7 @@ export class AsuransiService {
     'va.materai1',
     'va.materai2',
     'va.materai3',
-    'va.statusaktif_nama',
+    'va.text',
   ];
 
   buildExportQuery(
@@ -577,7 +573,7 @@ export class AsuransiService {
       .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
     if (sortBy === 'statusaktif') {
-      query.orderBy('va.statusaktif_text', 'asc');
+      query.orderBy('va.text', 'asc');
     } else if (sortBy === 'statusbank') {
       query.orderBy('va.statusbank_text', sortDirection);
     } else if (sortBy === 'statusdefault') {
@@ -694,7 +690,7 @@ export class AsuransiService {
       row.materai1,
       row.materai2,
       row.materai3,
-      row.statusaktif_nama,
+      row.text,
     ],
   };
 
@@ -794,7 +790,7 @@ export class AsuransiService {
         row.materai1,
         row.materai2,
         row.materai3,
-        row.statusaktif_nama,
+        row.text,
       ];
       rowValues.forEach((value, colIndex) => {
         const cell = worksheet.getCell(currentRow, colIndex + 1);
