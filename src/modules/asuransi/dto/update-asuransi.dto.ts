@@ -1,40 +1,35 @@
 import { z } from 'zod';
 
-// NOTE: uniqueness check (nama) dipindah ke service.update() supaya
-// dijalankan DI DALAM transaction yg sudah pegang applock — kalau di sini
-// (Zod pipe) dia query Asuransi di luar trx dan kena lock conflict dari
-// row yg sedang di-UPDATE oleh request lain, sehingga pipe nyangkut ~10s
-// dan request 2 tidak pernah dapat error 1222.
 export const UpdateAsuransiSchema = z.object({
-  // id & status* = varchar UUID, bukan angka.
-  id: z. string().optional(),
-  uuid: z. string().optional(),
-  nama: z.string().trim().optional(),
-  keterangan: z.string().trim().optional(),
-
-  contactperson: z.string().trim().optional(),
-  alamat: z.string().trim().optional(),
-  kota: z.string().trim().optional(),
-  kodepos: z.string().trim().optional(),
-  notelp: z.string().trim().optional(),
-  email: z.string().trim().optional(),
-  npwp: z.string().trim().optional(),
+  id: z.string().optional(),
+  nama: z.string().trim().min(1, { message: 'NAMA IS REQUIRED' }),
+  keterangan: z.string().trim().min(1, { message: 'KETERANGAN IS REQUIRED' }),
+  contactperson: z
+    .string()
+    .trim()
+    .min(1, { message: 'CONTACT PERSON IS REQUIRED' }),
+  alamat: z.string().nullable().optional(),
+  kota: z.string().nullable().optional(),
+  kodepos: z.string().nullable().optional(),
+  notelp: z.string().nullable().optional(),
+  email: z.string().nullable().optional(),
+  npwp: z.string().nullable().optional(),
 
   fax: z.string().nullable().optional(),
   web: z.string().nullable().optional(),
 
-  ratemodal: z.string().optional(),
-  ratejual: z.string().optional(),
-  nominalasuransi: z.string().optional(),
-  rateopendoor: z.string().optional(),
-  adminbiaya: z.string().optional(),
-  admintagih: z.string().optional(),
-  batas1: z.string().optional(),
-  batas2: z.string().optional(),
-  batas3: z.string().optional(),
-  materai1: z.string().optional(),
-  materai2: z.string().optional(),
-  materai3: z.string().optional(),
+  ratemodal: z.string().nullable().optional(),
+  ratejual: z.string().nullable().optional(),
+  nominalasuransi: z.string().nullable().optional(),
+  rateopendoor: z.string().nullable().optional(),
+  adminbiaya: z.string().nullable().optional(),
+  admintagih: z.string().nullable().optional(),
+  batas1: z.string().nullable().optional(),
+  batas2: z.string().nullable().optional(),
+  batas3: z.string().nullable().optional(),
+  materai1: z.string().nullable().optional(),
+  materai2: z.string().nullable().optional(),
+  materai3: z.string().nullable().optional(),
 
   statusaktif: z.string().optional(),
   text: z.string().nullable().optional(),

@@ -29,16 +29,28 @@ import {
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
+import { CreateLabaRugiKalkulasiSchema } from './dto/create-laba-rugi-kalkulasi.dto';
 import {
-  CreateLabaRugiKalkulasiSchema,
   UpdateLabaRugiKalkulasiDto,
   UpdateLabaRugiKalkulasiSchema,
-} from './dto/create-laba-rugi-kalkulasi.dto';
+} from './dto/update-laba-rugi-kalkulasi.dto';
+import {
+  ReportLabaRugiKalkulasiDto,
+  ReportLabaRugiKalkulasiSchema,
+} from './dto/report-laba-rugi-kalkulasi.dto';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ExportLabaRugiKalkulasiDto,
+  ExportLabaRugiKalkulasiSchema,
+} from './dto/export-laba-rugi-kalkulasi.dto';
 
 @Controller('labarugikalkulasi')
 export class LabaRugiKalkulasiController {
   constructor(
     private readonly labaRugiKalkulasiService: LabaRugiKalkulasiService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -56,10 +68,8 @@ export class LabaRugiKalkulasiController {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
-      console.log('data di controller', data);
 
       const result = await this.labaRugiKalkulasiService.create(data, trx);
-
       await trx.commit();
       return result;
     } catch (error) {
@@ -104,14 +114,15 @@ export class LabaRugiKalkulasiController {
       search,
       filters,
       pagination,
-      isLookUp: isLookUp === 'true',
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
+      isLookUp: isLookUp === 'true',
     };
 
     const trx = await dbMssql.transaction();
     try {
       const result = await this.labaRugiKalkulasiService.findAll(params, trx);
       trx.commit();
+
       return result;
     } catch (error) {
       trx.rollback();
@@ -130,9 +141,9 @@ export class LabaRugiKalkulasiController {
   @Put(':id')
   //@LABA-RUGI-KALKULASI
   async update(
-    @Param('id') dataId: string,
+    @Param('id') id: string,
     @Body(
-      new InjectMethodPipe('update'),
+      // new InjectMethodPipe('update'),
       new ZodValidationPipe(UpdateLabaRugiKalkulasiSchema),
     )
     data: UpdateLabaRugiKalkulasiDto,
@@ -141,12 +152,7 @@ export class LabaRugiKalkulasiController {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
-
-      const result = await this.labaRugiKalkulasiService.update(
-        dataId,
-        data,
-        trx,
-      );
+      const result = await this.labaRugiKalkulasiService.update(id, data, trx);
 
       await trx.commit();
       return result;
@@ -158,11 +164,25 @@ export class LabaRugiKalkulasiController {
       );
 
       if (error instanceof HttpException) {
-        // Ensure any other errors get caught and returned
-        throw error; // If it's already a HttpException, rethrow it
+        throw error;
       }
 
-      throw new HttpException( // Generic error handling, if something unexpected happens
+      const lockTimeout =
+        error?.number === 1222 ||
+        error?.originalError?.info?.number === 1222 ||
+        /lock request time out/i.test(error?.message ?? '');
+
+      if (lockTimeout) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.CONFLICT,
+            message: 'Data sedang diproses transaksi lain, silakan coba lagi.',
+          },
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
           message: 'Failed to update laba rugi kalkulasi',
@@ -223,6 +243,88 @@ export class LabaRugiKalkulasiController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportLabaRugiKalkulasiSchema))
+    body: ReportLabaRugiKalkulasiDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const result = await this.labaRugiKalkulasiService.findAll(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            pagination: { page: 1, limit: 0 },
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+            isLookUp: false,
+          },
+          dbMssql,
+        );
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'Laporan Laba Rugi Kalkulasi',
+          usercetak: username,
+          tglcetak,
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        }));
+      },
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportLabaRugiKalkulasiSchema))
+    body: ExportLabaRugiKalkulasiDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'periode',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_laba_rugi_kalkulasi_${stamp}.xlsx`,
+      countRows: () =>
+        this.labaRugiKalkulasiService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.labaRugiKalkulasiService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.labaRugiKalkulasiService.exportSheet,
+    });
   }
 
   @Get('/export')
