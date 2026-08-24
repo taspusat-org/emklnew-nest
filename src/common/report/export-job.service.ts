@@ -693,6 +693,7 @@ export class ExportJobService {
       cell.alignment = {
         horizontal: formats[index]?.headerAlign ?? 'center',
         vertical: 'middle',
+        wrapText: true,
       };
       cell.border = {
         top: { style: 'thin' },

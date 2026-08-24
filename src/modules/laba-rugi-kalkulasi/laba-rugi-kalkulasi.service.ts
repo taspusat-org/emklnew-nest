@@ -10,15 +10,39 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Column, Workbook } from 'exceljs';
 import { LocksService } from '../locks/locks.service';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  UtilsService,
+  toNumeric,
+  calculateItemIndex,
+  getFetchedPages,
+  uuidV7,
+} from 'src/utils/utils.service';
 import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
+
+const MONEY_COLUMNS = [
+  'ratemodal',
+  'ratejual',
+  'nominalasuransi',
+  'rateopendoor',
+  'adminbiaya',
+  'admintagih',
+  'batas1',
+  'batas2',
+  'batas3',
+  'materai1',
+  'materai2',
+  'materai3',
+];
 
 @Injectable()
 export class LabaRugiKalkulasiService {
   private readonly tableName: string = 'labarugikalkulasi';
+  private readonly viewName: string = 'vlabarugikalkulasi';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -28,70 +52,179 @@ export class LabaRugiKalkulasiService {
     private readonly logTrailService: LogtrailService,
   ) {}
 
-  async create(createData: any, trx: any) {
-    try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        method,
-        id,
-        statusfinalkomisi_nama,
-        statusfinalbonus_nama,
-        ...insertData
-      } = createData;
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys: string[] = [];
 
-      insertData.updated_at = this.utilsService.getTime();
-      insertData.created_at = this.utilsService.getTime();
-      console.log('insertData', insertData);
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['periode'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
+    if (search && filters && Object.keys(filters).length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (['created_at', 'updated_at'].includes(field)) {
+            qb.orWhereRaw("to_char(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhereRaw('vlrk.??::text ilike ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          }
+        });
       });
+    }
 
-      const insertedData = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
 
-      const newItem = insertedData[0];
-      const { data, pagination } = await this.findAll(
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("to_char(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else {
+        // ✅ prefix vlrk. agar konsisten dengan alias view
+        qb.andWhereRaw('vlrk.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.uuid,
+      periode: dto.periode,
+      estkomisimarketing: toNumeric(dto.estkomisimarketing) ?? 0,
+      estkomisimarketing2: toNumeric(dto.estkomisimarketing2) ?? 0,
+      komisimarketing: toNumeric(dto.komisimarketing) ?? 0,
+      biayakantorpusat: toNumeric(dto.biayakantorpusat) ?? 0,
+      biayatour: toNumeric(dto.biayatour) ?? 0,
+      gajidireksi: toNumeric(dto.gajidireksi) ?? 0,
+      estkomisikacab: toNumeric(dto.estkomisikacab) ?? 0,
+      biayabonustriwulan: toNumeric(dto.biayabonustriwulan) ?? 0,
+      estkomisikacabcabang1: toNumeric(dto.estkomisikacabcabang1) ?? 0,
+      estkomisikacabcabang2: toNumeric(dto.estkomisikacabcabang2) ?? 0,
+
+      statusfinalkomisimarketing: dto.statusfinalkomisimarketing,
+      statusfinalbonustriwulan: dto.statusfinalbonustriwulan,
+
+      info: dto.info ? dto.info.toUpperCase() : null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on vlrk.nama
+      case 'statusbank':
+        return { col: 'statusbank_nama', dir };
+      case 'statusdefault':
+        return { col: 'statusdefault_nama', dir };
+      case 'statuslangsungcair':
+        return { col: 'statuslangsungcair_nama', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateLabaRugiKalkulasiDto: any, trx: any) {
+    try {
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateLabaRugiKalkulasiDto;
+
+      const uuid = await uuidV7(trx);
+
+      const insertData = this.buildInsertData(CreateLabaRugiKalkulasiDto, uuid);
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as vlrk`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vlrk`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vlrk`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      let dataIndex = data.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      // Optionally, you can find the page number or other info if needed
-      const pageNumber = pagination?.currentPage;
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
 
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
-      );
-
+      // 6. Side-effects
       await this.logTrailService.create(
         {
-          namatable: this.tableName,
+          namatabel: this.tableName,
           postingdari: 'ADD LABA RUGI KALKULASI',
           idtrans: newItem.id,
           nobuktitrans: newItem.id,
@@ -102,10 +235,17 @@ export class LabaRugiKalkulasiService {
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
       throw new Error(`Error creating laba rugi kalkulasi: ${error.message}`);
@@ -113,126 +253,107 @@ export class LabaRugiKalkulasiService {
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
-        .select([
-          'u.id as id',
-          'u.periode',
-          // trx.raw("FORMAT(u.periode, 'MM-yyyy') as periode"),
-          'u.estkomisimarketing',
-          'u.komisimarketing',
-          'u.biayakantorpusat',
-          'u.biayatour',
-          'u.gajidireksi',
-          'u.estkomisikacab',
-          'u.biayabonustriwulan',
-          'u.estkomisimarketing2',
-          'u.estkomisikacabcabang1',
-          'u.estkomisikacabcabang2',
-          'u.statusfinalkomisimarketing',
-          'u.statusfinalbonustriwulan',
-          'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.text as statusfinalkomisi_nama',
-          'p.memo as statusfinalkomisi_memo',
-          'q.text as statusfinalbonus_nama',
-          'q.memo as statusfinalbonus_memo',
-        ])
-        .leftJoin('parameter as p', 'u.statusfinalkomisimarketing', 'p.id')
-        .leftJoin('parameter as q', 'u.statusfinalbonustriwulan', 'q.id');
+      const sortBy = sort?.sortBy || 'periode';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
 
-      if (search) {
-        const sanitizedValue = String(search).replace(/\[/g, '[[]');
-        query.where((builder) => {
-          builder
-            // .orWhereRaw("FORMAT(u.periode, 'MM-yyyy') LIKE ?", [`%${sanitizedValue}%`])
-            .orWhere('u.periode', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.estkomisimarketing', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.komisimarketing', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.biayakantorpusat', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.biayatour', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.gajidireksi', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.estkomisikacab', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.biayabonustriwulan', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.estkomisimarketing2', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.estkomisikacabcabang1', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.estkomisikacabcabang2', 'like', `%${sanitizedValue}%`)
-            .orWhere('p.text', 'like', `%${sanitizedValue}%`)
-            .orWhere('q.text', 'like', `%${sanitizedValue}%`)
-            .orWhere('u.modifiedby', 'like', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhereRaw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-              `%${sanitizedValue}%`,
-            ]);
-        });
+      const countResult = await trx(`${this.viewName} as vlrk`)
+        .count('vlrk.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
+      // SELECT disesuaikan DENGAN SCHEMA ASURANSI yang sebenarnya
+      const query = trx(`${this.viewName} as vlrk`).select([
+        'vlrk.id',
+        'vlrk.periode',
+        'vlrk.estkomisimarketing',
+        'vlrk.estkomisimarketing2',
 
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'statusfinalkomisi_text') {
-              query.andWhere('p.id', '=', sanitizedValue);
-            } else if (key === 'statusfinalbonus_text') {
-              query.andWhere('q.id', '=', sanitizedValue);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
+        'vlrk.komisimarketing',
+        'vlrk.biayakantorpusat',
+        'vlrk.biayatour',
+        'vlrk.gajidireksi',
+        'vlrk.estkomisikacab',
+        'vlrk.biayabonustriwulan',
+
+        'vlrk.estkomisikacabcabang1',
+        'vlrk.estkomisikacabcabang2',
+
+        'vlrk.statusfinalkomisimarketing',
+        'vlrk.statusfinalkomisimarketing_text',
+        'vlrk.statusfinalkomisimarketing_memo',
+
+        'vlrk.statusfinalbonustriwulan',
+        'vlrk.statusfinalbonustriwulan_text',
+        'vlrk.statusfinalbonustriwulan_memo',
+
+        'vlrk.info',
+        'vlrk.modifiedby',
+        trx.raw(
+          "to_char(vlrk.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(vlrk.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ]);
+
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      // Sorting disesuaikan (hanya statusaktif yang butuh special handling ke .text)
+      if (sortBy === 'statusaktif') {
+        query.orderBy('vlrk.text', sortDirection); // Diperbaiki: gunakan sortDirection, bukan hardcode 'asc'
+      } else if (sortBy === 'periode') {
+        query.orderByRaw(`to_date(vlrk.periode, 'MM-YYYY') ${sortDirection}`);
+      } else {
+        query.orderBy(`vlrk.${sortBy}`, sortDirection);
       }
+
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'periode') {
-          // query.orderBy(sort.sortBy, sort.sortDirection);
-          query.orderByRaw(`RIGHT(??, 4) + LEFT(??, 2) ${sort.sortDirection}`, [
-            sort.sortBy,
-            sort.sortBy,
-          ]);
-        } else if (sort?.sortBy === 'statusfinalkomisi') {
-          const memoExpr = '(CASE WHEN p.memo IS JSON THEN p.memo::jsonb END)'; // penting: TEXT/NTEXT -> text
-          query.orderByRaw(
-            `JSON_VALUE(${memoExpr}, '$.MEMO') ${sort.sortDirection}`,
-          );
-        } else if (sort?.sortBy === 'statusfinalbonus') {
-          const memoExpr = '(CASE WHEN q.memo IS JSON THEN q.memo::jsonb END)';
-          query.orderByRaw(
-            `JSON_VALUE(${memoExpr}, '$.MEMO') ${sort.sortDirection}`,
-          );
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
+      // console.log(query.toQuery());
+      // Debug query dan nilainya sebelum dieksekusi:
+      // console.log('Query:', query.toSQL().sql);
+      // console.log('Bindings (Values):', query.toSQL().bindings);
 
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
       const data = await query;
-      console.log('data', data);
-      const responseType = Number(total) > 500 ? 'json' : 'local';
-
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
       return {
         data: data,
         type: responseType,
@@ -250,107 +371,115 @@ export class LabaRugiKalkulasiService {
     }
   }
 
-  async update(dataId: string, data: any, trx: any) {
+  async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName)
-        .where('id', dataId)
-        .first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        throw new HttpException(
-          {
-            statusCode: HttpStatus.BAD_REQUEST,
-            message: 'Data Not Found!',
-          },
-          HttpStatus.BAD_REQUEST,
-        );
+      if (!existedData) {
+        throw new Error('Laba Rugi Kalkulasi not found');
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statusfinalkomisi_nama,
-        statusfinalbonus_nama,
-        id,
-        method,
-        ...updateData
-      } = data;
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
 
-      Object.keys(updateData).forEach((key) => {
-        if (typeof updateData[key] === 'string') {
-          updateData[key] = updateData[key].toUpperCase();
-        }
-      });
-      console.log('updateData', updateData);
-
-      const hasChanges = this.utilsService.hasChanges(updateData, existingData);
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
-        updateData.updated_at = this.utilsService.getTime();
-        await trx(this.tableName).where('id', dataId).update(updateData);
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const { data: filteredData, pagination } = await this.findAll(
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+      const existingData = await trx(`${this.viewName} as vlrk`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      let posisi: number;
+      let totalItems: number;
+
+      const totalRecords = await trx(`${this.viewName} as vlrk`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vlrk`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      let dataIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(dataId),
-      );
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-
-      const itemsPerPage = limit || 30;
-      const pageNumber = Math.floor(dataIndex / itemsPerPage) + 1;
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT LABA RUGI KALKULASI',
-          idtrans: dataId,
-          nobuktitrans: dataId,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
       return {
-        newItems: {
-          dataId,
-          ...data,
-        },
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      if (error instanceof HttpException) {
-        throw error; // If it's already a HttpException, rethrow it
-      }
-
-      console.error('Error updating laba rugi kalkulasi:', error);
-      throw new Error('Failed to update laba rugi kalkulasi');
+      console.error('Error updating Laba Rugi Kalkulasi:', error);
+      throw new Error('Failed to update Laba Rugi Kalkulasi');
     }
   }
 
@@ -413,6 +542,127 @@ export class LabaRugiKalkulasiService {
     }
   }
 
+  private readonly EXPORT_COLUMNS = [
+    'vlrk.periode',
+    'vlrk.estkomisimarketing',
+    'vlrk.estkomisimarketing2',
+
+    'vlrk.komisimarketing',
+    'vlrk.biayakantorpusat',
+    'vlrk.biayatour',
+    'vlrk.gajidireksi',
+    'vlrk.estkomisikacab',
+    'vlrk.biayabonustriwulan',
+
+    'vlrk.estkomisikacabcabang1',
+    'vlrk.estkomisikacabcabang2',
+
+    'vlrk.statusfinalkomisimarketing_text',
+    'vlrk.statusfinalbonustriwulan_text',
+  ];
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as vlrk`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('vlrk.text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('vlrk.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('vlrk.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('vlrk.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`vlrk.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as vlrk`)
+      .count('vlrk.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN LABA RUGI KALKULASI',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'PERIODE',
+      'EST KOMISI MARKETING',
+      'EST KOMISI MARKETING 2',
+      'KOMISI MARKETING',
+      'BIAYA KANTOR PUSAT',
+      'BIAYA TOUR',
+      'GAJI DIREKSI',
+      'EST KOMISI KACAB',
+      'BIAYA BONUS TRI WULAN',
+      'EST KOMISI KACAB CABANG 1',
+      'EST KOMISI KACAB CABANG 2',
+      'STATUS FINAL KOMISI MARKETING',
+      'STATUS FINAL BONUS TRI WULAN',
+    ],
+    columnWidths: [5, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20],
+    columnFormats: [
+      null, // NO. — default sudah rata kanan
+      null, // PERIODE
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // ESTIMASI KOMISI MARKETING 1
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // ESTIMASI KOMISI MARKETING 1
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // KOMISI MARKETING 1
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // BIAYA KANTOR PUSAT
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // BIAYA TOUR
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // GAJI DIREKSI
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // ESTIMASI KOMISI KACAB
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // BIAYA TRIWULAN MARKETING
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // ESTIMASI KOMISI KACAB CABANG 1
+      { wrapText: true, numFmt: EXCEL_FORMAT.RUPIAH }, // ESTIMASI KOMISI KACAB CABANG 2
+      { wrapText: true, align: 'center' as const }, // STATUS FINAL KOMISI
+      { wrapText: true, align: 'center' as const }, // STATUS FINAL BONUS
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.periode,
+      row.estkomisimarketing,
+      row.estkomisimarketing2,
+      row.komisimarketing,
+      row.biayakantorpusat,
+      row.biayatour,
+      row.gajidireksi,
+      row.estkomisikacab,
+      row.biayabonustriwulan,
+      row.estkomisikacabcabang1,
+      row.estkomisikacabcabang2,
+      row.statusfinalkomisimarketing_text,
+      row.statusfinalbonustriwulan_text,
+    ],
+  };
+
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
@@ -439,13 +689,13 @@ export class LabaRugiKalkulasiService {
       'NO.',
       'PERIODE',
       'EST KOMISI MARKETING',
+      'EST KOMISI MARKETING 2',
       'KOMISI MARKETING',
       'BIAYA KANTOR PUSAT',
       'BIAYA TOUR',
       'GAJI DIREKSI',
       'EST KOMISI KACAB',
       'BIAYA BONUS TRI WULAN',
-      'EST KOMISI MARKETING 2',
       'EST KOMISI KACAB CABANG 1',
       'EST KOMISI KACAB CABANG 2',
       'STATUS FINAL KOMISI MARKETING',
