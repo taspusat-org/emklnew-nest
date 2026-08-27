@@ -18,21 +18,19 @@ const baseFields = {
   estkomisikacabcabang1: z.string().nullable().optional(),
   estkomisikacabcabang2: z.string().nullable().optional(),
 
-  statusfinalkomisimarketing: z.string()
+  statusfinalkomisimarketing: z
+    .string()
     .min(1, { message: 'STATUS FINAL KOMISI MARKETING WAJIB DIISI' }),
-  statusfinalkomisi_nama: z.string().nullable().optional(),
+  statusfinalkomisimarketing_text: z.string().nullable().optional(),
 
-  statusfinalbonustriwulan: z.string()
-    .min(1, { message: 'STATUS FINAL KOMISI MARKETING WAJIB DIISI' }),
-  statusfinalbonus_nama: z.string().nullable().optional(),
+  statusfinalbonustriwulan: z
+    .string()
+    .min(1, { message: 'STATUS FINAL BONUS TRIWULAN WAJIB DIISI' }),
+  statusfinalbonustriwulan_text: z.string().nullable().optional(),
 
-  // modifiedby diisi di backend, optional di request body
   modifiedby: z.string().max(200).optional(),
 };
 
-// ------------------------
-// 2. KHUSUS CREATE
-// ------------------------
 export const CreateLabaRugiKalkulasiSchema = z
   .object({
     ...baseFields,
@@ -57,34 +55,4 @@ export const CreateLabaRugiKalkulasiSchema = z
   });
 export type CreateLabaRugiKalkulasiDto = z.infer<
   typeof CreateLabaRugiKalkulasiSchema
->;
-
-// ------------------------
-// 3. KHUSUS UPDATE
-// ------------------------
-export const UpdateLabaRugiKalkulasiSchema = z
-  .object({
-    ...baseFields,
-    id: z.string().optional(),
-    // Field atau aturan khusus update bisa ditambah di sini
-  })
-  .superRefine(async (data, ctx) => {
-    // Exclude diri sendiri dari pengecekan unik
-    const existsPeriode = await isRecordExist(
-      'periode',
-      data.periode,
-      'labarugikalkulasi',
-      data.id,
-    );
-    if (existsPeriode) {
-      ctx.addIssue({
-        path: ['periode'],
-        code: 'custom',
-        message: `Laba Rugi Kalkulasi dengan periode ${data.periode} sudah ada`,
-      });
-    }
-    // Validasi khusus update bisa diletakkan di sini
-  });
-export type UpdateLabaRugiKalkulasiDto = z.infer<
-  typeof UpdateLabaRugiKalkulasiSchema
 >;
