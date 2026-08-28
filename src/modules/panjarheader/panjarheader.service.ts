@@ -12,7 +12,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { PanjarmuatandetailService } from 'src/modules/panjarmuatandetail/panjarmuatandetail.service';
 
@@ -159,7 +159,7 @@ export class PanjarheaderService {
         'Error process approval creating panjar header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -490,7 +490,7 @@ export class PanjarheaderService {
         'Error process update panjar header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -558,7 +558,7 @@ export class PanjarheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

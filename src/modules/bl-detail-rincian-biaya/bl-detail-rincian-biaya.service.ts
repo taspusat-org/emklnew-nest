@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateBlDetailRincianBiayaDto } from './dto/create-bl-detail-rincian-biaya.dto';
 import { UpdateBlDetailRincianBiayaDto } from './dto/update-bl-detail-rincian-biaya.dto';
@@ -225,7 +225,7 @@ export class BlDetailRincianBiayaService {
         'Error process creating bl detail rincian biaya in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -340,7 +340,7 @@ export class BlDetailRincianBiayaService {
         'Error deleting data bl detail rincian biaya in service:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

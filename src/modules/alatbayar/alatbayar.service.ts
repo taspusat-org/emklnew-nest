@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateAlatbayarDto } from './dto/create-alatbayar.dto';
 import { UpdateAlatbayarDto } from './dto/update-alatbayar.dto';
@@ -51,13 +51,15 @@ export class AlatbayarService {
       const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(ab.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+          if (dateFields.includes(field)) {
+            // pakai query, bukan qb — statement yang ditambahkan ke qb saat
+            // callback grup dievaluasi tidak ikut ter-compile (hilang diam-diam)
+            query.orWhereRaw(
+              "to_char(ab.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhere(field, 'ilike', `%${sanitizedValue}%`);
+            query.orWhere(`ab.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
         });
       });
@@ -482,7 +484,7 @@ export class AlatbayarService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

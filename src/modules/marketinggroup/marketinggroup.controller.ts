@@ -174,7 +174,7 @@ export class MarketinggroupController {
       await trx.rollback();
       console.error('Error deleting marketing group in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

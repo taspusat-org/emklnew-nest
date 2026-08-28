@@ -162,7 +162,7 @@ export class JabatanController {
       await trx.rollback();
       console.error('Error deleting jabatan in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

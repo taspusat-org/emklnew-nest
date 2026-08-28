@@ -12,7 +12,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { EstimasiBiayaDetailBiayaService } from '../estimasi-biaya-detail-biaya/estimasi-biaya-detail-biaya.service';
 import { EstimasiBiayaDetailInvoiceService } from '../estimasi-biaya-detail-invoice/estimasi-biaya-detail-invoice.service';
@@ -174,7 +174,7 @@ export class EstimasiBiayaHeaderService {
         'Error process approval creating estimasi biaya header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -569,7 +569,7 @@ export class EstimasiBiayaHeaderService {
         'Error process update estimasi biaya header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -621,7 +621,7 @@ export class EstimasiBiayaHeaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

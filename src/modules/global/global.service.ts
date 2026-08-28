@@ -2,7 +2,7 @@ import {
   HttpStatus,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { CreateGlobalDto } from './dto/create-global.dto';
@@ -238,7 +238,7 @@ export class GlobalService {
       };
     } catch (error) {
       console.error('Error processing approval:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to process approval');
@@ -354,7 +354,7 @@ export class GlobalService {
       };
     } catch (error) {
       console.error('Error processing non approval:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to process non approval');

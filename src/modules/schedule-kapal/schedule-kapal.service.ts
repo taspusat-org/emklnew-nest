@@ -2,7 +2,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateScheduleKapalDto } from './dto/create-schedule-kapal.dto';
 // import { UpdateScheduleKapalDto } from './dto/update-schedule-kapal.dto';
@@ -69,7 +69,7 @@ export class ScheduleKapalService {
         'Error process approval creating schedule kapal in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

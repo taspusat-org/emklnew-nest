@@ -4,7 +4,6 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
 } from '@nestjs/common';
 import { CreateOrderanHeaderDto } from './dto/create-orderan-header.dto';
 import { UpdateOrderanHeaderDto } from './dto/update-orderan-header.dto';
@@ -373,7 +372,7 @@ export class OrderanHeaderService {
       };
     } catch (error) {
       console.error('Error deleting data: ', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -555,7 +554,7 @@ export class OrderanHeaderService {
         'Error processing approval in orderan header controller:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -672,7 +671,7 @@ export class OrderanHeaderService {
         'Error processing non approval in orderan header controller:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

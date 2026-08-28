@@ -2,7 +2,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateMasterBiayaDto } from './dto/create-masterbiaya.dto';
 import { UpdateMasterBiayaDto } from './dto/update-masterbiaya.dto';
@@ -495,7 +495,7 @@ export class MasterbiayaService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

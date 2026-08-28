@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
@@ -80,6 +80,11 @@ export class HutangheaderService {
     return data;
   }
 
+  /**
+   * Hanya periode yang diturunkan ke vhutangheader lewat GUC. relasi_id TIDAK:
+   * ia dipasang sebagai predikat biasa di applyFilters supaya berlaku sama di
+   * semua jalur, termasuk export yang berjalan tanpa transaksi.
+   */
   private async setDateRangeSessionContext(
     trx: any,
     filters: Record<string, any>,
@@ -97,10 +102,6 @@ export class HutangheaderService {
         ]);
       }
     }
-
-    await trx.raw(`SELECT set_config('tas.hutang_relasi_id', ?, true)`, [
-      filters?.relasi_id ? String(filters.relasi_id) : '',
-    ]);
   }
 
   private applyFilters(
@@ -126,6 +127,14 @@ export class HutangheaderService {
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
     );
+
+    // relasi_id tidak lagi dipangkas view lewat current_setting, jadi filternya
+    // dipasang di sini — sekali untuk semua jalur (grid, posisi pasca-simpan,
+    // export). Cocok PERSIS, bukan LIKE: relasi_id itu identifier, dan ia tetap
+    // di luar searchFields supaya tidak ikut tersapu kotak search.
+    if (filters?.relasi_id) {
+      qb.andWhere(`${prefix}relasi_id`, String(filters.relasi_id));
+    }
 
     // Search: OR across all searchable fields
     if (search && searchFields.length > 0) {
@@ -921,7 +930,7 @@ export class HutangheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -929,17 +938,17 @@ export class HutangheaderService {
   }
 
   /**
-   * tglDari/tglSampai/relasi_id di findAll tidak jadi predikat SQL: ketiganya
-   * diturunkan ke vhutangheader lewat GUC per-transaksi (set_config dengan
-   * is_local=true, lihat setDateRangeSessionContext) dan karena itu sengaja
-   * dikecualikan dari applyFilters.
+   * tglDari/tglSampai di findAll tidak jadi predikat SQL: keduanya diturunkan
+   * ke vhutangheader lewat GUC per-transaksi (set_config dengan is_local=true,
+   * lihat setDateRangeSessionContext) dan karena itu sengaja dikecualikan dari
+   * applyFilters.
    *
    * Export TIDAK bisa memakai jalur itu. Job-nya berumur panjang dan barisnya
    * ditarik lewat cursor tanpa transaksi, sehingga set_config(..., true) hilang
    * begitu statement-nya selesai — view lalu memulangkan SELURUH periode dan
    * file Excel-nya berisi data di luar filter yang dipilih user. Jadi di sini
-   * ketiganya dipasang sebagai predikat biasa; klausanya sama persis dengan
-   * yang ada di dalam view.
+   * periode dipasang sebagai predikat biasa; klausanya sama persis dengan yang
+   * ada di dalam view. relasi_id tidak ikut: ia sudah ditangani applyFilters.
    */
   private applyPeriodFilters(
     qb: any,
@@ -955,12 +964,6 @@ export class HutangheaderService {
 
     if (tglDari && tglSampai) {
       qb.whereBetween(`${alias}.tglbukti`, [tglDari, tglSampai]);
-    }
-
-    // Cocok PERSIS (bukan LIKE): relasi_id adalah identifier, dan di view pun
-    // perbandingannya `=`.
-    if (filters?.relasi_id) {
-      qb.andWhere(`${alias}.relasi_id`, String(filters.relasi_id));
     }
   }
 

@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateAsuransiDto } from './dto/create-asuransi.dto';
 import { UpdateAsuransiDto } from './dto/update-asuransi.dto';
@@ -522,7 +522,7 @@ export class AsuransiService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

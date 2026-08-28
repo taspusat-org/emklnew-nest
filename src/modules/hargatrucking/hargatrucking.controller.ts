@@ -12,7 +12,6 @@ import {
   HttpStatus,
   UsePipes,
   Query,
-  NotFoundException,
   InternalServerErrorException,
   Res,
   BadRequestException,
@@ -211,7 +210,7 @@ export class HargatruckingController {
       await trx.rollback();
       console.error('Error deleting harga trucking in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

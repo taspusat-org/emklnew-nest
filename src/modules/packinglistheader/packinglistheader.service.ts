@@ -2,7 +2,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreatePackinglistheaderDto } from './dto/create-packinglistheader.dto';
 import { UpdatePackinglistheaderDto } from './dto/update-packinglistheader.dto';
@@ -15,7 +15,7 @@ import { StatuspendukungService } from '../statuspendukung/statuspendukung.servi
 import { LocksService } from '../locks/locks.service';
 import { GlobalService } from '../global/global.service';
 import { formatDateToSQL } from 'src/utils/utils.service';
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { HttpStatus } from '@nestjs/common';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { Column, Workbook } from 'exceljs';
 import * as fs from 'fs';
@@ -663,7 +663,7 @@ export class PackinglistheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

@@ -590,7 +590,7 @@ export class ParameterService {
         ),
         dbMssql.raw(`JSON_VALUE(${memoExpr}, '$."ICON"') AS icon`),
         'type',
-        dbMssql.raw('[default] AS [default]'),
+        'default',
         'modifiedby',
         'info',
         dbMssql.raw(

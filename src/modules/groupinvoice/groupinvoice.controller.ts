@@ -189,7 +189,7 @@ export class GroupInvoiceController {
         error,
       );
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

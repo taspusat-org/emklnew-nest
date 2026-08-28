@@ -153,7 +153,7 @@ export class DivisiController {
       await trx.rollback();
       console.error('Error deleting divisi in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateAlatbayarDto } from './dto/create-alatbayar.dto';
 import { UpdateAlatbayarDto } from './dto/update-alatbayar.dto';
@@ -50,8 +50,10 @@ export class AlatbayarService {
       const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("TO_CHAR(ab.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
+          if (dateFields.includes(field)) {
+            // pakai query, bukan qb — statement yang ditambahkan ke qb saat
+            // callback grup dievaluasi tidak ikut ter-compile (hilang diam-diam)
+            query.orWhereRaw("TO_CHAR(ab.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
               field,
               `%${sanitizedValue}%`,
             ]);
@@ -256,8 +258,12 @@ export class AlatbayarService {
         'ab.memo',
         'ab.info',
         'ab.modifiedby',
-        trx.raw("TO_CHAR(ab.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-        trx.raw("TO_CHAR(ab.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+        trx.raw(
+          "TO_CHAR(ab.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "TO_CHAR(ab.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
       ]);
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
@@ -522,7 +528,7 @@ export class AlatbayarService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

@@ -197,6 +197,37 @@ export class JurnalumumheaderService {
 
     return processedDetails;
   }
+  /**
+   * Rentang tanggal disaring DI DALAM vjurnalumumheader lewat
+   * `tas.tgldari`/`tas.tglsampai`, bukan whereBetween di query luar: view
+   * memangkas jurnalumumheader sebelum LEFT JOIN status_pivot.
+   *
+   * Nilai kosong dikirim EKSPLISIT (bukan sekadar dilewati) karena GUC-nya
+   * memakai nama global: pengeluaran/penerimaan/kas gantung sudah men-set
+   * tas.tgldari di transaksi yang sama sebelum memanggil service ini, dan
+   * sisanya akan ikut memangkas jurnal kalau tidak ditimpa.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi; jalur tanpa trx
+   * (report/export) menyaring per id/nobukti sendiri, jadi tidak terpengaruh.
+   */
+  private async setPeriodSessionContext(
+    trx: any,
+    filters?: Record<string, any>,
+  ): Promise<void> {
+    const tglDari = filters?.tglDari
+      ? formatDateToSQL(String(filters.tglDari))
+      : null;
+    const tglSampai = filters?.tglSampai
+      ? formatDateToSQL(String(filters.tglSampai))
+      : null;
+
+    await trx.raw(
+      `SELECT set_config('tas.tgldari', ?, true),
+              set_config('tas.tglsampai', ?, true)`,
+      [tglDari ?? '', tglSampai ?? ''],
+    );
+  }
+
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
@@ -208,13 +239,6 @@ export class JurnalumumheaderService {
       'statusapproval',
       'statuscetak',
     ];
-
-    if (filters?.tglDari && filters?.tglSampai) {
-      qb.whereBetween('u.tglbukti', [
-        formatDateToSQL(String(filters.tglDari)),
-        formatDateToSQL(String(filters.tglSampai)),
-      ]);
-    }
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -438,6 +462,8 @@ export class JurnalumumheaderService {
       };
       if (withGridPosition) {
         try {
+          await this.setPeriodSessionContext(trx, filters);
+
           const totalRecords = await trx(`${this.viewName} as u`)
             .count('u.id as total')
             .modify((qb) => this.applyFilters(qb, filters, search))
@@ -516,6 +542,8 @@ export class JurnalumumheaderService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
       const safeFilters = filters || {};
+
+      await this.setPeriodSessionContext(trx, safeFilters);
 
       const countResult = await trx(`${this.viewName} as u`)
         .count('u.id as total')
@@ -735,7 +763,11 @@ export class JurnalumumheaderService {
       await this.jurnalumumdetailService.create(detailsWithNobukti, id, trx);
 
       // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
-      // walau hasil edit tak lagi cocok dengan filter aktif.
+      // walau hasil edit tak lagi cocok dengan filter aktif. Periode view belum
+      // di-set di titik ini (setPeriodSessionContext baru dipanggil di blok
+      // posisi grid di bawah), jadi baris tetap ketemu walau tglbukti hasil edit
+      // keluar dari rentang aktif — jangan mengosongkan GUC di sini, modul
+      // pemanggil memakai nama GUC yang sama untuk gridnya sendiri.
       const updatedItem = await trx(`${this.viewName} as u`)
         .select(this.viewColumns(trx))
         .where('u.id', id)
@@ -760,6 +792,8 @@ export class JurnalumumheaderService {
 
       if (withGridPosition) {
         try {
+          await this.setPeriodSessionContext(trx, filters);
+
           const totalRecords = await trx(`${this.viewName} as u`)
             .count('u.id as total')
             .modify((qb) => this.applyFilters(qb, filters, search))
@@ -845,7 +879,7 @@ export class JurnalumumheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

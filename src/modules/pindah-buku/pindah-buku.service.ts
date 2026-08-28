@@ -874,7 +874,7 @@ export class PindahBukuService {
       };
     } catch (error) {
       console.error('Error deleting data: ', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
