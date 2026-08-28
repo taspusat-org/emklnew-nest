@@ -1,7 +1,7 @@
 import {
   Inject,
   Injectable,
-  NotFoundException,
+  HttpException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import * as fs from 'fs';
@@ -190,7 +190,7 @@ export class ShippingInstructionService {
         'Error process approval creating shipping instruction in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -574,7 +574,7 @@ export class ShippingInstructionService {
         'Error process approval update shipping instruction in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -634,7 +634,7 @@ export class ShippingInstructionService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

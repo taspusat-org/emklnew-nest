@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { dbMssql } from 'src/common/utils/db';
 import { RedisService } from 'src/common/redis/redis.service';
@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as bcrypt from 'bcrypt';
 import { Workbook, Column } from 'exceljs';
+import { labDelay } from 'src/common/utils/timeout-lab';
 
 @Injectable()
 export class UserService {
@@ -379,6 +380,9 @@ export class UserService {
 
       await trx(this.tableName).insert(insertData);
 
+      // Titik uji timeout: tahan proses setelah INSERT (TIMEOUT_TEST_PLAN.md).
+      await labDelay('slow', CreateUserDto.name);
+
       // Hak akses disalin SETELAH baris user ada (useracl/userrole punya FK ke
       // users.id), lalu menu-nya ditulis balik ke baris yang sama.
       if (userId) {
@@ -428,6 +432,9 @@ export class UserService {
         search,
       );
 
+      // Titik uji timeout: tahan setelah cache redis ditulis, sebelum commit.
+      await labDelay('cache', CreateUserDto.name);
+
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -475,6 +482,9 @@ export class UserService {
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
+
+      // Titik uji timeout: tahan proses sebelum query data (token di search).
+      await labDelay('slow', search);
 
       if (isLookUp) {
         // Hasil lookup > 500 baris: jangan tarik semuanya, biarkan komponen
@@ -609,6 +619,9 @@ export class UserService {
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
+      // Titik uji timeout: tahan proses setelah UPDATE (TIMEOUT_TEST_PLAN.md).
+      await labDelay('slow', data.name);
+
       // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
       // walau hasil edit tak lagi cocok dengan filter aktif.
       const updatedItem = await this.baseQuery(trx)
@@ -642,6 +655,9 @@ export class UserService {
         search,
       );
 
+      // Titik uji timeout: tahan setelah cache redis ditulis, sebelum commit.
+      await labDelay('cache', data.name);
+
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -671,6 +687,9 @@ export class UserService {
         trx,
       );
 
+      // Titik uji timeout: tahan setelah baris dihapus di dalam transaksi.
+      await labDelay('slow', deletedData?.username);
+
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -687,7 +706,7 @@ export class UserService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

@@ -46,7 +46,7 @@ async function bootstrap() {
         'http://100.91.135.37:3000',
       ], // List of allowed origins
       methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allowed methods
-      allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
+      allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
       // Tanpa ini browser menyembunyikan Content-Disposition dari response
       // lintas origin, sehingga frontend tidak bisa membaca nama file hasil
       // download (mis. export Excel di /report/download/:jobId).

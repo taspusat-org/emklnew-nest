@@ -3,7 +3,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreatePelayaranDto } from './dto/create-pelayaran.dto';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -440,7 +440,7 @@ export class PelayaranService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -557,7 +557,7 @@ export class PelayaranService {
       };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -592,7 +592,7 @@ export class PelayaranService {
       };
     } catch (error) {
       console.error('Error in nonApproval:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to process non approval');

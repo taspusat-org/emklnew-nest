@@ -11,6 +11,7 @@ import {
   HttpException,
   HttpStatus,
   UsePipes,
+  UseInterceptors,
   Query,
   NotFoundException,
   InternalServerErrorException,
@@ -31,13 +32,18 @@ import { AuthGuard } from '../auth/auth.guard';
 import { dbMssql } from 'src/common/utils/db';
 import { ReportJobService } from 'src/common/report/report-job.service';
 import { ExportJobService } from 'src/common/report/export-job.service';
+import { IdempotencyService } from 'src/common/idempotency/idempotency.service';
+import { IdempotencyInterceptor } from 'src/common/idempotency/idempotency.interceptor';
+import { labDelay } from 'src/common/utils/timeout-lab';
 
+@UseInterceptors(IdempotencyInterceptor)
 @Controller('user')
 export class UserController {
   constructor(
     private readonly userService: UserService,
     private readonly reportJobService: ReportJobService,
     private readonly exportJobService: ExportJobService,
+    private readonly idempotencyService: IdempotencyService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -54,10 +60,25 @@ export class UserController {
 
       const result = await this.userService.create(data, trx);
 
+      // Satu transaksi dengan datanya: kalau ini di-rollback, kuncinya ikut
+      // hilang sehingga request memang boleh dikirim ulang.
+      await this.idempotencyService.save(req, result, trx);
+
       await trx.commit();
+
+      // Titik uji timeout: tahan respons setelah COMMIT (TIMEOUT_TEST_PLAN.md).
+      await labDelay('after', data.name);
+
       return result;
     } catch (error) {
       await trx.rollback();
+
+      const concurrent = await this.idempotencyService.replayAfterConflict(
+        req,
+        error,
+      );
+      if (concurrent) return concurrent;
+
       console.error('Error while creating User in controller', error);
 
       if (error instanceof HttpException) {
@@ -131,10 +152,23 @@ export class UserController {
 
       const result = await this.userService.update(id, data, trx);
 
+      await this.idempotencyService.save(req, result, trx);
+
       await trx.commit();
+
+      // Titik uji timeout: tahan respons setelah COMMIT (TIMEOUT_TEST_PLAN.md).
+      await labDelay('after', data.name);
+
       return result;
     } catch (error) {
       await trx.rollback();
+
+      const concurrent = await this.idempotencyService.replayAfterConflict(
+        req,
+        error,
+      );
+      if (concurrent) return concurrent;
+
       console.error('Error updating User in controller:', error);
       if (error instanceof HttpException) {
         throw error; // If it's already a HttpException, rethrow it
@@ -167,13 +201,26 @@ export class UserController {
         throw new NotFoundException(result.message);
       }
 
+      // Tanpa kunci ini, hapus yang diulang setelah timeout menjawab 404 — user
+      // mengira datanya gagal dihapus padahal sudah hilang.
+      await this.idempotencyService.save(req, result, trx);
+
       await trx.commit();
       return result;
     } catch (error) {
       await trx.rollback();
+
+      const concurrent = await this.idempotencyService.replayAfterConflict(
+        req,
+        error,
+      );
+      if (concurrent) return concurrent;
+
       console.error('Error deleting User in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      // NotFoundException & ConflictException (idempotency) sama-sama
+      // HttpException — jangan diturunkan jadi 500.
+      if (error instanceof HttpException) {
         throw error;
       }
 

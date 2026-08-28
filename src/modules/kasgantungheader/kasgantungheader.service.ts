@@ -392,6 +392,7 @@ export class KasgantungheaderService {
         isreload,
         ...dto
       } = data;
+      await this.setDateRangeSessionContext(trx, filters || {});
       const uuid = await uuidV7(trx);
 
       // 2. Validasi dan bangun data untuk Details
@@ -731,6 +732,7 @@ export class KasgantungheaderService {
         isreload,
         ...dto
       } = data;
+      await this.setDateRangeSessionContext(trx, filters || {});
 
       const existingData = await trx(this.tableName).where('id', id).first();
       if (!existingData) {
@@ -953,7 +955,7 @@ export class KasgantungheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -1203,7 +1205,9 @@ export class KasgantungheaderService {
       .first();
 
     if (!header) {
-      throw new NotFoundException(`Kas gantung dengan id ${id} tidak ditemukan`);
+      throw new NotFoundException(
+        `Kas gantung dengan id ${id} tidak ditemukan`,
+      );
     }
 
     return header;

@@ -359,7 +359,7 @@ export class MenuController {
       await trx.rollback();
       console.error('Error deleting menu in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

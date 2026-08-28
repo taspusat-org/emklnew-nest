@@ -241,7 +241,7 @@ export class BookingOrderanHeaderController {
       await trx.rollback();
       console.error('Error deleting data in controller: ', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 
@@ -272,7 +272,7 @@ export class BookingOrderanHeaderController {
         'Error processing approval in booking orderan header controller:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

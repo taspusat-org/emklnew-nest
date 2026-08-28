@@ -157,7 +157,7 @@ export class BankController {
       await trx.rollback();
       console.error('Error deleting bank in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

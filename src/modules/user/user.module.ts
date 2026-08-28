@@ -8,6 +8,7 @@ import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { LocksModule } from '../locks/locks.module';
 import { GlobalModule } from '../global/global.module';
 import { ReportModule } from 'src/common/report/report.module';
+import { IdempotencyModule } from 'src/common/idempotency/idempotency.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { ReportModule } from 'src/common/report/report.module';
     GlobalModule,
     LocksModule,
     ReportModule,
+    IdempotencyModule,
   ],
   controllers: [UserController],
   exports: [UserService],

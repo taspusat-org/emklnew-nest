@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreatePanjarmuatandetailDto } from './dto/create-panjarmuatandetail.dto';
 import { UpdatePanjarmuatandetailDto } from './dto/update-panjarmuatandetail.dto';
@@ -223,7 +223,7 @@ export class PanjarmuatandetailService {
         'Error process creating panjar muatan detail in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -324,7 +324,7 @@ export class PanjarmuatandetailService {
         'Error deleting panjar muatan detail rincian biaya in service:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

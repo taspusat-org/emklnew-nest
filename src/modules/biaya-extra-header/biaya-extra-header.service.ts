@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { LocksService } from '../locks/locks.service';
 import { GlobalService } from '../global/global.service';
@@ -474,7 +475,7 @@ export class BiayaExtraHeaderService {
       return { newItem, ...paged };
     } catch (error) {
       console.error('Error creating biaya extra header:', error.message);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -777,7 +778,7 @@ export class BiayaExtraHeaderService {
       return { updatedData, ...paged };
     } catch (error) {
       console.error('Error update biaya extra header:', error.message);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -825,7 +826,7 @@ export class BiayaExtraHeaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
