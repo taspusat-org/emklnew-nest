@@ -56,24 +56,24 @@ export class LabaRugiKalkulasiService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys: string[] = [];
+    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
     );
     const dateFields = ['created_at', 'updated_at'];
 
-    if (search && filters && Object.keys(filters).length > 0) {
+    if (search && searchFields.length > 0) {
       const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "TO_CHAR(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhereRaw('vlrk.??::text ilike ?', [
+            query.orWhereRaw(`CAST(vlrk.?? AS TEXT) ILIKE ?`, [
               field,
               `%${sanitizedValue}%`,
             ]);
@@ -83,19 +83,23 @@ export class LabaRugiKalkulasiService {
     }
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
-      if (excludeSearchKeys.includes(key)) return;
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("to_char(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+        qb.andWhereRaw("TO_CHAR(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
           key,
           `%${sanitizedValue}%`,
         ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`vlrk.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        // ✅ prefix vlrk. agar konsisten dengan alias view
-        qb.andWhereRaw('vlrk.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+        qb.andWhere(
+          `CAST(vlrk.${key} AS TEXT)`,
+          'ilike',
+          `%${sanitizedValue}%`,
+        );
       }
     });
   }
