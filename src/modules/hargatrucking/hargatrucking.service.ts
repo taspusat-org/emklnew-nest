@@ -37,24 +37,24 @@ export class HargatruckingService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys: string[] = [];
+    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
     );
     const dateFields = ['created_at', 'updated_at'];
 
-    if (search && filters && Object.keys(filters).length > 0) {
+    if (search && searchFields.length > 0) {
       const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(vht.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "TO_CHAR(vht.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhereRaw('vht.??::text ilike ?', [
+            query.orWhereRaw(`CAST(vht.?? AS TEXT) ILIKE ?`, [
               field,
               `%${sanitizedValue}%`,
             ]);
@@ -64,18 +64,19 @@ export class HargatruckingService {
     }
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
-      if (excludeSearchKeys.includes(key)) return;
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("to_char(vht.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+        qb.andWhereRaw("TO_CHAR(vht.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
           key,
           `%${sanitizedValue}%`,
         ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`vht.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhereRaw('vht.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+        qb.andWhere(`vht.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
@@ -282,10 +283,10 @@ export class HargatruckingService {
         'vht.info',
         'vht.modifiedby',
         trx.raw(
-          "to_char(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          "TO_CHAR(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
         ),
         trx.raw(
-          "to_char(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          "TO_CHAR(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
         ),
       ]);
 
@@ -306,11 +307,6 @@ export class HargatruckingService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
-
-      // console.log(query.toQuery());
-      // Debug query dan nilainya sebelum dieksekusi:
-      console.log('Query:', query.toSQL().sql);
-      console.log('Bindings (Values):', query.toSQL().bindings);
 
       const data = await query;
       const totalPages = Math.ceil(total / limit);
@@ -354,10 +350,10 @@ export class HargatruckingService {
         'vht.info',
         'vht.modifiedby',
         trx.raw(
-          "to_char(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          "TO_CHAR(vht.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
         ),
         trx.raw(
-          "to_char(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          "TO_CHAR(vht.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
         ),
       ]);
 
