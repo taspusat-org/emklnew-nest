@@ -2,19 +2,31 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  HttpException,
+  Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { CreateScheduleKapalDto } from './dto/create-schedule-kapal.dto';
 // import { UpdateScheduleKapalDto } from './dto/update-schedule-kapal.dto';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+  uuidV7,
+  toNumeric,
+  calculateItemIndex,
+  getFetchedPages,
+} from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { GlobalService } from '../global/global.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
+import { Knex } from 'knex';
 
 @Injectable()
 export class ScheduleKapalService {
   private readonly tableName: string = 'schedulekapal';
+  private readonly viewName = 'vschedulekapal';
+  private readonly logger = new Logger(ScheduleKapalService.name);
 
   constructor(
     @Inject('REDIS_CLIENT')
@@ -25,257 +37,332 @@ export class ScheduleKapalService {
     private readonly logTrailService: LogtrailService,
   ) {}
 
-  async create(createData: any, trx: any) {
-    try {
-      Object.keys(createData).forEach((key) => {
-        if (typeof createData[key] === 'string') {
-          // createData[key] = createData[key].toUpperCase();
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys = [
+      'statusaktif',
+      'text',
+      'memo',
+      'icon',
+    ];
 
-          const value = createData[key];
-          const dateRegex = /^\d{2}-\d{2}-\d{4}$/;
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = [
+      'tglberangkat',
+      'tgltiba',
+      'tglclosing',
+      'created_at',
+      'updated_at',
+    ];
 
-          if (dateRegex.test(value)) {
-            createData[key] = formatDateToSQL(value);
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "TO_CHAR(vsk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            createData[key] = createData[key].toUpperCase();
+            query.orWhere(`vsk.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
-        }
+        });
       });
+    }
 
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, createData))
-        .returning('*');
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
 
-      const newData = insertedItems[0];
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(vsk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`vsk.statusaktif_${key}`, '=', sanitizedValue);
+      } else {
+        qb.andWhere(`vsk.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
 
-      await this.logTrailService.create(
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid || dto.uuid || null,
+      jenisorder_id: dto.jenisorder_id || null,
+      voyberangkat: dto.voyberangkat ? dto.voyberangkat.toUpperCase() : null,
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      kapal_id: dto.kapal_id || null,
+      pelayaran_id: dto.pelayaran_id || null,
+      tujuankapal_id: dto.tujuankapal_id || null,
+      asalkapal_id: dto.asalkapal_id || null,
+      tglberangkat: dto.tglberangkat || null,
+      tgltiba: dto.tgltiba || null,
+      tglclosing: dto.tglclosing || null,
+      statusberangkatkapal: dto.statusberangkatkapal
+        ? dto.statusberangkatkapal.toUpperCase()
+        : null,
+      statustibakapal: dto.statustibakapal
+        ? dto.statustibakapal.toUpperCase()
+        : null,
+      batasmuatankapal: dto.batasmuatankapal
+        ? dto.batasmuatankapal.toUpperCase()
+        : null,
+
+      statusaktif: dto.statusaktif,
+      info: dto.info ? dto.info.toUpperCase() : null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilService.getTime(),
+      updated_at: dto.updated_at || this.utilService.getTime(),
+    };
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on vsk.text
+      case 'statusbank':
+        return { col: 'statusbank_text', dir };
+      case 'statusdefault':
+        return { col: 'statusdefault_text', dir };
+      case 'statuslangsungcair':
+        return { col: 'statuslangsungcair_text', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateSchedulekapalDto: any, trx: any) {
+    try {
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateSchedulekapalDto;
+
+      const uuid = await uuidV7(trx);
+
+      const insertData = this.buildInsertData(CreateSchedulekapalDto, uuid);
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as vsk`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vsk`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vsk`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          namatable: this.tableName,
-          postingdari: 'ADD SCHEDULE KAPAL',
-          idtrans: newData.id,
-          nobuktitrans: newData.id,
-          aksi: 'ADD',
-          datajson: JSON.stringify(newData),
-          modifiedby: newData.modifiedby,
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
+
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+      // 6. Side-effects
+      await this.logTrailService.create(
+        {
+          texttabel: this.tableName,
+          postingdari: 'ADD SCHEDULE KAPAL',
+          idtrans: newItem.id,
+          nobuktitrans: newItem.id,
+          aksi: 'ADD',
+          datajson: JSON.stringify(newItem),
+          modifiedby: newItem.modifiedby,
+        },
+        trx,
+      );
+
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
-        newData: newData,
+        newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
+        pageNumber,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      console.error(
-        'Error process approval creating schedule kapal in service:',
-        error.message,
-      );
-      if (error instanceof HttpException) {
-        throw error;
-      }
-      throw new InternalServerErrorException(
-        'Error process approval creating schedule kapal in service',
-      );
+      throw new Error(`Error creating schedule kapal: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
-    trx: any,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: Knex.Transaction,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      if (isLookUp) {
-        const totalData = await trx(this.tableName)
-          .count('id as total')
-          .first();
+      const sortBy = sort?.sortBy || 'text';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
 
-        const resultTotalData = totalData?.total || 0;
+      const countResult = await trx(`${this.viewName} as vsk`)
+        .count('vsk.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
-        if (Number(resultTotalData) > 500) {
-          return { data: { type: 'json' } };
-        } else {
-          limit = 0;
-        }
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      const query = trx(`${this.tableName} as u`)
-        .select([
-          'u.id',
-          'u.jenisorder_id',
-          'u.voyberangkat',
-          'u.keterangan',
-          'u.kapal_id',
-          'u.pelayaran_id',
-          'u.tujuankapal_id',
-          'u.asalkapal_id',
-          trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
-          trx.raw("TO_CHAR(u.tgltiba, 'DD-MM-YYYY') as tgltiba"),
-          // 'u.tglclosing',
-          trx.raw("TO_CHAR(u.tglclosing, 'DD-MM-YYYY HH24:MI:SS') as tglclosing"),
-          'u.statusberangkatkapal',
-          'u.statustibakapal',
-          'u.batasmuatankapal',
-          'u.statusaktif',
-          'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'a.nama as jenisorderan_nama',
-          'b.nama as kapal_nama',
-          'c.nama as pelayaran_nama',
-          'd.nama as tujuankapal_nama',
-          'e.keterangan as asalkapal_nama',
-          'p.memo',
-          'p.text as statusaktif_nama',
-        ])
-        .leftJoin('jenisorder as a', 'u.jenisorder_id', 'a.id')
-        .leftJoin('kapal as b', 'u.kapal_id', 'b.id')
-        .leftJoin('pelayaran as c', 'u.pelayaran_id', 'c.id')
-        .leftJoin('tujuankapal as d', 'u.tujuankapal_id', 'd.id')
-        .leftJoin('asalkapal as e', 'u.asalkapal_id', 'e.id')
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id');
+      // SELECT disesuaikan DENGAN SCHEMA Schedulekapal yang sebenarnya
+      const query = trx(`${this.viewName} as vsk`).select([
+        'vsk.id',
+        'vsk.jenisorder_id',
+        'vsk.jenisorder_text',
+        'vsk.voyberangkat',
+        'vsk.keterangan',
+        'vsk.kapal_id',
+        'vsk.kapal_text',
+        'vsk.pelayaran_id',
+        'vsk.pelayaran_text',
+        'vsk.tujuankapal_id',
+        'vsk.tujuankapal_text',
+        'vsk.asalkapal_id',
+        'vsk.asalkapal_text',
+        trx.raw("to_char(vsk.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+        trx.raw("to_char(vsk.tgltiba, 'DD-MM-YYYY') as tgltiba"),
+        trx.raw(
+          "to_char(vsk.tglclosing, 'DD-MM-YYYY HH24:MI:SS') as tglclosing",
+        ),
+        'vsk.statusberangkatkapal',
+        'vsk.statustibakapal',
+        'vsk.batasmuatankapal',
+        'vsk.statusaktif',
+        'vsk.memo',
+        'vsk.text',
+        'vsk.info',
+        'vsk.modifiedby',
+        trx.raw(
+          "to_char(vsk.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(vsk.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ]);
 
-      if (filters?.join) {
-        // Postgres: subquery whereIn, tanpa temp table. Ambil schedule_id yang
-        // muncul di tabel join, lalu batasi u.id ke himpunan itu.
-        query.whereIn(
-          'u.id',
-          trx
-            .select('a.schedule_id')
-            .from(`${filters.join} as a`)
-            .whereNotNull('a.schedule_id'),
-        );
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      if (sortBy === 'statusaktif') {
+        query.orderBy('vsk.text', sortDirection);
+      } else {
+        query.orderBy(`vsk.${sortBy}`, sortDirection);
       }
 
-      if (filters?.notIn) {
-        const notInObj =
-          typeof filters?.notIn === 'string'
-            ? JSON.parse(filters?.notIn)
-            : filters?.notIn;
-
-        if (notInObj && typeof notInObj === 'object') {
-          // Loop semua key di notIn object
-          for (const [key, values] of Object.entries(notInObj)) {
-            if (Array.isArray(values) && values.length > 0) {
-              query.whereNotIn(`u.${key}`, values);
-            }
-          }
-        }
-      }
-
-      const excludeSearchKeys = [
-        'tglDari',
-        'tglSampai',
-        'statusaktif_nama',
-        'statusaktif',
-      ];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-      if (search) {
-        const sanitized = String(search).trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'jenisorderan_nama') {
-              qb.orWhere(`a.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'kapal_nama') {
-              qb.orWhere(`b.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'pelayaran_nama') {
-              qb.orWhere(`c.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'tujuankapal_nama') {
-              qb.orWhere(`d.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'asalkapal_nama') {
-              qb.orWhere(`e.keterangan`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else {
-              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value);
-
-          if (key === 'join' || key === 'notIn') {
-            continue;
-          }
-
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'statusaktif_nama' || key === 'memo') {
-              query.andWhere(`p.text`, '=', sanitizedValue);
-            } else if (key === 'jenisorderan_nama') {
-              query.andWhere(`a.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'kapal_nama') {
-              query.andWhere(`b.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'pelayaran_nama') {
-              query.andWhere(`c.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'tujuankapal_nama') {
-              query.andWhere(`d.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'asalkapal_nama') {
-              query.andWhere(`e.keterangan`, 'ilike', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'jenisorderan') {
-          query.orderBy('a.nama', sort?.sortDirection);
-        } else if (sort?.sortBy === 'kapal') {
-          query.orderBy('b.nama', sort?.sortDirection);
-        } else if (sort?.sortBy === 'pelayaran') {
-          query.orderBy('c.nama', sort?.sortDirection);
-        } else if (sort?.sortBy === 'tujuankapal') {
-          query.orderBy('d.nama', sort?.sortDirection);
-        } else if (sort?.sortBy === 'asalkapal') {
-          query.orderBy('e.keterangan', sort?.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      // const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-      const totalPages = Math.ceil(total / limit);
       const data = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
           currentPage: Number(page),
-          totalPages: totalPages,
+          totalPages,
           totalItems: total,
-          itemsPerPage: limit > 0 ? limit : total,
+          itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error to findAll Schedule Kapal in Service', error);
-      throw new Error(error);
+      this.logger.error('Error fetching schedule kapal data', error?.stack);
+      throw new InternalServerErrorException(
+        'Failed to fetch schedule kapal data',
+      );
     }
   }
 

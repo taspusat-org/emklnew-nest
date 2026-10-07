@@ -20,12 +20,7 @@ export class LogtrailService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys: string[] = [
-      'tglDari',
-      'tglSampai',
-      'statusaktif',
-      'text',
-    ];
+    const excludeSearchKeys: string[] = ['statusaktif', 'text'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -37,10 +32,10 @@ export class LogtrailService {
       qb.where((query) => {
         searchFields.forEach((field) => {
           if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(vl.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+            query.orWhereRaw(
+              "to_char(vl.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
             query.orWhereRaw('vl.??::text ilike ?', [
               field,
@@ -62,8 +57,10 @@ export class LogtrailService {
           key,
           `%${sanitizedValue}%`,
         ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`vl.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhereRaw('vl.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+        qb.andWhere(`va.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
