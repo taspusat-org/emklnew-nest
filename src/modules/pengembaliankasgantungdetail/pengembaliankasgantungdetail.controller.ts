@@ -1,15 +1,14 @@
 import {
   Controller,
   Get,
-  Post,
-  Body,
   Patch,
   Param,
   Delete,
+  Body,
   Query,
+  InternalServerErrorException,
 } from '@nestjs/common';
 import { PengembaliankasgantungdetailService } from './pengembaliankasgantungdetail.service';
-import { CreatePengembaliankasgantungdetailDto } from './dto/create-pengembaliankasgantungdetail.dto';
 import { UpdatePengembaliankasgantungdetailDto } from './dto/update-pengembaliankasgantungdetail.dto';
 import { dbMssql } from 'src/common/utils/db';
 import { FindAllDto, FindAllParams } from 'src/common/interfaces/all.interface';
@@ -29,49 +28,48 @@ export class PengembaliankasgantungdetailController {
       sortBy: sortBy || 'nobukti',
       sortDirection: sortDirection || 'asc',
     };
+
+    // Query string selalu string. Tanpa Number() di sini offset/totalPages
+    // bergantung pada koersi JS.
+    const numericLimit = Number(limit);
+    const pagination = {
+      page: Number(page) || 1,
+      limit:
+        !numericLimit || Number.isNaN(numericLimit) ? undefined : numericLimit,
+    };
+
     const params: FindAllParams = {
       search,
       filters,
+      pagination,
+      isLookUp: isLookUp === 'true',
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
     };
+
     const trx = await dbMssql.transaction();
     try {
       const result = await this.pengembaliankasgantungdetailService.findAll(
         params,
         trx,
       );
-
-      if (result.data.length === 0) {
-        await trx.commit();
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-        };
-      }
       await trx.commit();
 
+      // Balikan diteruskan apa adanya, termasuk saat kosong. Dulu hasil kosong
+      // ditukar objek tanpa `pagination`, sehingga grid tidak pernah tahu
+      // totalPages dan windowed lazy-loading tidak bisa berhenti di halaman
+      // terakhir. Service sudah mengisi pagination bahkan untuk hasil kosong.
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
+      console.error(
+        'Error fetching pengembalian kas gantung detail in controller',
+        error,
+        error.message,
+      );
+      throw new InternalServerErrorException(
+        'Failed to fetch pengembalian kas gantung detail in controller',
+      );
     }
-  }
-  @Get()
-  async tes(
-    @Query()
-    query: {
-      tanggalDari: string;
-      tanggalSampai: string;
-    },
-  ) {
-    const { tanggalDari, tanggalSampai } = query;
-    const result = await this.pengembaliankasgantungdetailService.tes(
-      tanggalDari,
-      tanggalSampai,
-    );
-    return result;
   }
 
   @Patch(':id')

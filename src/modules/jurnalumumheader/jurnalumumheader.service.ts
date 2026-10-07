@@ -1008,7 +1008,11 @@ export class JurnalumumheaderService {
       ],
       infoLines: [
         { label: 'NO BUKTI', value: header.nobukti },
-        { label: 'TGL BUKTI', value: header.tglbukti },
+        {
+          label: 'TGL BUKTI',
+          value: header.tglbukti,
+          numFmt: EXCEL_FORMAT.TANGGAL,
+        },
         { label: 'KETERANGAN', value: header.keterangan },
         { label: 'POSTING DARI', value: header.postingdari },
       ],
@@ -1024,7 +1028,7 @@ export class JurnalumumheaderService {
       columnFormats: [
         null,
         null,
-        null,
+        { numFmt: EXCEL_FORMAT.TANGGAL, align: 'center' },
         null,
         null,
         { numFmt: EXCEL_FORMAT.RUPIAH_DESIMAL },
