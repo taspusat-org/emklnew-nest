@@ -64,9 +64,24 @@ export const EXCEL_FORMAT = {
   ANGKA_DESIMAL: '#,##0.00',
   /** 0.155 → 15,50% */
   PERSEN: '0.00%',
+  /**
+   * '14-09-2026' / Date → sel tanggal Excel asli (bisa di-sort, difilter
+   * sebagai tanggal). String bertipe 'DD-MM-YYYY' dari query (pola TO_CHAR
+   * yang umum dipakai di modul ini) otomatis di-parse jadi Date, lihat
+   * `toDateCell`.
+   */
   TANGGAL: 'dd-mm-yyyy',
   TANGGAL_JAM: 'dd-mm-yyyy hh:mm',
 } as const;
+
+const DATE_NUM_FORMATS: ReadonlySet<string> = new Set([
+  EXCEL_FORMAT.TANGGAL,
+  EXCEL_FORMAT.TANGGAL_JAM,
+]);
+
+function isDateFormat(numFmt: string | undefined): boolean {
+  return !!numFmt && DATE_NUM_FORMATS.has(numFmt);
+}
 
 export interface ExportColumnFormat {
   /**
@@ -90,6 +105,8 @@ export interface ExportColumnFormat {
 export interface ExportInfoLine {
   label: string;
   value: string | number | null;
+  /** numFmt Excel untuk value, mis. `EXCEL_FORMAT.TANGGAL` — lihat `ExportColumnFormat.numFmt`. */
+  numFmt?: string;
 }
 
 export interface ExportSheetDefinition {
@@ -155,6 +172,44 @@ function toNumericCell(
   return Number.isFinite(parsed) ? parsed : value;
 }
 
+const DATE_TEXT_PATTERN =
+  /^(\d{2})-(\d{2})-(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+
+/**
+ * Kolom tanggal biasanya keluar dari query sebagai teks 'DD-MM-YYYY' (hasil
+ * TO_CHAR, dipakai supaya konsisten dengan yang tampil di grid). Excel hanya
+ * menghormati numFmt tanggal kalau isi selnya benar-benar `Date` — kalau
+ * dibiarkan teks, numFmt-nya diabaikan diam-diam sama seperti kolom angka
+ * yang keluar sebagai string (lihat `toNumericCell`).
+ *
+ * Dibangun lewat `Date.UTC` (bukan `new Date(y, m, d)`) supaya serial
+ * tanggalnya tidak bergeser sehari akibat timezone server — ExcelJS
+ * mengonversi `Date` ke serial Excel dari `getTime()` UTC apa adanya.
+ */
+function toDateCell(
+  value: string | number | Date | null | undefined,
+): Date | string | number {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return value;
+  if (typeof value === 'number') return value;
+
+  const match = DATE_TEXT_PATTERN.exec(String(value).trim());
+  if (!match) return value;
+
+  const [, day, month, year, hour = '0', minute = '0', second = '0'] = match;
+  const date = new Date(
+    Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    ),
+  );
+  return Number.isNaN(date.getTime()) ? value : date;
+}
+
 /** Nomor kolom → huruf kolom Excel (1 → A, 27 → AA). */
 function columnLetter(columnNumber: number): string {
   let letter = '';
@@ -176,9 +231,13 @@ function columnLetter(columnNumber: number): string {
  * `#######`. Hasilnya perkiraan, dan itu cukup untuk menentukan lebar kolom.
  */
 function displayedLength(
-  value: string | number | null | undefined,
+  value: string | number | Date | null | undefined,
   numFmt?: string,
 ): number {
+  // Setiap karakter di 'dd-mm-yyyy' / 'dd-mm-yyyy hh:mm' persis mewakili satu
+  // karakter yang tampil, jadi panjang pattern-nya = panjang tampilannya.
+  if (value instanceof Date) return numFmt?.length ?? 10;
+
   const text = value === null || value === undefined ? '' : String(value);
   // Sel multi-baris: yang menentukan lebar hanya penggal terpanjang.
   const plainLength = Math.max(
@@ -670,7 +729,10 @@ export class ExportJobService {
       label.alignment = { horizontal: 'left', vertical: 'middle' };
 
       const value = row.getCell(2);
-      value.value = info.value ?? '';
+      value.value = isDateFormat(info.numFmt)
+        ? toDateCell(info.value)
+        : (info.value ?? '');
+      if (info.numFmt) value.numFmt = info.numFmt;
       value.font = { name: 'Tahoma', size: 10 };
       value.alignment = { horizontal: 'left', vertical: 'middle' };
       row.commit();
@@ -782,15 +844,19 @@ export class ExportJobService {
     values.forEach((value, index) => {
       const format = formats[index] ?? DEFAULT_COLUMN_FORMAT;
       const cell = row.getCell(index + 1);
-      // Konversi ke angka hanya untuk kolom yang memang diformat sebagai
-      // angka — kolom teks seperti nomor bukti ('0012') harus tetap apa adanya.
-      const cellValue = format.numFmt ? toNumericCell(value) : (value ?? '');
+      // Konversi ke angka/Date hanya untuk kolom yang memang diformat begitu
+      // — kolom teks seperti nomor bukti ('0012') harus tetap apa adanya.
+      const cellValue = isDateFormat(format.numFmt)
+        ? toDateCell(value)
+        : format.numFmt
+          ? toNumericCell(value)
+          : (value ?? '');
       cell.value = cellValue;
 
       // Cache rumus TOTAL diambil dari nilai sel yang BARU SAJA ditulis, jadi
       // tidak bisa melenceng dari isi kolomnya; tambahannya satu penjumlahan,
       // tanpa parsing ulang.
-      if (totals.has(index)) {
+      if (totals.has(index) && !(cellValue instanceof Date)) {
         const numeric =
           typeof cellValue === 'number' ? cellValue : toNumericCell(cellValue);
         if (typeof numeric === 'number') {

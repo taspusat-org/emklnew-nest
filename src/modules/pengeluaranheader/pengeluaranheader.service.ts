@@ -42,17 +42,6 @@ import { PenerimaanemklheaderService } from '../penerimaanemklheader/penerimaane
 export class PengeluaranheaderService implements OnModuleInit {
   private pengeluaranemklheaderService: PengeluaranemklheaderService;
   private penerimaanemklheaderService: PenerimaanemklheaderService;
-
-  // Kolom teks manusiawi — HANYA ini yang boleh di-uppercase. Sebelumnya
-  // create/update meng-uppercase SEMUA field string, termasuk relasi_id,
-  // bank_id, alatbayar_id, daftarbank_id, statusformat, dan id — semuanya UUID
-  // bertipe text alias case-sensitive. Mayoritas id di master sekarang uuid v7
-  // huruf kecil, jadi blanket uppercase menulis id yang tidak ada: memilih alat
-  // bayar '02-019f64f5-...' tersimpan sebagai '02-019F64F5-...' yang tak cocok
-  // dengan baris alatbayar mana pun. alatbayar_id tak punya FK, jadi Postgres
-  // menerimanya diam-diam; lookup lalu tampil kosong dan perubahan terlihat
-  // "tidak tersimpan" tanpa satu pun error. nobukti/coakredit sengaja tak ikut:
-  // keduanya identifier dan nilainya memang sudah uppercase dari sumbernya.
   private readonly uppercaseFields = [
     'keterangan',
     'dibayarke',
@@ -62,11 +51,6 @@ export class PengeluaranheaderService implements OnModuleInit {
   ];
 
   constructor(
-    // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'). Token REDIS_CLIENT
-    // memberi instance ioredis mentah dengan enableOfflineQueue:false → saat
-    // Redis mati, redisService.set() melempar "Stream isn't writeable" dan
-    // menggagalkan create/update (500). Wrapper RedisService membungkus set/get
-    // dengan try/catch sehingga cache bersifat best-effort (lanjut tanpa cache).
     private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
@@ -546,12 +530,6 @@ export class PengeluaranheaderService implements OnModuleInit {
         withGridPosition: false,
       });
 
-      // ── Posisi/pagination pasca-simpan (NON-FATAL) ───────────────────────
-      // Header + detail + jurnal SUDAH ter-insert di atas. Blok ini hanya
-      // menghitung posisi/halaman baris baru untuk grid (query view + findAll),
-      // jadi dilewati saat dipanggil bersarang dari kas gantung: gridnya ada di
-      // kas gantung, dan return value ini pun dibuang di sana.
-      // Kegagalannya TIDAK boleh me-rollback simpan yang sudah berhasil.
       let pageNumber = 1;
       let fetchedPages: number[] = [1];
       const pagedData: Record<number, any> = {};

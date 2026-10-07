@@ -52,83 +52,43 @@ export class PindahBukuService {
   private readonly tableName = 'pindahbuku';
   private readonly viewName = 'vpindahbuku';
 
-  // vpindahbuku sudah mengembalikan tanggal sebagai teks DD-MM-YYYY, jadi
-  // kolom ini di-filter sebagai teks dan diurutkan lewat TO_DATE/TO_TIMESTAMP.
+  // vpindahbuku mengembalikan tanggal MENTAH; teks DD-MM-YYYY dirakit di
+  // viewColumns dan dicocokkan lewat TO_CHAR waktu difilter.
   private readonly dateFields = ['tglbukti', 'tgljatuhtempo'];
   private readonly dateTimeFields = ['created_at', 'updated_at'];
-
-  // Grid mengirim key `<x>_text`, sedangkan view menyediakannya sebagai
-  // `<x>_nama`.
-  private static readonly COLUMN_ALIASES: Record<string, string> = {
-    bankdari_text: 'bankdari_nama',
-    bankke_text: 'bankke_nama',
-    coadebet_text: 'coadebet_nama',
-    coakredit_text: 'coakredit_nama',
-    alatbayar_text: 'alatbayar_nama',
-  };
-
-  // Kolom yang ikut disapu kotak SEARCH di grid = kolom yang tampil di grid.
-  private static readonly SEARCHABLE_COLUMNS = [
-    'nobukti',
-    'tglbukti',
-    'bankdari_nama',
-    'bankke_nama',
-    'coadebet_nama',
-    'coakredit_nama',
-    'alatbayar_nama',
-    'nowarkat',
-    'tgljatuhtempo',
-    'keterangan',
-    'nominal',
-    'modifiedby',
-    'created_at',
-    'updated_at',
-  ];
-
-  // Key di luar daftar ini bukan kolom view dan akan membuat query gagal kalau
-  // diteruskan apa adanya.
-  private static readonly FILTERABLE_COLUMNS = new Set([
-    ...PindahBukuService.SEARCHABLE_COLUMNS,
-    'id',
-    'bankdari_id',
-    'bankke_id',
-    'coadebet',
-    'coakredit',
-    'alatbayar_id',
-    'statusformat',
-  ]);
+  // nominal bertipe numeric: ILIKE baru sah setelah di-cast ke teks.
+  private readonly numericFields = ['nominal'];
+  private readonly excludeSearchKeys = ['tglDari', 'tglSampai'];
 
   private baseQuery(trx: any) {
     return trx(`${this.viewName} as u`);
   }
 
-  private columnRef(key: string): string {
-    return `u.${PindahBukuService.COLUMN_ALIASES[key] ?? key}`;
-  }
-
-  private selectColumns() {
+  private viewColumns(trx: any) {
     return [
       'u.id',
       'u.nobukti',
-      'u.tglbukti',
+      trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
       'u.bankdari_id',
       'u.bankke_id',
       'u.coadebet',
       'u.coakredit',
       'u.alatbayar_id',
       'u.nowarkat',
-      'u.tgljatuhtempo',
+      trx.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
       'u.keterangan',
       'u.nominal',
       'u.statusformat',
+      'u.info',
       'u.modifiedby',
-      'u.created_at',
-      'u.updated_at',
-      'u.bankdari_nama',
-      'u.bankke_nama',
-      'u.coadebet_nama',
-      'u.coakredit_nama',
-      'u.alatbayar_nama',
+      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      'u.bankdari_text as bankdari_nama',
+      'u.bankke_text as bankke_nama',
+      'u.coadebet_text as coadebet_nama',
+      'u.coakredit_text as coakredit_nama',
+      'u.alatbayar_text as alatbayar_nama',
+      'u.statusformat_text as statusformat_nama',
     ];
   }
 
@@ -263,96 +223,112 @@ export class PindahBukuService {
     };
   }
 
-  // Rentang tanggal difilter di dalam vpindahbuku lewat current_setting, bukan
-  // whereBetween: kolom tglbukti yang keluar dari view sudah berupa teks.
-  private async setDateRangeSessionContext(
-    trx: any,
-    filters: Record<string, any>,
-  ): Promise<void> {
-    if (!filters?.tglDari || !filters?.tglSampai) return;
-
-    const tglDariFormatted = formatDateToSQL(String(filters.tglDari));
-    const tglSampaiFormatted = formatDateToSQL(String(filters.tglSampai));
-
-    if (!tglDariFormatted || !tglSampaiFormatted) return;
-
-    await trx.raw(`SELECT set_config('tas.tgldari', ?, true)`, [
-      tglDariFormatted,
-    ]);
-    await trx.raw(`SELECT set_config('tas.tglsampai', ?, true)`, [
-      tglSampaiFormatted,
-    ]);
+  private dateFormat(key: string): string {
+    return this.dateTimeFields.includes(key)
+      ? 'DD-MM-YYYY HH24:MI:SS'
+      : 'DD-MM-YYYY';
   }
 
+  /**
+   * Rentang tanggal disaring DI DALAM vpindahbuku lewat
+   * `tas.tgldari`/`tas.tglsampai`, bukan whereBetween di query luar: view
+   * memangkas pindahbuku sebelum LEFT JOIN bank/akunpusat/alatbayar.
+   *
+   * Nilai kosong dikirim EKSPLISIT (bukan sekadar dilewati) karena GUC-nya
+   * memakai nama global: service lain bisa sudah men-set tas.tgldari di
+   * transaksi yang sama, dan sisanya akan ikut memangkas pindah buku kalau
+   * tidak ditimpa.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi; jalur tanpa trx
+   * (report/export) menyaring per id/nobukti sendiri, jadi tidak terpengaruh.
+   */
+  private async setDateRangeSessionContext(
+    trx: any,
+    filters?: Record<string, any>,
+  ): Promise<void> {
+    const tglDari = filters?.tglDari
+      ? formatDateToSQL(String(filters.tglDari))
+      : null;
+    const tglSampai = filters?.tglSampai
+      ? formatDateToSQL(String(filters.tglSampai))
+      : null;
+
+    await trx.raw(
+      `SELECT set_config('tas.tgldari', ?, true),
+              set_config('tas.tglsampai', ?, true)`,
+      [tglDari ?? '', tglSampai ?? ''],
+    );
+  }
+
+  /**
+   * Search global + filter per kolom. Kolom yang disapu SEARCH diturunkan dari
+   * key `filters` yang dikirim grid, jadi tidak ada daftar kolom kembar yang
+   * harus ikut diperbarui tiap kolom grid berubah. Periode TIDAK di sini —
+   * itu urusan setDateRangeSessionContext.
+   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
     search?: string,
   ): void {
-    if (search) {
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !this.excludeSearchKeys.includes(k),
+    );
+
+    if (search && searchFields.length > 0) {
       const sanitized = String(search).trim();
-      qb.where((builder: any) => {
-        PindahBukuService.SEARCHABLE_COLUMNS.forEach((field) => {
-          if (field === 'nominal') {
-            builder.orWhereRaw('CAST(?? AS TEXT) ILIKE ?', [
-              this.columnRef(field),
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          if (
+            this.dateFields.includes(field) ||
+            this.dateTimeFields.includes(field)
+          ) {
+            query.orWhereRaw(
+              `TO_CHAR(u.??, '${this.dateFormat(field)}') ILIKE ?`,
+              [field, `%${sanitized}%`],
+            );
+          } else if (this.numericFields.includes(field)) {
+            query.orWhereRaw('CAST(u.?? AS TEXT) ILIKE ?', [
+              field,
               `%${sanitized}%`,
             ]);
           } else {
-            builder.orWhere(this.columnRef(field), 'ilike', `%${sanitized}%`);
+            query.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
           }
         });
       });
     }
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
-      if (key === 'tglDari' || key === 'tglSampai') return;
-
-      const column = PindahBukuService.COLUMN_ALIASES[key] ?? key;
-      if (!PindahBukuService.FILTERABLE_COLUMNS.has(column)) return;
+      if (this.excludeSearchKeys.includes(key)) return;
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
       const sanitizedValue = String(rawValue);
-      if (column === 'nominal') {
-        qb.andWhereRaw('CAST(?? AS TEXT) ILIKE ?', [
-          `u.${column}`,
+      if (this.dateFields.includes(key) || this.dateTimeFields.includes(key)) {
+        qb.andWhereRaw(`TO_CHAR(u.??, '${this.dateFormat(key)}') ILIKE ?`, [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (this.numericFields.includes(key)) {
+        qb.andWhereRaw('CAST(u.?? AS TEXT) ILIKE ?', [
+          key,
           `%${sanitizedValue}%`,
         ]);
       } else {
-        qb.andWhere(`u.${column}`, 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
 
-  /**
-   * Ekspresi ORDER BY, bukan sekadar nama kolom: tanggal keluar dari view
-   * sebagai teks DD-MM-YYYY, jadi mengurutkannya apa adanya menaruh 12-01-2026
-   * sebelum 05-02-2025. Ekspresi yang sama dipakai resolvePosition supaya
-   * posisi baris pasca-simpan sejalan dengan urutan yang tampil di grid.
-   */
-  private resolveOrderExpr(
+  private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
-  ): { expr: string; dir: 'asc' | 'desc' } {
+  ): { orderCol: string; dir: 'asc' | 'desc' } {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
-    const aliased = PindahBukuService.COLUMN_ALIASES[sortBy] ?? sortBy;
     // Tanpa fallback, create/update yang dipanggil bersarang (payloadnya tidak
     // membawa sortBy) menghasilkan kolom 'u.undefined'.
-    const column = PindahBukuService.FILTERABLE_COLUMNS.has(aliased)
-      ? aliased
-      : 'nobukti';
-
-    if (this.dateFields.includes(column)) {
-      return { expr: `TO_DATE(u.${column}, 'DD-MM-YYYY')`, dir };
-    }
-    if (this.dateTimeFields.includes(column)) {
-      return {
-        expr: `TO_TIMESTAMP(u.${column}, 'DD-MM-YYYY HH24:MI:SS')`,
-        dir,
-      };
-    }
-    return { expr: `u.${column}`, dir };
+    return { orderCol: `u.${sortBy || 'nobukti'}`, dir };
   }
 
   private async resolvePosition(
@@ -363,10 +339,10 @@ export class PindahBukuService {
     sortBy: string,
     sortDirection: string,
   ): Promise<number> {
-    const { expr, dir } = this.resolveOrderExpr(sortBy, sortDirection);
+    const { orderCol, dir } = this.resolvePositionOrder(sortBy, sortDirection);
 
     const existingData = await this.baseQuery(trx)
-      .select(trx.raw(`${expr} as posval`))
+      .select({ posval: orderCol })
       .where('u.id', String(id))
       .modify((qb: any) => this.applyFilters(qb, filters, search))
       .first();
@@ -374,9 +350,7 @@ export class PindahBukuService {
 
     const resultposition = await this.baseQuery(trx)
       .count('* as posisi')
-      .whereRaw(`${expr} ${dir === 'desc' ? '>=' : '<='} ?`, [
-        existingData.posval,
-      ])
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
       .modify((qb: any) => this.applyFilters(qb, filters, search))
       .first();
 
@@ -456,8 +430,6 @@ export class PindahBukuService {
         ...dto
       } = data;
 
-      await this.setDateRangeSessionContext(trx, filters || {});
-
       const uuid = await uuidV7(trx);
       const parameter = await this.getFormatPindahBuku(trx);
 
@@ -508,6 +480,8 @@ export class PindahBukuService {
       };
       if (withGridPosition) {
         try {
+          await this.setDateRangeSessionContext(trx, filters);
+
           const totalRecords = await this.baseQuery(trx)
             .count('u.id as total')
             .modify((qb: any) => this.applyFilters(qb, filters, search))
@@ -615,11 +589,14 @@ export class PindahBukuService {
       }
 
       const query = this.baseQuery(trx)
-        .select(this.selectColumns())
+        .select(this.viewColumns(trx))
         .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
-      const { expr, dir } = this.resolveOrderExpr(sortBy, sortDirection);
-      query.orderByRaw(`${expr} ${dir === 'desc' ? 'DESC' : 'ASC'}`);
+      const { orderCol, dir } = this.resolvePositionOrder(
+        sortBy,
+        sortDirection,
+      );
+      query.orderBy(orderCol, dir);
 
       // buildPagedResult mengambil BEBERAPA halaman sekaligus (limit =
       // totalDataNeeded) tapi offsetnya harus tetap dihitung per ukuran halaman.
@@ -659,7 +636,7 @@ export class PindahBukuService {
   async findOne(id: string, trx: any) {
     try {
       const data = await this.baseQuery(trx)
-        .select(this.selectColumns())
+        .select(this.viewColumns(trx))
         .where('u.id', id);
 
       return {
@@ -700,8 +677,6 @@ export class PindahBukuService {
         alatbayar_nama,
         ...dto
       } = data;
-
-      await this.setDateRangeSessionContext(trx, filters || {});
 
       const parameter = await this.getFormatPindahBuku(trx);
       const { coadebet, coakredit } = await this.resolveCoa(
@@ -757,9 +732,12 @@ export class PindahBukuService {
       }
 
       // Ambil baris yang SUDAH diperbarui (tanpa filter) supaya selalu ketemu
-      // walau hasil edit tak lagi cocok dengan filter aktif.
+      // walau hasil edit tak lagi cocok dengan filter aktif. Periode view belum
+      // di-set di titik ini (setDateRangeSessionContext baru dipanggil di blok
+      // posisi grid di bawah), jadi baris tetap ketemu walau tglbukti hasil
+      // edit keluar dari rentang aktif.
       const updatedItem = await this.baseQuery(trx)
-        .select(this.selectColumns())
+        .select(this.viewColumns(trx))
         .where('u.id', id)
         .first();
 
@@ -771,6 +749,8 @@ export class PindahBukuService {
       };
       if (withGridPosition) {
         try {
+          await this.setDateRangeSessionContext(trx, filters);
+
           const totalRecords = await this.baseQuery(trx)
             .count('u.id as total')
             .modify((qb: any) => this.applyFilters(qb, filters, search))
@@ -983,14 +963,14 @@ export class PindahBukuService {
     const header = await this.baseQuery(db)
       .select([
         'u.nobukti',
-        'u.tglbukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
         'u.keterangan',
-        'u.bankdari_nama',
-        'u.bankke_nama',
+        'u.bankdari_text as bankdari_nama',
+        'u.bankke_text as bankke_nama',
         'u.coadebet',
-        'u.coadebet_nama',
+        'u.coadebet_text as coadebet_nama',
         'u.coakredit',
-        'u.coakredit_nama',
+        'u.coakredit_text as coakredit_nama',
       ])
       .where('u.id', String(id))
       .first();
@@ -1013,8 +993,8 @@ export class PindahBukuService {
     return db(`${this.viewName} as u`)
       .select([
         'u.nobukti',
-        'u.alatbayar_nama',
-        'u.tgljatuhtempo',
+        'u.alatbayar_text as alatbayar_nama',
+        db.raw("TO_CHAR(u.tgljatuhtempo, 'DD-MM-YYYY') as tgljatuhtempo"),
         'u.nowarkat',
         'u.keterangan',
         'u.nominal',

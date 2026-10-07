@@ -8,8 +8,10 @@ import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { PengembaliankasgantungdetailModule } from '../pengembaliankasgantungdetail/pengembaliankasgantungdetail.module';
 import { PenerimaanheaderModule } from '../penerimaanheader/penerimaanheader.module';
+import { PenerimaandetailModule } from '../penerimaandetail/penerimaandetail.module';
 import { LocksModule } from '../locks/locks.module';
 import { GlobalModule } from '../global/global.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   imports: [
@@ -20,10 +22,14 @@ import { GlobalModule } from '../global/global.module';
     RunningNumberModule,
     PengembaliankasgantungdetailModule,
     PenerimaanheaderModule,
+    PenerimaandetailModule,
     LocksModule,
     GlobalModule,
+    // Menyediakan ReportJobService + ExportJobService (job background + socket).
+    ReportModule,
   ],
   controllers: [PengembaliankasgantungheaderController],
   providers: [PengembaliankasgantungheaderService],
+  exports: [PengembaliankasgantungheaderService],
 })
 export class PengembaliankasgantungheaderModule {}

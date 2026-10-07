@@ -1,32 +1,39 @@
 import {
-  Inject,
+  BadRequestException,
   Injectable,
   HttpException,
   InternalServerErrorException,
+  NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
-import { CreatePenerimaanheaderDto } from './dto/create-penerimaanheader.dto';
-import { UpdatePenerimaanheaderDto } from './dto/update-penerimaanheader.dto';
 import {
   withUuidV7,
   formatDateToSQL,
   parseNumberWithSeparators,
-  tandatanya,
+  calculateItemIndex,
+  getFetchedPages,
   UtilsService,
 } from 'src/utils/utils.service';
+import { numberToTerbilang } from 'src/utils/terbilang';
 import { RedisService } from 'src/common/redis/redis.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { PenerimaandetailService } from '../penerimaandetail/penerimaandetail.service';
 import { LocksService } from '../locks/locks.service';
 import { GlobalService } from '../global/global.service';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
+import {
+  FindAllParams,
+  WriteOptions,
+} from 'src/common/interfaces/all.interface';
 import { Column, Workbook } from 'exceljs';
+import {
+  EXCEL_FORMAT,
+  ExportSheetDefinition,
+} from 'src/common/report/export-job.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { JurnalumumheaderService } from '../jurnalumumheader/jurnalumumheader.service';
-import { dbMssql } from 'src/common/utils/db';
 import { PenerimaanemklheaderService } from '../penerimaanemklheader/penerimaanemklheader.service';
 import { PengeluaranemklheaderService } from '../pengeluaranemklheader/pengeluaranemklheader.service';
 
@@ -36,7 +43,10 @@ export class PenerimaanheaderService implements OnModuleInit {
   private pengeluaranemklheaderService: PengeluaranemklheaderService;
 
   constructor(
-    @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
+    // Wrapper RedisService (BUKAN raw 'REDIS_CLIENT'): set/get/del jadi
+    // best-effort sehingga create/update tidak gagal 500 "Stream isn't
+    // writeable" saat Redis mati — sama seperti pengeluaranheader.
+    private readonly redisService: RedisService,
     private readonly logTrailService: LogtrailService,
     private readonly utilsService: UtilsService,
     private readonly runningNumberService: RunningNumberService,
@@ -59,7 +69,133 @@ export class PenerimaanheaderService implements OnModuleInit {
   }
 
   private readonly tableName = 'penerimaanheader';
-  async create(data: any, trx: any) {
+  private readonly viewName = 'vpenerimaanheader';
+
+  /**
+   * Periode dan bank diturunkan ke vpenerimaanheader lewat GUC
+   * (`tas.tgldari`, `tas.tglsampai`, `tas.bank_id`), bukan sebagai predikat di
+   * query luar: view menyaring penerimaanheader SEBELUM LEFT JOIN
+   * relasi/bank/akunpusat/alatbayar.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi — jalur tanpa trx
+   * (export background) wajib memakai applyPeriodFilters.
+   */
+  private async setDateRangeSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+  ): Promise<void> {
+    const tglDari = filters?.tglDari
+      ? formatDateToSQL(String(filters.tglDari))
+      : null;
+    const tglSampai = filters?.tglSampai
+      ? formatDateToSQL(String(filters.tglSampai))
+      : null;
+
+    // Nilai kosong dikirim EKSPLISIT karena GUC-nya memakai nama global:
+    // service lain (jurnal umum, pengeluaran) sudah men-set tas.tgldari di
+    // transaksi yang sama, dan sisanya akan ikut memangkas penerimaan kalau
+    // tidak ditimpa.
+    await trx.raw(
+      `SELECT set_config('tas.tgldari', ?, true),
+              set_config('tas.tglsampai', ?, true),
+              set_config('tas.bank_id', ?, true)`,
+      [
+        tglDari ?? '',
+        tglSampai ?? '',
+        filters?.bank_id ? String(filters.bank_id) : '',
+      ],
+    );
+  }
+
+  /**
+   * Search global + filter per kolom. Periode/bank TIDAK di sini — keduanya
+   * urusan setDateRangeSessionContext (jalur transaksi) atau applyPeriodFilters
+   * (export).
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+    alias = 'u',
+  ): void {
+    const excludeSearchKeys = ['tglDari', 'tglSampai', 'bank_id'];
+    const dateFields = ['created_at', 'updated_at', 'tglbukti', 'tgllunas'];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              `TO_CHAR(${alias}.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
+              [field, `%${sanitizedValue}%`],
+            );
+          } else {
+            query.orWhere(`${alias}.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue).replace(/\[/g, '[[]');
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw(
+          `TO_CHAR(${alias}.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
+          [key, `%${sanitizedValue}%`],
+        );
+      } else {
+        qb.andWhere(`${alias}.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  /**
+   * Format penerimaan diambil dari BANK-nya, jadi bank wajib terisi dan
+   * banknya wajib punya `formatpenerimaan`.
+   *
+   * Sebelumnya hasil query ini dipakai langsung (`formatpenerimaan.grp`), jadi
+   * bank kosong / tidak ketemu berujung "Cannot read properties of undefined
+   * (reading 'formatpenerimaan')" — 500 yang tidak memberi tahu apa pun ke user.
+   */
+  private async resolveFormatPenerimaan(trx: any, bankId: any) {
+    if (!bankId || String(bankId).trim() === '') {
+      throw new BadRequestException('BANK WAJIB DIISI');
+    }
+
+    const formatpenerimaan = await trx('bank as b')
+      .select('p.grp', 'p.subgrp', 'b.formatpenerimaan', 'b.coa', 'b.nama')
+      .leftJoin('parameter as p', 'p.id', 'b.formatpenerimaan')
+      .where('b.id', bankId)
+      .first();
+
+    if (!formatpenerimaan) {
+      throw new BadRequestException('BANK YANG DIPILIH TIDAK DITEMUKAN');
+    }
+    if (!formatpenerimaan.formatpenerimaan) {
+      throw new BadRequestException(
+        `BANK ${formatpenerimaan.nama ?? ''} BELUM DIATUR FORMAT PENERIMAANNYA`.trim(),
+      );
+    }
+    if (!formatpenerimaan.coa) {
+      throw new BadRequestException(
+        `BANK ${formatpenerimaan.nama ?? ''} BELUM MEMILIKI COA`.trim(),
+      );
+    }
+
+    return formatpenerimaan;
+  }
+
+  async create(data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       const positiveNominal = '';
       const insertData = {
@@ -80,12 +216,6 @@ export class PenerimaanheaderService implements OnModuleInit {
         created_at: this.utilsService.getTime(),
         updated_at: this.utilsService.getTime(),
       };
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
       [
         'nobukti',
         'keterangan',
@@ -105,11 +235,10 @@ export class PenerimaanheaderService implements OnModuleInit {
         .andWhere('subgrp', 'CABANG')
         .first();
 
-      const formatpenerimaan = await trx(`bank as b`)
-        .select('p.grp', 'p.subgrp', 'b.formatpenerimaan', 'b.coa')
-        .leftJoin('parameter as p', 'p.id', 'b.formatpenerimaan')
-        .where('b.id', insertData.bank_id)
-        .first();
+      const formatpenerimaan = await this.resolveFormatPenerimaan(
+        trx,
+        insertData.bank_id,
+      );
       const parameter = await trx('parameter')
         .select(
           'grp',
@@ -118,6 +247,15 @@ export class PenerimaanheaderService implements OnModuleInit {
         )
         .where('id', formatpenerimaan.formatpenerimaan)
         .first();
+
+      if (!parameter) {
+        throw new BadRequestException(
+          'PARAMETER FORMAT PENERIMAAN UNTUK BANK INI TIDAK DITEMUKAN',
+        );
+      }
+      if (!parameterCabang?.cabang_id) {
+        throw new BadRequestException('PARAMETER CABANG BELUM DIATUR');
+      }
 
       const grp = formatpenerimaan.grp;
       const subgrp = formatpenerimaan.subgrp;
@@ -414,52 +552,118 @@ export class PenerimaanheaderService implements OnModuleInit {
 
       const newItem = insertedItems[0];
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
-        },
-        trx,
-      );
       const dataDetail = await this.penerimaandetailService.findAll(
-        {
-          filters: {
-            nobukti: newItem.nobukti,
-          },
-        },
+        { filters: { nobukti: newItem.nobukti } },
         trx,
       );
 
-      // Cari index item baru di hasil yang sudah difilter
-      let itemIndex = filteredItems.findIndex(
-        (item) => String(item.id) === String(newItem.id),
-      );
+      // ============ GET POSITION ============
+      // Posisi/pagination hanya dipakai grid penerimaan untuk memfokuskan baris
+      // baru. Pemanggilan bersarang mematikannya lewat withGridPosition. Tetap
+      // dibungkus try/catch: header + detail + jurnal sudah tersimpan, jadi
+      // gagal menghitung posisi tidak boleh me-rollback simpan yang berhasil.
+      const { sortBy, sortDirection, filters, search } = data;
+      const limit = Number(data.limit) > 0 ? Number(data.limit) : 10;
+      const sortColumn = sortBy || 'nobukti';
+      const sortDir =
+        String(sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      if (itemIndex === -1) {
-        itemIndex = 0;
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      const pagedData: Record<number, any> = {};
+      let allFetchedData: any[] = [];
+      let itemIndex: any = { zeroBasedIndex: 0 };
+
+      if (withGridPosition) {
+        try {
+          await this.setDateRangeSessionContext(trx, filters || {});
+
+          // Nilai pembanding diambil dari VIEW, bukan dari insertData: sortBy
+          // bisa menunjuk kolom turunan (relasi_text/bank_text/...) yang tidak
+          // ada di payload insert, dan insertData[sortBy] yang undefined
+          // membuat perbandingannya selalu gagal.
+          const existingData = await trx(`${this.viewName} as u`)
+            .where('u.id', newItem.id)
+            .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+            .first();
+
+          const totalRecords = await trx(`${this.viewName} as u`)
+            .count('u.id as total')
+            .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+            .first();
+          const totalItems = Number(totalRecords?.total ?? 0);
+
+          let posisi = 1;
+          if (existingData) {
+            const resultposition = await trx(`${this.viewName} as u`)
+              .count('* as posisi')
+              .where((qb: any) => {
+                qb.where(
+                  `u.${sortColumn}`,
+                  sortDir === 'desc' ? '>' : '<',
+                  existingData[sortColumn],
+                ).orWhere((q: any) =>
+                  q
+                    .where(`u.${sortColumn}`, existingData[sortColumn])
+                    .andWhere('u.id', '<=', newItem.id),
+                );
+              })
+              .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+              .first();
+            posisi = Number(resultposition?.posisi ?? 0) || 1;
+          }
+
+          pageNumber = Math.ceil(posisi / limit);
+          const totalPages = Math.ceil(totalItems / limit);
+          fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+          const startPage = fetchedPages[0];
+          const endPage = fetchedPages[fetchedPages.length - 1];
+          const customOffset = (startPage - 1) * limit;
+          const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+          const findAllResult = await this.findAll(
+            {
+              search: search || '',
+              filters: filters || {},
+              pagination: {
+                page: startPage,
+                limit: totalDataNeeded,
+                customOffset,
+              },
+              sort: { sortBy: sortColumn, sortDirection: sortDir },
+              isLookUp: false,
+              useCustomOffset: true,
+            },
+            trx,
+          );
+
+          allFetchedData = findAllResult?.data ?? [];
+          let dataIndex = 0;
+          fetchedPages.forEach((pageNum) => {
+            pagedData[pageNum] = allFetchedData.slice(
+              dataIndex,
+              dataIndex + limit,
+            );
+            dataIndex += limit;
+          });
+
+          itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+        } catch (posErr: any) {
+          console.warn(
+            'penerimaanheader: komputasi posisi pasca-simpan gagal (non-fatal):',
+            posErr?.message,
+          );
+        }
       }
-
-      const pageNumber = Math.floor(itemIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-
-      // Ambil data hingga halaman yang mencakup item baru
-      const limitedItems = filteredItems.slice(0, endIndex);
-
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
+      // ============ END GET POSITION ============
 
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: `ADD PENERIMAAN HEADER`,
           idtrans: newItem.id,
-          nobuktitrans: newItem.id,
+          nobuktitrans: newItem.nobukti,
           aksi: 'ADD',
           datajson: JSON.stringify(newItem),
           modifiedby: newItem.modifiedby,
@@ -467,69 +671,85 @@ export class PenerimaanheaderService implements OnModuleInit {
         trx,
       );
 
+      // Hanya tulis cache saat window-nya benar-benar dihitung; tanpa guard ini
+      // pemanggilan bersarang menimpa page-1 dengan array kosong.
+      if (withGridPosition) {
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      }
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
         dataDetail,
       };
     } catch (error) {
+      // HttpException diteruskan apa adanya; dibungkus `new Error(...)` di sini,
+      // statusCode + pesan validasinya hilang dan controller cuma menerima
+      // Error biasa sehingga user selalu dapat 500 generik.
+      if (error instanceof HttpException) {
+        throw error;
+      }
       throw new Error(`Error: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: any,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
+      const { page = 1, customOffset } = pagination ?? {};
+      let limit = pagination?.limit ?? 0;
+      const safeFilters = filters || {};
 
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+      await this.setDateRangeSessionContext(trx, safeFilters);
+
+      // Total dihitung DENGAN filter yang sama seperti datanya; sebelumnya
+      // COUNT jalan tanpa filter (dan dari tabel base) sehingga totalPages grid
+      // selalu memakai jumlah seluruh tabel.
+      const countResult = await trx(`${this.viewName} as u`)
+        .count('u.id as total')
+        .modify((qb: any) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
       if (isLookUp) {
-        const acoCountResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const acoCount = acoCountResult?.total || 0;
-
-        if (Number(acoCount) > 500) {
-          return { data: { type: 'json' } };
-        } else {
-          limit = 0;
+        if (total > 500) {
+          return {
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
+            },
+          };
         }
+        limit = 0;
       }
 
-      const tempUrl = `##temp_url_${Math.random().toString(36).substring(2, 8)}`;
-
-      await trx.schema.createTable(tempUrl, (t) => {
-        t.integer('id').nullable();
-        t.string('nobukti').nullable();
-        t.text('link').nullable();
-      });
-      const url = 'jurnalumumheader';
-
-      await trx(tempUrl).insert(
-        trx
-          .select(
-            'u.id',
-            'u.nobukti',
-            trx.raw(`
-              STRING_AGG(
-                '<a target="_blank" className="link-color" href="/dashboard/${url}' + ${tandatanya} + 'nobukti=' + u.nobukti + '">' +
-                '<HighlightWrapper value="' + u.nobukti + '" />' +
-                '</a>', ','
-              ) AS link
-            `),
-          )
-          .from(this.tableName + ' as u')
-          .groupBy('u.id', 'u.nobukti'),
-      );
-      const query = trx(`${this.tableName} as u`)
+      const query = trx(`${this.viewName} as u`)
         .select([
-          'u.id as id',
+          'u.id',
           'u.nobukti',
           trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
           'u.relasi_id',
@@ -545,122 +765,72 @@ export class PenerimaanheaderService implements OnModuleInit {
           'u.statusformat',
           'u.info',
           'u.modifiedby',
-          'ap.keterangancoa as coakasmasuk_nama',
-          'r.nama as relasi_nama',
-          'b.nama as bank_nama',
-          'ab.nama as alatbayar_nama',
           trx.raw(
             "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
           ),
           trx.raw(
             "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
           ),
-          'tempUrl.link',
+          'u.relasi_text',
+          'u.bank_text',
+          'u.coakasmasuk_text',
+          'u.alatbayar_text',
+          'u.link',
         ])
-        .leftJoin('akunpusat as ap', 'u.coakasmasuk', 'ap.coa')
-        .innerJoin(
-          trx.raw(`${tempUrl} as tempUrl`),
-          'u.nobukti',
-          'tempUrl.nobukti',
-        )
-        .leftJoin('relasi as r', 'u.relasi_id', 'r.id')
-        .leftJoin('bank as b', 'u.bank_id', 'b.id')
-        .leftJoin('alatbayar as ab', 'u.alatbayar_id', 'ab.id');
+        .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
-      // Filter tanggal jika ada
-      if (filters?.tglDari && filters?.tglSampai) {
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
-        ]);
+      // Urutan HARUS deterministik: tanpa tiebreaker, offset/limit bisa
+      // memulangkan baris yang sama di dua halaman berbeda saat grid menggeser
+      // window.
+      query.orderBy(`u.${sortBy}`, sortDirection);
+      if (sortBy !== 'id') {
+        query.orderBy('u.id', 'asc');
       }
 
-      const excludeSearchKeys = ['tglDari', 'tglSampai'];
+      // buildPagedResult mengambil BEBERAPA halaman sekaligus (limit =
+      // totalDataNeeded) tapi offsetnya harus tetap dihitung per ukuran
+      // halaman. Tanpa cabang customOffset, offset jadi
+      // (startPage-1)*totalDataNeeded — melewati akhir data begitu startPage > 1.
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
+
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
-      }
-
-      // Field yang bisa dicari
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k) && filters![k],
-      );
-
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-          });
-        });
-      }
-
-      // Filtering berdasarkan kolom tabel
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            if (key === 'tglDari' || key === 'tglSampai') continue;
-            if (value) {
-              if (
-                key === 'created_at' ||
-                key === 'updated_at' ||
-                key === 'tgllunas' ||
-                key === 'tglbukti'
-              ) {
-                query.andWhereRaw(
-                  "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
-                  [key, `%${sanitizedValue}%`],
-                );
-              } else if (key === 'relasi_nama') {
-                query.andWhere(`r.nama`, 'like', `%${sanitizedValue}%`);
-              } else if (key === 'bank_nama') {
-                query.andWhere(`b.nama`, 'like', `%${sanitizedValue}%`);
-              } else if (key === 'alatbayar_nama') {
-                query.andWhere(`ab.nama`, 'like', `%${sanitizedValue}%`);
-              } else {
-                query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-              }
-            }
-          }
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
+        query.offset(offset).limit(limit);
       }
 
       const data = await query;
-
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error fetching data:', error);
+      console.error('Error to findAll Penerimaan Header', error);
       throw new Error('Failed to fetch data');
     }
   }
 
-  async update(id: any, data: any, trx: any) {
+  async update(id: any, data: any, trx: any, options: WriteOptions = {}) {
+    const { withGridPosition = true } = options;
     try {
       data.tglbukti = formatDateToSQL(String(data?.tglbukti)); // Fungsi untuk format
 
+      // Kolom tampilan ikut dibuang di sini: grid sekarang mengirim `<x>_text`
+      // (kolom view), sementara payload lama memakai `<x>_nama`. Keduanya
+      // didestrukturisasi supaya form versi lama pun tidak menyelipkan kolom
+      // yang tidak ada di tabel ke dalam UPDATE. `isreload` juga: grid
+      // menyebar state filter ke body simpan, dan itu bukan kolom tabel.
       const {
         sortBy,
         sortDirection,
@@ -668,12 +838,18 @@ export class PenerimaanheaderService implements OnModuleInit {
         search,
         page,
         limit,
+        isreload,
         relasi_nama,
         bank_nama,
         alatbayar_nama,
         coakasmasuk_nama,
         daftarbank_nama,
         coakredit_nama,
+        relasi_text,
+        bank_text,
+        alatbayar_text,
+        coakasmasuk_text,
+        link,
         penerimaan_nobukti,
         details,
         ...insertData
@@ -697,18 +873,21 @@ export class PenerimaanheaderService implements OnModuleInit {
           insertData[field] = insertData[field].toUpperCase();
         }
       });
-      const formatpenerimaan = await trx(`bank as b`)
-        .select('p.grp', 'p.subgrp', 'b.formatpenerimaan', 'b.coa')
-        .leftJoin('parameter as p', 'p.id', 'b.formatpenerimaan')
-        .where('b.id', insertData.bank_id)
-        .first();
+      const formatpenerimaan = await this.resolveFormatPenerimaan(
+        trx,
+        insertData.bank_id,
+      );
       const existingData = await trx(this.tableName).where('id', id).first();
+      if (!existingData) {
+        throw new HttpException(
+          { statusCode: 400, message: 'Data Not Found!' },
+          400,
+        );
+      }
       const hasChanges = this.utilsService.hasChanges(insertData, existingData);
       const jurnalUmumData = await trx('jurnalumumheader')
         .where('nobukti', existingData.nobukti)
         .first();
-      console.log(jurnalUmumData, 'jurnalUmumData');
-      console.log(existingData, 'existingData');
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
 
@@ -770,55 +949,131 @@ export class PenerimaanheaderService implements OnModuleInit {
         details: result,
       };
 
-      const updatedJurnalUmum = await this.jurnalumumheaderService.update(
-        jurnalUmumData.id,
-        requestJurnalUmum,
-        trx,
-        { withGridPosition: false },
-      );
-      // Check each detail, update or set id accordingly
-
-      // If there are details, call the service to handle create or update
-
-      const { data: filteredItems } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
-        },
-        trx,
-      );
-      console.log(filteredItems, 'filteredItems');
-      // Cari index item baru di hasil yang sudah difilter
-      let itemIndex = filteredItems.findIndex(
-        (item) => String(item.id) === String(id),
-      );
-      console.log(itemIndex, 'itemIndex');
-      console.log(id, 'id');
-      if (itemIndex === -1) {
-        itemIndex = 0;
+      // Jurnalnya boleh belum ada (bukti lama yang dibuat sebelum posting
+      // jurnal otomatis); tanpa guard ini update-nya melempar "Cannot read
+      // properties of undefined (reading 'id')".
+      if (jurnalUmumData) {
+        await this.jurnalumumheaderService.update(
+          jurnalUmumData.id,
+          requestJurnalUmum,
+          trx,
+          { withGridPosition: false },
+        );
+      } else {
+        await this.jurnalumumheaderService.create(
+          {
+            ...requestJurnalUmum,
+            nobukti: existingData.nobukti,
+            postingdari: existingData.postingdari,
+            statusformat: existingData.statusformat,
+          },
+          trx,
+          { withGridPosition: false },
+        );
       }
 
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      const endIndex = pageNumber * limit;
+      // ============ GET POSITION ============
+      const pageLimit = Number(limit) > 0 ? Number(limit) : 10;
+      const sortColumn = sortBy || 'nobukti';
+      const sortDir =
+        String(sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-      // Ambil data hingga halaman yang mencakup item baru
-      const limitedItems = filteredItems.slice(0, endIndex);
+      let pageNumber = 1;
+      let fetchedPages: number[] = [1];
+      const pagedData: Record<number, any> = {};
+      let allFetchedData: any[] = [];
+      let itemIndex: any = { zeroBasedIndex: 0 };
 
-      // Simpan ke Redis
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
+      if (withGridPosition) {
+        try {
+          await this.setDateRangeSessionContext(trx, filters || {});
+
+          const positionRow = await trx(`${this.viewName} as u`)
+            .where('u.id', id)
+            .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+            .first();
+
+          const totalRecords = await trx(`${this.viewName} as u`)
+            .count('u.id as total')
+            .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+            .first();
+          const totalItems = Number(totalRecords?.total ?? 0);
+
+          let posisi = 1;
+          if (positionRow) {
+            const resultposition = await trx(`${this.viewName} as u`)
+              .count('* as posisi')
+              .where((qb: any) => {
+                qb.where(
+                  `u.${sortColumn}`,
+                  sortDir === 'desc' ? '>' : '<',
+                  positionRow[sortColumn],
+                ).orWhere((q: any) =>
+                  q
+                    .where(`u.${sortColumn}`, positionRow[sortColumn])
+                    .andWhere('u.id', '<=', id),
+                );
+              })
+              .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+              .first();
+            posisi = Number(resultposition?.posisi ?? 0) || 1;
+          }
+
+          pageNumber = Math.ceil(posisi / pageLimit);
+          const totalPages = Math.ceil(totalItems / pageLimit);
+          fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+          const startPage = fetchedPages[0];
+          const endPage = fetchedPages[fetchedPages.length - 1];
+          const customOffset = (startPage - 1) * pageLimit;
+          const totalDataNeeded = (endPage - startPage + 1) * pageLimit;
+
+          const result = await this.findAll(
+            {
+              search: search || '',
+              filters: filters || {},
+              pagination: {
+                page: startPage,
+                limit: totalDataNeeded,
+                customOffset,
+              },
+              sort: { sortBy: sortColumn, sortDirection: sortDir },
+              isLookUp: false,
+              useCustomOffset: true,
+            },
+            trx,
+          );
+
+          allFetchedData = result?.data ?? [];
+          let dataIndex = 0;
+          fetchedPages.forEach((pageNum) => {
+            pagedData[pageNum] = allFetchedData.slice(
+              dataIndex,
+              dataIndex + pageLimit,
+            );
+            dataIndex += pageLimit;
+          });
+
+          itemIndex = calculateItemIndex(
+            Number(posisi),
+            fetchedPages,
+            pageLimit,
+          );
+        } catch (posErr: any) {
+          console.warn(
+            'penerimaanheader: komputasi posisi pasca-simpan gagal (non-fatal):',
+            posErr?.message,
+          );
+        }
+      }
+      // ============ END GET POSITION ============
 
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: `EDIT PENERIMAAN HEADER`,
           idtrans: id,
-          nobuktitrans: id,
+          nobuktitrans: existingData.nobukti,
           aksi: 'EDIT',
           datajson: JSON.stringify(data),
           modifiedby: data.modifiedby,
@@ -826,15 +1081,27 @@ export class PenerimaanheaderService implements OnModuleInit {
         trx,
       );
 
+      if (withGridPosition) {
+        await this.redisService.set(
+          `${this.tableName}-page-${pageNumber}`,
+          JSON.stringify(allFetchedData),
+        );
+      }
+
       return {
         updatedItem: {
           id,
           ...data,
         },
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       console.error('Error updating data:', error);
       throw new Error(`Error: ${error.message}`);
     }
@@ -857,15 +1124,37 @@ export class PenerimaanheaderService implements OnModuleInit {
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
+          postingdari: 'DELETE PENERIMAAN HEADER',
+          idtrans: id,
+          nobuktitrans: deletedData.nobukti,
+          aksi: 'DELETE',
+          datajson: JSON.stringify(deletedData),
+          modifiedby: modifiedby,
+        },
+        trx,
+      );
+
+      await this.logTrailService.create(
+        {
+          namatabel: 'penerimaandetail',
           postingdari: 'DELETE PENERIMAAN DETAIL',
-          idtrans: deletedDataDetail.id,
-          nobuktitrans: deletedDataDetail.id,
+          idtrans: id,
+          nobuktitrans: deletedData.nobukti,
           aksi: 'DELETE',
           datajson: JSON.stringify(deletedDataDetail),
           modifiedby: modifiedby,
         },
         trx,
       );
+
+      // Jurnalnya ikut dihapus: nobukti penerimaan adalah kunci jurnal umumnya,
+      // dan tanpa ini jurnal jadi yatim lalu ikut terhitung di laporan.
+      const jurnal = await trx('jurnalumumheader')
+        .where('nobukti', deletedData.nobukti)
+        .first();
+      if (jurnal) {
+        await this.jurnalumumheaderService.delete(jurnal.id, trx, modifiedby);
+      }
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
@@ -920,6 +1209,160 @@ export class PenerimaanheaderService implements OnModuleInit {
       console.error('Error fetching data:', error);
       throw new Error('Failed to fetch data');
     }
+  }
+
+  /**
+   * Data untuk LaporanPenerimaan.mrt: `data` (satu baris header + kolom
+   * tambahan judul/usercetak/tglcetak/terbilang) dan `detail` (rincian coa).
+   *
+   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
+   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi. findOne
+   * membaca tabel base + JOIN sendiri (bukan vpenerimaanheader), sehingga tidak
+   * bergantung pada GUC periode yang hanya hidup di dalam transaksi.
+   */
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data: headerRows } = await this.findOne(id, db);
+
+    if (!headerRows?.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const detailRes = await this.penerimaandetailService.findAll(
+      { filters: { nobukti: header.nobukti } },
+      db,
+    );
+    const details = detailRes.data ?? [];
+
+    // Dijumlahkan dalam satuan sen lalu dibagi 100: menjumlah float rupiah
+    // langsung meninggalkan sisa pembulatan yang membuat "terbilang" meleset
+    // satu rupiah.
+    const totalNominal =
+      details.reduce(
+        (sum: number, item: any) =>
+          sum + Math.round((Number(item.nominal) || 0) * 100),
+        0,
+      ) / 100;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: [
+        {
+          ...header,
+          judullaporan: judullaporan ?? 'Laporan Penerimaan',
+          usercetak: username,
+          tglcetak,
+          terbilang: numberToTerbilang(totalNominal),
+          judul: 'Bukti Penerimaan KAS EMKL',
+        },
+      ],
+      detail: details,
+    };
+  }
+
+  /**
+   * Data master satu bukti untuk blok info di atas tabel rincian. Dipakai juga
+   * untuk memberi nama file, jadi diambil SEBELUM job export dimulai supaya id
+   * yang tidak ada langsung balas 404, bukan gagal di tengah job.
+   *
+   * Membaca tabel base + JOIN sendiri (bukan vpenerimaanheader) supaya tidak
+   * bergantung pada GUC periode yang hanya hidup di dalam transaksi — export
+   * berjalan tanpa transaksi.
+   */
+  async loadExportBuktiHeader(id: string, db: any) {
+    const header = await db(`${this.tableName} as u`)
+      .select([
+        'u.nobukti',
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        'u.keterangan',
+        'u.postingdari',
+        'u.diterimadari',
+        'u.noresi',
+        'r.nama as relasi_text',
+        'b.nama as bank_text',
+        'ap.keterangancoa as coakasmasuk_text',
+      ])
+      .leftJoin('relasi as r', 'u.relasi_id', 'r.id')
+      .leftJoin('bank as b', 'u.bank_id', 'b.id')
+      .leftJoin('akunpusat as ap', 'u.coakasmasuk', 'ap.coa')
+      .where('u.id', String(id))
+      .first();
+
+    if (!header) {
+      throw new NotFoundException(`Penerimaan dengan id ${id} tidak ditemukan`);
+    }
+
+    return header;
+  }
+
+  /**
+   * Rincian satu bukti, urut sesuai urutan input. Dikembalikan sebagai query
+   * (bukan array) supaya ExportJobService bisa men-stream-nya lewat cursor.
+   */
+  buildExportBuktiQuery(nobukti: string, db: any) {
+    return db('vpenerimaandetail as d')
+      .select(['d.nobukti', 'd.keterangan', 'd.coa', 'd.coa_text', 'd.nominal'])
+      .where('d.nobukti', nobukti)
+      .orderBy('d.created_at', 'asc')
+      .orderBy('d.id', 'asc');
+  }
+
+  /** Jumlah baris rincian — dipakai untuk progres export yang nyata. */
+  async countExportBuktiRows(nobukti: string, db: any): Promise<number> {
+    const result = await db('vpenerimaandetail as d')
+      .count('d.id as total')
+      .where('d.nobukti', nobukti)
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /** Sheet export per transaksi: blok master di atas, rincian + TOTAL di bawah. */
+  buildExportBuktiSheet(header: any): ExportSheetDefinition {
+    return {
+      sheetName: 'Penerimaan',
+      titleLines: [
+        'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        'LAPORAN PENERIMAAN',
+        String(header.nobukti ?? ''),
+      ],
+      infoLines: [
+        { label: 'NO BUKTI', value: header.nobukti },
+        { label: 'TGL BUKTI', value: header.tglbukti },
+        { label: 'BANK / KAS', value: header.bank_text },
+        { label: 'COA KAS MASUK', value: header.coakasmasuk_text },
+        { label: 'RELASI', value: header.relasi_text },
+        { label: 'DITERIMA DARI', value: header.diterimadari },
+        { label: 'NO RESI', value: header.noresi },
+        { label: 'KETERANGAN', value: header.keterangan },
+      ],
+      headers: ['NO.', 'NO BUKTI', 'KETERANGAN', 'COA', 'NOMINAL'],
+      columnFormats: [
+        null,
+        null,
+        null,
+        null,
+        { numFmt: EXCEL_FORMAT.RUPIAH_DESIMAL },
+      ],
+      totalRow: { sumColumns: [4] },
+      mapRow: (row: any, rowNumber: number) => [
+        rowNumber,
+        row.nobukti,
+        row.keterangan,
+        row.coa_text,
+        row.nominal,
+      ],
+    };
   }
 
   async exportToExcel(data: any[], trx: any) {
