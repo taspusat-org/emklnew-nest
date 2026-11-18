@@ -31,10 +31,18 @@ import { Response } from 'express';
 import * as fs from 'fs';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { isRecordExist } from 'src/utils/utils.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportBankDto, ReportBankSchema } from './dto/report-bank.dto';
+import { ExportBankDto, ExportBankSchema } from './dto/export-bank.dto';
 
 @Controller('bank')
 export class BankController {
-  constructor(private readonly bankService: BankService) {}
+  constructor(
+    private readonly bankService: BankService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -163,6 +171,68 @@ export class BankController {
 
       throw new InternalServerErrorException('Failed to delete bank');
     }
+  }
+
+  /** Cetak LaporanBank.mrt di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  //@BANK
+  async report(
+    @Body(new ZodValidationPipe(ReportBankSchema)) body: ReportBankDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.bankService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /** Export Excel di background (streaming); file diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  //@BANK
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBankSchema)) body: ExportBankDto,
+  ) {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search: body.search,
+      filters: (body.filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: body.sortBy || 'nama',
+        sortDirection: (body.sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_bank_${stamp}.xlsx`,
+      countRows: () => this.bankService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.bankService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.bankService.exportSheet,
+    });
   }
 
   @Get('/export')

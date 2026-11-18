@@ -14,6 +14,7 @@ import {
   calculateItemIndex,
 } from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
+import { ExportSheetDefinition } from 'src/common/report/export-job.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
@@ -186,168 +187,7 @@ export class BankService {
         limit = 0;
       }
 
-      // build query
-      const query = trx
-        .from(`${this.tableName} as b`)
-        .select([
-          'b.id',
-          'b.nama',
-          'b.keterangan',
-          'b.coa',
-          'b.coagantung',
-          'a.keterangancoa as keterangancoa',
-          'a2.keterangancoa as keterangancoagantung',
-          'b.statusbank',
-          'b.statusaktif',
-          'b.statusdefault',
-          'b.formatpenerimaan',
-          'b.formatpengeluaran',
-          'b.formatpenerimaangantung',
-          'b.formatpengeluarangantung',
-          'b.formatpencairan',
-          'b.formatrekappenerimaan',
-          'b.formatrekappengeluaran',
-          'b.info',
-          'b.modifiedby',
-          trx.raw("TO_CHAR(b.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(b.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text',
-          'p2.text as textbank',
-          'p2.memo as statusbank_memo',
-          'p3.text as textdefault',
-          'p3.memo as statusdefault_memo',
-          'p4.text as formatpenerimaantext',
-          'p5.text as formatpengeluarantext',
-          'p6.text as formatpenerimaangantungtext',
-          'p7.text as formatpengeluarangantungtext',
-          'p8.text as formatpencairantext',
-          'p9.text as formatrekappenerimaantext',
-          'p10.text as formatrekappengeluarantext',
-        ])
-        .leftJoin('akunpusat as a', 'b.coa', 'a.coa')
-        .leftJoin('akunpusat as a2', 'b.coagantung', 'a2.coa')
-        .leftJoin('parameter as p', 'b.statusaktif', 'p.id')
-        .leftJoin('parameter as p2', 'b.statusbank', 'p2.id')
-        .leftJoin('parameter as p3', 'b.statusdefault', 'p3.id')
-        .leftJoin('parameter as p4', 'b.formatpenerimaan', 'p4.id')
-        .leftJoin('parameter as p5', 'b.formatpengeluaran', 'p5.id')
-        .leftJoin('parameter as p6', 'b.formatpenerimaangantung', 'p6.id')
-        .leftJoin('parameter as p7', 'b.formatpengeluarangantung', 'p7.id')
-        .leftJoin('parameter as p8', 'b.formatpencairan', 'p8.id')
-        .leftJoin('parameter as p9', 'b.formatrekappenerimaan', 'p9.id')
-        .leftJoin('parameter as p10', 'b.formatrekappengeluaran', 'p10.id');
-
-      const excludeSearchKeys = [
-        'statusbank',
-        'statusaktif',
-        'statusdefault',
-        'formatpenerimaan',
-        'formatpengeluaran',
-        'formatpenerimaangantung',
-        'formatpengeluarangantung',
-        'formatpencairan',
-        'formatrekappenerimaan',
-        'formatrekappengeluaran',
-        'coa',
-        'coagantung',
-      ];
-
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-
-      if (search) {
-        const sanitizedValue = String(search);
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-                field,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (field === 'keterangancoa') {
-              qb.orWhere('a.keterangancoa', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'keterangancoagantung') {
-              qb.orWhere('a2.keterangancoa', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'memo' || field === 'text') {
-              qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'textbank' || field === 'statusbank_memo') {
-              const col = field === 'textbank' ? 'text' : 'memo';
-              qb.orWhere(`p2.${col}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (
-              field === 'textdefault' ||
-              field === 'statusdefault_memo'
-            ) {
-              const col = field === 'textdefault' ? 'text' : 'memo';
-              qb.orWhere(`p3.${col}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpenerimaantext') {
-              qb.orWhere('p4.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpengeluarantext') {
-              qb.orWhere('p5.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpenerimaangantungtext') {
-              qb.orWhere('p6.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpengeluarangantungtext') {
-              qb.orWhere('p7.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpencairantext') {
-              qb.orWhere('p8.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatrekappenerimaantext') {
-              qb.orWhere('p9.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatrekappengeluarantext') {
-              qb.orWhere('p10.text', 'ilike', `%${sanitizedValue}%`);
-            } else {
-              qb.orWhere(`b.${field}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          });
-        });
-      }
-
-      // filter berdasarkan key yang valid
-      if (filters) {
-        for (const [key, rawValue] of Object.entries(filters)) {
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue; // Lewati filter jika key adalah 'tglDari' atau 'tglSampai'
-          }
-          if (!rawValue) continue;
-          const val = String(rawValue);
-
-          if (key === 'created_at' || key === 'updated_at') {
-            query.andWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-              key,
-              `%${val}%`,
-            ]);
-          } else if (key === 'text') {
-            query.andWhere(`b.statusaktif`, 'ilike', `%${val}%`);
-          } else if (key === 'memo') {
-            query.andWhere(`p.memo`, 'ilike', `%${val}%`);
-          } else if (key === 'textbank') {
-            query.andWhere(`b.statusbank`, 'ilike', `%${val}%`);
-          } else if (key === 'textdefault') {
-            query.andWhere(`b.statusdefault`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpenerimaantext') {
-            query.andWhere(`p4.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpengeluarantext') {
-            query.andWhere(`p5.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpenerimaangantungtext') {
-            query.andWhere(`p6.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpengeluarangantungtext') {
-            query.andWhere(`p7.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpencairantext') {
-            query.andWhere(`p8.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatrekappenerimaantext') {
-            query.andWhere(`p9.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatrekappengeluarantext') {
-            query.andWhere(`p10.text`, 'ilike', `%${val}%`);
-          } else if (key === 'keterangancoa') {
-            query.andWhere(`a.keterangancoa`, 'ilike', `%${val}%`);
-          } else if (key === 'keterangancoagantung') {
-            query.andWhere(`a2.keterangancoa`, 'ilike', `%${val}%`);
-          } else {
-            query.andWhere(`b.${key}`, 'ilike', `%${val}%`);
-          }
-        }
-      }
+      const query = this.buildBaseQuery(trx, search, filters);
 
       // Count ikut TERFILTER: clone query (join + where) tanpa select/order,
       // lalu COUNT. Penting agar totalPages pada windowed pagination akurat
@@ -360,11 +200,7 @@ export class BankService {
       const total = Number(countResult?.total ?? 0);
       const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
-      // Tiebreaker stabil agar urutan baris konsisten antar-halaman (offset/fetch)
-      query.orderBy('b.id', 'asc');
+      this.applySort(query, sort);
 
       // Offset window: pakai customOffset saat create/update menarik 5-halaman.
       const offset =
@@ -393,6 +229,185 @@ export class BankService {
       console.error('Error fetching bank data:', error);
       throw new Error('Failed to fetch bank data');
     }
+  }
+
+  private applySort(query: any, sort: FindAllParams['sort']) {
+    if (sort?.sortBy && sort?.sortDirection) {
+      query.orderBy(sort.sortBy, sort.sortDirection);
+    }
+    // Tiebreaker stabil agar urutan baris konsisten antar-halaman (offset/fetch)
+    query.orderBy('b.id', 'asc');
+  }
+
+  /** Join + search + filter grid; dipakai findAll dan export background. */
+  private buildBaseQuery(
+    trx: any,
+    search?: string,
+    filters?: Record<string, any>,
+  ) {
+    const query = trx
+      .from(`${this.tableName} as b`)
+      .select([
+        'b.id',
+        'b.nama',
+        'b.keterangan',
+        'b.coa',
+        'b.coagantung',
+        'a.keterangancoa as keterangancoa',
+        'a2.keterangancoa as keterangancoagantung',
+        'b.statusbank',
+        'b.statusaktif',
+        'b.statusdefault',
+        'b.formatpenerimaan',
+        'b.formatpengeluaran',
+        'b.formatpenerimaangantung',
+        'b.formatpengeluarangantung',
+        'b.formatpencairan',
+        'b.formatrekappenerimaan',
+        'b.formatrekappengeluaran',
+        'b.info',
+        'b.modifiedby',
+        trx.raw("TO_CHAR(b.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        trx.raw("TO_CHAR(b.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+        'p.memo',
+        'p.text',
+        'p2.text as textbank',
+        'p2.memo as statusbank_memo',
+        'p3.text as textdefault',
+        'p3.memo as statusdefault_memo',
+        'p4.text as formatpenerimaantext',
+        'p5.text as formatpengeluarantext',
+        'p6.text as formatpenerimaangantungtext',
+        'p7.text as formatpengeluarangantungtext',
+        'p8.text as formatpencairantext',
+        'p9.text as formatrekappenerimaantext',
+        'p10.text as formatrekappengeluarantext',
+      ])
+      .leftJoin('akunpusat as a', 'b.coa', 'a.coa')
+      .leftJoin('akunpusat as a2', 'b.coagantung', 'a2.coa')
+      .leftJoin('parameter as p', 'b.statusaktif', 'p.id')
+      .leftJoin('parameter as p2', 'b.statusbank', 'p2.id')
+      .leftJoin('parameter as p3', 'b.statusdefault', 'p3.id')
+      .leftJoin('parameter as p4', 'b.formatpenerimaan', 'p4.id')
+      .leftJoin('parameter as p5', 'b.formatpengeluaran', 'p5.id')
+      .leftJoin('parameter as p6', 'b.formatpenerimaangantung', 'p6.id')
+      .leftJoin('parameter as p7', 'b.formatpengeluarangantung', 'p7.id')
+      .leftJoin('parameter as p8', 'b.formatpencairan', 'p8.id')
+      .leftJoin('parameter as p9', 'b.formatrekappenerimaan', 'p9.id')
+      .leftJoin('parameter as p10', 'b.formatrekappengeluaran', 'p10.id');
+
+    const excludeSearchKeys = [
+      'statusbank',
+      'statusaktif',
+      'statusdefault',
+      'formatpenerimaan',
+      'formatpengeluaran',
+      'formatpenerimaangantung',
+      'formatpengeluarangantung',
+      'formatpencairan',
+      'formatrekappenerimaan',
+      'formatrekappengeluaran',
+      'coa',
+      'coagantung',
+    ];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search) {
+      const sanitizedValue = String(search);
+
+      query.where((qb) => {
+        searchFields.forEach((field) => {
+          if (['created_at', 'updated_at'].includes(field)) {
+            qb.orWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (field === 'keterangancoa') {
+            qb.orWhere('a.keterangancoa', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'keterangancoagantung') {
+            qb.orWhere('a2.keterangancoa', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'memo' || field === 'text') {
+            qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'textbank' || field === 'statusbank_memo') {
+            const col = field === 'textbank' ? 'text' : 'memo';
+            qb.orWhere(`p2.${col}`, 'ilike', `%${sanitizedValue}%`);
+          } else if (
+            field === 'textdefault' ||
+            field === 'statusdefault_memo'
+          ) {
+            const col = field === 'textdefault' ? 'text' : 'memo';
+            qb.orWhere(`p3.${col}`, 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatpenerimaantext') {
+            qb.orWhere('p4.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatpengeluarantext') {
+            qb.orWhere('p5.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatpenerimaangantungtext') {
+            qb.orWhere('p6.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatpengeluarangantungtext') {
+            qb.orWhere('p7.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatpencairantext') {
+            qb.orWhere('p8.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatrekappenerimaantext') {
+            qb.orWhere('p9.text', 'ilike', `%${sanitizedValue}%`);
+          } else if (field === 'formatrekappengeluarantext') {
+            qb.orWhere('p10.text', 'ilike', `%${sanitizedValue}%`);
+          } else {
+            qb.orWhere(`b.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    // filter berdasarkan key yang valid
+    if (filters) {
+      for (const [key, rawValue] of Object.entries(filters)) {
+        if (key === 'tglDari' || key === 'tglSampai') {
+          continue; // Lewati filter jika key adalah 'tglDari' atau 'tglSampai'
+        }
+        if (!rawValue) continue;
+        const val = String(rawValue);
+
+        if (key === 'created_at' || key === 'updated_at') {
+          query.andWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+            key,
+            `%${val}%`,
+          ]);
+        } else if (key === 'text') {
+          query.andWhere(`b.statusaktif`, 'ilike', `%${val}%`);
+        } else if (key === 'memo') {
+          query.andWhere(`p.memo`, 'ilike', `%${val}%`);
+        } else if (key === 'textbank') {
+          query.andWhere(`b.statusbank`, 'ilike', `%${val}%`);
+        } else if (key === 'textdefault') {
+          query.andWhere(`b.statusdefault`, 'ilike', `%${val}%`);
+        } else if (key === 'formatpenerimaantext') {
+          query.andWhere(`p4.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatpengeluarantext') {
+          query.andWhere(`p5.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatpenerimaangantungtext') {
+          query.andWhere(`p6.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatpengeluarangantungtext') {
+          query.andWhere(`p7.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatpencairantext') {
+          query.andWhere(`p8.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatrekappenerimaantext') {
+          query.andWhere(`p9.text`, 'ilike', `%${val}%`);
+        } else if (key === 'formatrekappengeluarantext') {
+          query.andWhere(`p10.text`, 'ilike', `%${val}%`);
+        } else if (key === 'keterangancoa') {
+          query.andWhere(`a.keterangancoa`, 'ilike', `%${val}%`);
+        } else if (key === 'keterangancoagantung') {
+          query.andWhere(`a2.keterangancoa`, 'ilike', `%${val}%`);
+        } else {
+          query.andWhere(`b.${key}`, 'ilike', `%${val}%`);
+        }
+      }
+    }
+
+    return query;
   }
 
   async update(id: string, data: any, trx: any) {
@@ -659,5 +674,83 @@ export class BankService {
     await workbook.xlsx.writeFile(tempFilePath);
 
     return tempFilePath;
+  }
+
+  /** Query export background: filter & sort sama dengan grid, tanpa paging. */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const query = this.buildBaseQuery(db, search, filters);
+    this.applySort(query, sort);
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await this.buildBaseQuery(db, search, filters)
+      .clearSelect()
+      .count('b.id as total')
+      .first();
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet: ExportSheetDefinition = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN BANK',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'KETERANGAN',
+      'COA',
+      'COA GANTUNG',
+      'STATUS BANK',
+      'STATUS AKTIF',
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+      row.keterangancoa,
+      row.keterangancoagantung,
+      row.textbank,
+      row.text,
+    ],
+  };
+
+  /** Data LaporanBank.mrt: seluruh baris yang lolos filter grid + kolom judul. */
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const result = await this.findAll(
+      { ...params, pagination: { page: 1, limit: 0 }, isLookUp: false },
+      db,
+    );
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    const rows = Array.isArray(result?.data) ? result.data : [];
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Bank',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
   }
 }

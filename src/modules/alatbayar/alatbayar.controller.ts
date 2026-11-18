@@ -37,15 +37,21 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 import { Response } from 'express';
 import * as fs from 'fs';
 import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
 import {
   ExportAlatbayarDto,
   ExportAlatbayarSchema,
 } from './dto/export-alatbayar.dto';
+import {
+  ReportAlatbayarDto,
+  ReportAlatbayarSchema,
+} from './dto/report-alatbayar.dto';
 @Controller('alatbayar')
 export class AlatbayarController {
   constructor(
     private readonly alatbayarService: AlatbayarService,
     private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -197,6 +203,38 @@ export class AlatbayarController {
 
       throw new InternalServerErrorException('Failed to delete alat bayar');
     }
+  }
+
+  /** Cetak LaporanAlatbayar.mrt di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  //@ALAT-BAYAR
+  async report(
+    @Body(new ZodValidationPipe(ReportAlatbayarSchema))
+    body: ReportAlatbayarDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.alatbayarService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
   }
 
   @UseGuards(AuthGuard)

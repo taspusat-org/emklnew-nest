@@ -384,20 +384,34 @@ export class ParameterService {
         .first();
       const total = Number(countResult?.total ?? 0);
 
-      const query = db(`${this.tableName} as p`).select(
-        'p.id',
-        'p.grp',
-        'p.subgrp',
-        'p.kelompok',
-        'p.text',
-        'p.memo',
-        'p.type',
-        'p.default',
-        'p.modifiedby',
-        'p.info',
-        db.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at"),
-        db.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at"),
-      );
+      // `type` menyimpan id parameter lain. Label gabungan grp/subgrp/text
+      // dipakai lookup TYPE: text saja tidak unik (banyak grup punya "YA").
+      const query = db(`${this.tableName} as p`)
+        .leftJoin(`${this.tableName} as t`, 't.id', 'p.type')
+        .select(
+          'p.id',
+          'p.grp',
+          'p.subgrp',
+          'p.kelompok',
+          'p.text',
+          'p.memo',
+          'p.type',
+          'p.default',
+          'p.modifiedby',
+          'p.info',
+          db.raw(
+            "CONCAT_WS(' - ', NULLIF(p.grp, ''), NULLIF(p.subgrp, ''), NULLIF(p.text, '')) AS lookuplabel",
+          ),
+          db.raw(
+            "CONCAT_WS(' - ', NULLIF(t.grp, ''), NULLIF(t.subgrp, ''), NULLIF(t.text, '')) AS type_nama",
+          ),
+          db.raw(
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') AS created_at",
+          ),
+          db.raw(
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') AS updated_at",
+          ),
+        );
 
       query.modify(applyScope);
 
@@ -464,7 +478,8 @@ export class ParameterService {
     const sortStr = JSON.stringify(sort);
     const notInStr = notIn ? JSON.stringify(notIn) : '';
 
-    return `${this.tableName}:list:${search}:${filterStr}:${sortStr}:${page}:${limit}:${isLookUp}:${exclude}:${notInStr}:${customOffset ?? ''}`;
+    // v2: baris kini membawa lookuplabel/type_nama; cache lama tidak punya.
+    return `${this.tableName}:list:v2:${search}:${filterStr}:${sortStr}:${page}:${limit}:${isLookUp}:${exclude}:${notInStr}:${customOffset ?? ''}`;
   }
 
   /**
