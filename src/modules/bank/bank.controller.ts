@@ -33,8 +33,8 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 import { isRecordExist } from 'src/utils/utils.service';
 import { ReportJobService } from 'src/common/report/report-job.service';
 import { ExportJobService } from 'src/common/report/export-job.service';
-import { ReportBankDto, ReportBankSchema } from './dto/report-bank.dto';
 import { ExportBankDto, ExportBankSchema } from './dto/export-bank.dto';
+import { ReportBankDto, ReportBankSchema } from './dto/report-bank.dto';
 
 @Controller('bank')
 export class BankController {
@@ -57,7 +57,6 @@ export class BankController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.bankService.create(data, trx);
-
       await trx.commit();
       return result;
     } catch (error) {
@@ -105,7 +104,19 @@ export class BankController {
       isLookUp: isLookUp === 'true',
     };
     // Endpoint baca: TANPA transaksi, lihat alatbayar.controller.ts.
-    return this.bankService.findAll(params, dbMssql);
+    // return this.bankService.findAll(params, dbMssql);
+
+    const trx = await dbMssql.transaction();
+    try {
+      const result = await this.bankService.findAll(params, trx);
+      trx.commit();
+
+      return result;
+    } catch (error) {
+      trx.rollback();
+      console.error('Error in findAll:', error);
+      throw error;
+    }
   }
 
   @UseGuards(AuthGuard)
@@ -122,7 +133,6 @@ export class BankController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.bankService.update(id, data, trx);
-
       await trx.commit();
       return result;
     } catch (error) {
@@ -130,6 +140,21 @@ export class BankController {
       console.error('Error updating Bank in controller:', error);
       if (error instanceof HttpException) {
         throw error; // If it's already a HttpException, rethrow it
+      }
+
+      const lockTimeout =
+        error?.number === 1222 ||
+        error?.originalError?.info?.number === 1222 ||
+        /lock request time out/i.test(error?.message ?? '');
+
+      if (lockTimeout) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.CONFLICT,
+            message: 'Data sedang diproses transaksi lain, silakan coba lagi.',
+          },
+          HttpStatus.CONFLICT,
+        );
       }
 
       // Generic error handling, if something unexpected happens
@@ -173,67 +198,86 @@ export class BankController {
     }
   }
 
-  /** Cetak LaporanBank.mrt di background; PDF diambil di GET /report/download/:jobId. */
   @UseGuards(AuthGuard)
-  @Post('report')
-  //@BANK
-  async report(
-    @Body(new ZodValidationPipe(ReportBankSchema)) body: ReportBankDto,
-    @Req() req,
-  ) {
-    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
-      body;
-    const username = req.user?.user?.username ?? 'unknown';
-
-    return this.reportJobService.start({
-      mrtName,
-      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
-      loadData: () =>
-        this.bankService.loadReportData(
-          {
-            search,
-            filters: (filters ?? {}) as Record<string, string | number>,
-            sort: {
-              sortBy: sortBy || 'nama',
-              sortDirection: sortDirection || 'asc',
+    @Post('report')
+    async report(
+      @Body(new ZodValidationPipe(ReportBankSchema))
+      body: ReportBankDto,
+      @Req() req,
+    ) {
+      const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+        body;
+  
+      const username = req.user?.user?.username ?? 'unknown';
+  
+      return this.reportJobService.start({
+        mrtName,
+        loadData: async () => {
+          const result = await this.bankService.findAll(
+            {
+              search,
+              filters: (filters ?? {}) as Record<string, string | number>,
+              pagination: { page: 1, limit: 0 },
+              sort: {
+                sortBy: sortBy || 'nama',
+                sortDirection: sortDirection || 'asc',
+              },
+              isLookUp: false,
             },
-          },
-          { username, judullaporan },
-          dbMssql,
-        ),
-    });
-  }
-
-  /** Export Excel di background (streaming); file diambil di GET /report/download/:jobId. */
-  @UseGuards(AuthGuard)
-  @Post('export')
-  //@BANK
-  async exportBackground(
-    @Body(new ZodValidationPipe(ExportBankSchema)) body: ExportBankDto,
-  ) {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const stamp =
-      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-
-    const queryParams = {
-      search: body.search,
-      filters: (body.filters ?? {}) as Record<string, string | number>,
-      sort: {
-        sortBy: body.sortBy || 'nama',
-        sortDirection: (body.sortDirection || 'asc') as 'asc' | 'desc',
-      },
-    };
-
-    return this.exportJobService.start({
-      filename: `laporan_bank_${stamp}.xlsx`,
-      countRows: () => this.bankService.countExportRows(queryParams, dbMssql),
-      streamRows: () =>
-        this.bankService.buildExportQuery(queryParams, dbMssql).stream(),
-      sheet: this.bankService.exportSheet,
-    });
-  }
+            dbMssql,
+          );
+  
+          const rows = Array.isArray(result?.data) ? result.data : [];
+  
+          const now = new Date();
+          const pad = (n: number) => String(n).padStart(2, '0');
+          const tglcetak =
+            `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+            `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  
+          return rows.map((row: any) => ({
+            ...row,
+            judullaporan: judullaporan ?? 'Laporan Bank',
+            usercetak: username,
+            tglcetak,
+            judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+          }));
+        },
+      });
+    }
+  
+    @UseGuards(AuthGuard)
+    @Post('export')
+    async exportBackground(
+      @Body(new ZodValidationPipe(ExportBankSchema))
+      body: ExportBankDto,
+    ) {
+      const { search, filters, sortBy, sortDirection } = body;
+  
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  
+      const queryParams = {
+        search,
+        filters: (filters ?? {}) as Record<string, string | number>,
+        sort: {
+          sortBy: sortBy || 'nama',
+          sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+        },
+      };
+  
+      return this.exportJobService.start({
+        filename: `laporan_bank_${stamp}.xlsx`,
+        countRows: () =>
+          this.bankService.countExportRows(queryParams, dbMssql),
+        streamRows: () =>
+          this.bankService.buildExportQuery(queryParams, dbMssql).stream(),
+        sheet: this.bankService.exportSheet,
+      });
+    }
 
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {
