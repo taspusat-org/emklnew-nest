@@ -95,7 +95,7 @@ export class AsuransiService {
       } else if (key === 'text' || key === 'memo') {
         qb.andWhere(`va.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhere(`CAST(va.${key} AS TEXT)`, 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere(`va.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
@@ -279,7 +279,7 @@ export class AsuransiService {
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
 
-      const countResult = await trx(`${this.tableName} as va`)
+      const countResult = await trx(`${this.viewName} as va`)
         .count('va.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
