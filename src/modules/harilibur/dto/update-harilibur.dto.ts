@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { parseDDMMYYYY } from 'src/utils/utils.service';
 import { z } from 'zod';
 
-export const UpdateOffdaySchema = z.object({
+export const UpdateHariliburSchema = z.object({
   date: z.preprocess((arg) => {
     if (typeof arg === 'string') {
       const parsedDate = parseDDMMYYYY(arg);
@@ -22,4 +22,4 @@ export const UpdateOffdaySchema = z.object({
     .min(1, { message: 'statusaktif is required' })
     .optional(),
 });
-export type UpdateOffdayDto = z.infer<typeof UpdateOffdaySchema>;
+export type UpdateHariliburDto = z.infer<typeof UpdateHariliburSchema>;
