@@ -340,7 +340,7 @@ export class BlDetailRincianService {
   }
 
   async findAll(
-    id: number,
+    id: string,
     trx: any,
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
   ) {
@@ -407,16 +407,16 @@ export class BlDetailRincianService {
       );
 
       if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
+        const sanitized = String(search).trim();
 
         query.where((qb) => {
           searchFields.forEach((field) => {
             if (field === 'nocontainer' || field === 'noseal') {
-              qb.orWhere(`q.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`q.${field}`, 'ilike', `%${sanitized}%`);
             } else if (pivotFields.includes(field)) {
-              qb.orWhere(`p.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`p.${field}`, 'ilike', `%${sanitized}%`);
             } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
             }
           });
         });
@@ -424,14 +424,14 @@ export class BlDetailRincianService {
 
       if (filters) {
         for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
+          const sanitizedValue = String(value);
           if (value) {
             if (key === 'nocontainer' || key === 'noseal') {
-              query.andWhere(`q.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`q.${key}`, 'ilike', `%${sanitizedValue}%`);
             } else if (pivotFields.includes(key)) {
-              query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
             } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }

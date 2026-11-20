@@ -169,27 +169,17 @@ export class BlHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Dulu di sini findAll dipanggil dengan limit: 0 (= TANPA LIMIT) hanya
+      // untuk mencari index baris baru lewat findIndex, lalu hasil potongannya
+      // ditulis ke Redis. Artinya setiap simpan menarik SELURUH baris hasil
+      // filter ke memori Node — di tabel 1 juta baris itu satu query raksasa
+      // plus JSON.stringify ratusan ribu baris. Blob Redis-nya pun tidak pernah
+      // dibaca siapa pun: GridBlHeader hanya memakai pageNumber & dataIndex dari
+      // response ini. Nilai yang dipulangkan tetap sama persis.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        newItem.id,
+        data,
       );
 
       return {
@@ -217,18 +207,23 @@ export class BlHeaderService {
     trx: any,
     filters: Record<string, any> | undefined,
   ): Promise<void> {
-    const punyaPeriode = Boolean(filters?.tglDari && filters?.tglSampai);
-    const tglDari = punyaPeriode
-      ? String(formatDateToSQL(String(filters!.tglDari)))
+    // Tiap batas berdiri SENDIRI. Versi sebelumnya baru mengisi GUC kalau
+    // tglDari DAN tglSampai dua-duanya ada (punyaPeriode), sehingga periode
+    // separuh terbuka diam-diam berubah jadi "tanpa filter" — di tabel besar itu
+    // berarti grid menghitung dan menyortir seluruh tabel. Sisi view-nya
+    // diperbaiki bersamaan di create-vbl-pg.sql.
+    const tglDari = filters?.tglDari
+      ? String(formatDateToSQL(String(filters.tglDari)))
       : '';
-    const tglSampai = punyaPeriode
-      ? String(formatDateToSQL(String(filters!.tglSampai)))
+    const tglSampai = filters?.tglSampai
+      ? String(formatDateToSQL(String(filters.tglSampai)))
       : '';
 
-    await trx.raw(`SELECT set_config('tas.bl_tgldari', ?, true)`, [tglDari]);
-    await trx.raw(`SELECT set_config('tas.bl_tglsampai', ?, true)`, [
-      tglSampai,
-    ]);
+    await trx.raw(
+      `SELECT set_config('tas.bl_tgldari', ?, true),
+              set_config('tas.bl_tglsampai', ?, true)`,
+      [tglDari, tglSampai],
+    );
   }
 
   // ─── Query dasar ───────────────────────────────────────────────────────────
@@ -332,7 +327,86 @@ export class BlHeaderService {
       case 'tujuankapal_text':
         return 'u.tujuankapal_nama';
       default:
-        return `u.${sortBy}`;
+        // Fallback wajib: create/update memanggil ini dengan payload yang
+        // kadang tidak membawa sortBy, dan `u.undefined` bikin query gagal.
+        return `u.${sortBy || 'nobukti'}`;
+    }
+  }
+
+  /**
+   * Posisi 1-based baris `id` pada urutan grid — dihitung lewat COUNT, bukan
+   * dengan menarik seluruh baris hasil filter ke memori lalu findIndex.
+   *
+   * Pemanggil WAJIB sudah memanggil setSessionContext di transaksi yang sama,
+   * karena hitungan ini membaca view.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any> | undefined,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const orderCol = this.resolveSortColumn(sortBy);
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const existingData = await this.baseQuery(trx)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await this.baseQuery(trx)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Halaman + index baris hasil simpan, untuk memposisikan ulang kursor grid.
+   *
+   * `dataIndex` di sini adalah index ABSOLUT 0-based di seluruh daftar
+   * terfilter — BUKAN index di dalam halaman. Itu memang kontrak yang dipakai
+   * GridBlHeader (lihat komentar di onSuccess-nya, yang menghitung
+   * `absoluteIndex - (logicalStartPage - 1) * limit`). Nilainya identik dengan
+   * findIndex versi lama; yang berubah hanya cara menghitungnya.
+   *
+   * Kegagalan di sini TIDAK boleh menggagalkan simpan yang sudah berhasil —
+   * ini cuma soal posisi kursor.
+   */
+  private async resolveGridPosition(
+    trx: any,
+    id: string,
+    data: any,
+  ): Promise<{ pageNumber: number; dataIndex: number }> {
+    const limit = Number(data?.limit) > 0 ? Number(data.limit) : 50;
+    try {
+      await this.setSessionContext(trx, data?.filters);
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        data?.filters,
+        data?.search,
+        data?.sortBy,
+        data?.sortDirection,
+      );
+
+      return {
+        pageNumber: Math.ceil(posisi / limit),
+        dataIndex: posisi - 1,
+      };
+    } catch (error) {
+      console.error(
+        `Simpan bl header ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
+        error?.message,
+      );
+      return { pageNumber: 1, dataIndex: 0 };
     }
   }
 
@@ -684,29 +758,12 @@ export class BlHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Lihat catatan yang sama di create(): posisi dihitung lewat COUNT,
+      // bukan dengan menarik seluruh hasil filter ke memori.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex(
-        (item) => item.id === updatedData.id,
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        updatedData.id,
+        data,
       );
 
       return {

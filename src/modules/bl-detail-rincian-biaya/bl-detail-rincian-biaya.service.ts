@@ -12,6 +12,31 @@ import { FindAllParams } from 'src/common/interfaces/all.interface';
 @Injectable()
 export class BlDetailRincianBiayaService {
   private readonly tableName: string = 'bldetailrincianbiaya';
+  // Tabel untuk TULIS, view untuk BACA — sama seperti bl-header/alatbayar.
+  private readonly viewName: string = 'vbldetailrincianbiaya';
+
+  // Grid mengirim key kolom saat sort, filter mengirim biayaemkl_text.
+  // 'nama' warisan era JOIN: dulu tanpa prefiks sehingga nyangkut ke
+  // biayaemkl.nama; di view kolomnya bernama biayaemkl_nama.
+  private readonly SORT_ALIAS: Record<string, string> = {
+    nama: 'u.biayaemkl_nama',
+    biayaemkl: 'u.biayaemkl_nama',
+    biayaemkl_text: 'u.biayaemkl_nama',
+    biayaemkl_nama: 'u.biayaemkl_nama',
+  };
+
+  private readonly SORT_COLUMNS = new Set([
+    'nobukti',
+    'bldetail_id',
+    'bldetail_nobukti',
+    'orderanmuatan_nobukti',
+    'nominal',
+    'biayaemkl_id',
+    'modifiedby',
+    'created_at',
+    'updated_at',
+    'id',
+  ]);
 
   constructor(
     private readonly utilsService: UtilsService,
@@ -257,19 +282,18 @@ export class BlDetailRincianBiayaService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      const query = trx(`${this.tableName} as u`)
+      const query = trx(`${this.viewName} as u`)
         .select(
           'u.id',
           'u.nobukti',
           'u.bldetail_id',
           'u.bldetail_nobukti',
           'u.orderanmuatan_nobukti',
-          'nominal',
-          'biayaemkl_id',
-          'p.nama as biayaemkl_nama',
+          'u.nominal',
+          'u.biayaemkl_id',
+          'u.biayaemkl_nama',
         )
-        .leftJoin('biayaemkl as p', 'u.biayaemkl_id', 'p.id')
-        .where('bldetail_id', id);
+        .where('u.bldetail_id', id);
 
       const excludeSearchKeys = [''];
       const searchFields = Object.keys(filters || {}).filter(
@@ -277,14 +301,14 @@ export class BlDetailRincianBiayaService {
       );
 
       if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
+        const sanitized = String(search).trim();
 
         query.where((qb) => {
           searchFields.forEach((field) => {
             if (field === 'biayaemkl_text') {
-              qb.orWhere(`p.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.biayaemkl_nama`, 'ilike', `%${sanitized}%`);
             } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
             }
           });
         });
@@ -292,23 +316,26 @@ export class BlDetailRincianBiayaService {
 
       if (filters) {
         for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
+          const sanitizedValue = String(value);
           if (value) {
             if (key === 'biayaemkl_text') {
-              query.andWhere(`p.nama`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.biayaemkl_nama`, 'ilike', `%${sanitizedValue}%`);
             } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }
       }
 
       if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'biayaemkl') {
-          query.orderBy(`p.nama`, sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
+        // Key di luar daftar (mis. kolom semu "nomor") jangan diteruskan ke
+        // SQL — Postgres membalas 42703 dan grid ikut 500.
+        const kolom =
+          this.SORT_ALIAS[sort.sortBy] ??
+          (this.SORT_COLUMNS.has(sort.sortBy)
+            ? `u.${sort.sortBy}`
+            : 'u.id');
+        query.orderBy(kolom, sort.sortDirection);
       }
 
       const result = await query;
@@ -367,7 +394,7 @@ export class BlDetailRincianBiayaService {
   }
 
   update(
-    id: number,
+    id: string,
     updateBlDetailRincianBiayaDto: UpdateBlDetailRincianBiayaDto,
   ) {
     return `This action updates a #${id} blDetailRincianBiaya`;

@@ -51,8 +51,8 @@ const baseDetailsFields = z.object({
   bl_id: z.string().nullable().optional(),
 
   bl_nobukti: z
-    .string({ message: 'NO BL CONECTING WAJIB DIISI' })
-    .nonempty({ message: 'NO BL CONECTING WAJIB DIISI' }),
+    .string({ message: 'NOMOR BL WAJIB DIISI' })
+    .nonempty({ message: 'NOMOR BL WAJIB DIISI' }),
 
   shippinginstructiondetail_nobukti: z
     .string({ message: 'SHIPPING INSTRUCTION DETAIL NO BUKTI WAJIB DIISI' })
