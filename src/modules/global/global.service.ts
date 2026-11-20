@@ -21,6 +21,11 @@ export class GlobalService {
     private moduleRef: ModuleRef,
   ) {}
 
+  // parameter.subgrp huruf besar (EMKL); tabel Postgres huruf kecil (emkl).
+  private resolveTableName(tableName: unknown): string {
+    return String(tableName ?? '').trim().toLowerCase();
+  }
+
   async checkData(data: any, trx: any) {
     // Validasi 1: Cek jika transaksi_id adalah array
     if (!Array.isArray(data.transaksi_id) || data.transaksi_id.length === 0) {
@@ -35,7 +40,7 @@ export class GlobalService {
       // ========================================
       // AMBIL DATA DARI TABLE UTAMA
       // ========================================
-      const mainData = await trx(data.tableName)
+      const mainData = await trx(this.resolveTableName(data.tableName))
         .whereIn('id', data.transaksi_id)
         .forUpdate(); // LOCK ROWS untuk mencegah concurrent modification
       console.log('mainData', mainData);
@@ -153,7 +158,7 @@ export class GlobalService {
       // ========================================
       // STEP 1: LOCK DATA DI TABLE UTAMA
       // ========================================
-      const lockedMainData = await trx(data.tableName)
+      const lockedMainData = await trx(this.resolveTableName(data.tableName))
         .whereIn('id', data.transaksi_id)
         .forUpdate(); // LOCK ROWS untuk mencegah concurrent modification
 
@@ -173,7 +178,7 @@ export class GlobalService {
           };
         } else {
           // Update statusaktif (data sudah di-lock)
-          await trx(data.tableName)
+          await trx(this.resolveTableName(data.tableName))
             .update({ statusaktif: data.value, updated_at })
             .whereIn('id', data.transaksi_id);
         }
@@ -269,7 +274,7 @@ export class GlobalService {
       // ========================================
       // STEP 1: LOCK DATA DI TABLE UTAMA
       // ========================================
-      const lockedMainData = await trx(data.tableName)
+      const lockedMainData = await trx(this.resolveTableName(data.tableName))
         .whereIn('id', data.transaksi_id)
         .forUpdate(); // LOCK ROWS untuk mencegah concurrent modification
 
@@ -289,7 +294,7 @@ export class GlobalService {
           };
         } else {
           // Update statusaktif (data sudah di-lock)
-          await trx(data.tableName)
+          await trx(this.resolveTableName(data.tableName))
             .update({ statusaktif: data.value, updated_at })
             .whereIn('id', data.transaksi_id);
         }

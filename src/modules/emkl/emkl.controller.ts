@@ -3,7 +3,7 @@ import {
   Get,
   Post,
   Body,
-  Patch,
+  Put,
   Param,
   Delete,
   UseGuards,
@@ -12,34 +12,35 @@ import {
   HttpStatus,
   UsePipes,
   Query,
-  InternalServerErrorException,
-  Put,
   NotFoundException,
+  InternalServerErrorException,
   Res,
 } from '@nestjs/common';
 import { EmklService } from './emkl.service';
-import {
-  CreateEmklDto,
-  CreateEmklSchema,
-  UpdateEmklDto,
-  UpdateEmklSchema,
-} from './dto/create-emkl.dto';
-import { AuthGuard } from '../auth/auth.guard';
+import { CreateEmklDto, CreateEmklSchema } from './dto/create-emkl.dto';
+import { UpdateEmklDto, UpdateEmklSchema } from './dto/update-emkl.dto';
 import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
-import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
-import { dbMssql } from 'src/common/utils/db';
-import { isRecordExist } from 'src/utils/utils.service';
-import { Response } from 'express';
-import * as fs from 'fs';
 import {
   FindAllDto,
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
-
+import { dbMssql } from 'src/common/utils/db';
+import { AuthGuard } from '../auth/auth.guard';
+import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
+import { Response } from 'express';
+import * as fs from 'fs';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportEmklDto, ExportEmklSchema } from './dto/export-emkl.dto';
+import { ReportEmklDto, ReportEmklSchema } from './dto/report-emkl.dto';
 @Controller('emkl')
 export class EmklController {
-  constructor(private readonly emklService: EmklService) {}
+  constructor(
+    private readonly emklService: EmklService,
+    private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -52,21 +53,22 @@ export class EmklController {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
+
       const result = await this.emklService.create(data, trx);
       await trx.commit();
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error while creating type emkl in controller', error);
+      console.error('Error while creating emkl in controller', error);
+
       if (error instanceof HttpException) {
-        throw error; // If it's already a HttpException, rethrow it
+        throw error;
       }
 
-      // Generic error handling, if something unexpected happens
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Failed to create type emkl',
+          message: 'Failed to create emkl',
         },
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
@@ -84,10 +86,12 @@ export class EmklController {
       sortBy: sortBy || 'nama',
       sortDirection: sortDirection || 'asc',
     };
+
     const pagination = {
       page: page || 1,
       limit: limit === 0 || !limit ? undefined : limit,
     };
+
     const params: FindAllParams = {
       search,
       filters,
@@ -95,55 +99,63 @@ export class EmklController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.emklService.findAll(params, trx);
-      trx.commit();
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error fetching all emkl:', error);
-      throw new InternalServerErrorException('Failed to fetch emkl');
-    }
+    // Endpoint baca: TANPA transaksi. Transaksi menahan satu koneksi pool
+    // selama seluruh request; dengan pool max 30 dan grid yang menembak banyak
+    // lookup sekaligus, pool habis dan semua request lain kena
+    // 'Timeout acquiring a connection'. dbMssql melepas koneksi per query.
+    return this.emklService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
-  @Put(':id')
+  @Put('update/:id')
   //@EMKL
   async update(
-    @Param('id') dataId: string,
-    @Body(new ZodValidationPipe(UpdateEmklSchema)) data: UpdateEmklDto,
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(UpdateEmklSchema))
+    data: UpdateEmklDto,
     @Req() req,
   ) {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
-      const result = await this.emklService.update(dataId, data, trx);
+      const result = await this.emklService.update(id, data, trx);
 
       await trx.commit();
       return result;
     } catch (error) {
       await trx.rollback();
       console.error('Error updating emkl in controller:', error);
-      // Ensure any other errors get caught and returned
-      if (error instanceof HttpException) {
-        throw error; // If it's already a HttpException, rethrow it
+
+      if (error instanceof HttpException) throw error;
+
+      const lockTimeout =
+        error?.number === 1222 ||
+        error?.originalError?.info?.number === 1222 ||
+        /lock request time out/i.test(error?.message ?? '');
+
+      if (lockTimeout) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.CONFLICT,
+            message: 'Data sedang diproses transaksi lain, silakan coba lagi.',
+          },
+          HttpStatus.CONFLICT,
+        );
       }
 
-      // Generic error handling, if something unexpected happens
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Failed to update emkl',
+          message: 'Failed to Update emkl',
         },
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
-
   @UseGuards(AuthGuard)
   @Delete(':id')
+
   //@EMKL
   async delete(@Param('id') id: string, @Req() req) {
     const trx = await dbMssql.transaction();
@@ -171,6 +183,71 @@ export class EmklController {
       throw new InternalServerErrorException('Failed to delete emkl');
     }
   }
+
+  /** Cetak LaporanEmkl.mrt di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  //@EMKL
+  async report(
+    @Body(new ZodValidationPipe(ReportEmklSchema))
+    body: ReportEmklDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.emklService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportEmklSchema))
+    body: ExportEmklDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_emkl_${stamp}.xlsx`,
+      countRows: () => this.emklService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.emklService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.emklService.exportSheet,
+    });
+  }
+
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {
     try {
@@ -190,55 +267,13 @@ export class EmklController {
       );
       res.setHeader(
         'Content-Disposition',
-        'attachment; filename="laporan_pelayaran.xlsx"',
+        'attachment; filename="laporan_emkl.xlsx"',
       );
 
       fileStream.pipe(res);
     } catch (error) {
       console.error('Error exporting to Excel:', error);
       res.status(500).send('Failed to export file');
-    }
-  }
-
-  @Get(':id')
-  async findOne(@Param('id') id: string) {
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.emklService.getById(id, trx);
-      if (!result) {
-        throw new Error('Data not found');
-      }
-
-      await trx.commit();
-      return result;
-    } catch (error) {
-      console.error('Error fetching data by id:', error);
-
-      await trx.rollback();
-      throw new Error('Failed to fetch data by id');
-    }
-  }
-
-  @Post('check-validation')
-  @UseGuards(AuthGuard)
-  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
-    const { aksi, value } = body;
-    const trx = await dbMssql.transaction();
-    const editedby = req.user?.user?.username;
-
-    try {
-      const forceEdit = await this.emklService.checkValidasi(
-        aksi,
-        value,
-        editedby,
-        trx,
-      );
-      trx.commit();
-      return forceEdit;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error checking validation:', error);
-      throw new InternalServerErrorException('Failed to check validation');
     }
   }
 }

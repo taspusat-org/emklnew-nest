@@ -6,15 +6,15 @@ import {
 } from '@nestjs/common';
 import { CreateEmklDto } from './dto/create-emkl.dto';
 import { RedisService } from 'src/common/redis/redis.service';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RelasiService } from '../relasi/relasi.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { GlobalService } from '../global/global.service';
 import { LocksService } from '../locks/locks.service';
 import { Workbook } from 'exceljs';
+import { toNumber } from 'src/utils/field-helpers';
 
 @Injectable()
 export class EmklService {
@@ -24,7 +24,6 @@ export class EmklService {
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
     private readonly relasiService: RelasiService,
-    private readonly globalService: GlobalService,
     private readonly locksService: LocksService,
   ) {}
   async create(createEmklDto: any, trx: any) {
@@ -38,11 +37,14 @@ export class EmklService {
         limit,
         statustrado_text,
         statusaktif_text,
+        relasi_text,
         id,
         ...insertData
       } = createEmklDto;
       insertData.updated_at = this.utilsService.getTime();
       insertData.created_at = this.utilsService.getTime();
+      // Form mengirim "2,221.00"; kolom numeric menolak koma ribuan.
+      if ('top' in insertData) insertData.top = toNumber(insertData.top);
 
       // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
       // status*, dan kolom FK lain) adalah identifier: mayoritas id master
@@ -174,6 +176,8 @@ export class EmklService {
       const query = trx(`${this.tableName} as emkl`)
         .select([
           'emkl.id as id',
+          'emkl.relasi_id as relasi_id',
+
           'emkl.nama',
           'emkl.contactperson',
           'emkl.alamat',
@@ -203,6 +207,7 @@ export class EmklService {
           'statusaktif.text as statusaktif_text',
           'statustrado.memo as statustrado_memo',
           'statustrado.text as statustrado_text',
+          'relasi.nama as relasi_text',
           'coagiro.keterangancoa as coagiro_ket',
           'coapiutang.keterangancoa as coapiutang_ket',
           'coahutang.keterangancoa as coahutang_ket',
@@ -219,6 +224,7 @@ export class EmklService {
           'emkl.statustrado',
           'statustrado.id',
         )
+        .leftJoin('relasi as relasi', 'emkl.relasi_id', 'relasi.id')
         .leftJoin(
           'parameter as statusaktif',
           'emkl.statusaktif',
@@ -242,10 +248,10 @@ export class EmklService {
         query.where((qb) => {
           searchFields.forEach((field) => {
             if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(emkl.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
-                field,
-                `%${sanitizedValue}%`,
-              ]);
+              qb.orWhereRaw(
+                "TO_CHAR(emkl.??, 'DD-MM-YYYY HH24:MI:SS') like ?",
+                [field, `%${sanitizedValue}%`],
+              );
             } else if (field === 'statusaktif_memo') {
               qb.orWhere('statusaktif.memo', 'like', `%${sanitizedValue}%`);
             } else if (field === 'statusaktif_text') {
@@ -380,10 +386,12 @@ export class EmklService {
         statusaktif_text,
         coagiro_ket,
         coahutang_ket,
+        relasi_text,
         coapiutang_ket,
         id,
         ...insertData
       } = data;
+      if ('top' in insertData) insertData.top = toNumber(insertData.top);
       // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
       // status*, dan kolom FK lain) adalah identifier: mayoritas id master
       // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
