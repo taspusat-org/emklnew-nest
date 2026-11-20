@@ -59,21 +59,23 @@ export class PanjarheaderService {
     filters: Record<string, any> | undefined,
     { withJenisOrder = true }: { withJenisOrder?: boolean } = {},
   ): Promise<void> {
-    const tglDari =
-      filters?.tglDari && filters?.tglSampai
-        ? formatDateToSQL(String(filters.tglDari))
-        : '';
-    const tglSampai =
-      filters?.tglDari && filters?.tglSampai
-        ? formatDateToSQL(String(filters.tglSampai))
-        : '';
+    // Tiap batas berdiri SENDIRI. Versi sebelumnya baru mengisi GUC kalau
+    // tglDari DAN tglSampai dua-duanya ada, sehingga periode separuh terbuka
+    // diam-diam berubah jadi "tanpa filter" — di tabel besar itu berarti grid
+    // menghitung dan menyortir seluruh tabel. Sisi view-nya diperbaiki bersamaan
+    // di create-vpanjar-pg.sql.
+    const tglDari = filters?.tglDari
+      ? String(formatDateToSQL(String(filters.tglDari)))
+      : '';
+    const tglSampai = filters?.tglSampai
+      ? String(formatDateToSQL(String(filters.tglSampai)))
+      : '';
 
-    await trx.raw(`SELECT set_config('tas.panjar_tgldari', ?, true)`, [
-      tglDari ? String(tglDari) : '',
-    ]);
-    await trx.raw(`SELECT set_config('tas.panjar_tglsampai', ?, true)`, [
-      tglSampai ? String(tglSampai) : '',
-    ]);
+    await trx.raw(
+      `SELECT set_config('tas.panjar_tgldari', ?, true),
+              set_config('tas.panjar_tglsampai', ?, true)`,
+      [tglDari, tglSampai],
+    );
 
     const jenisOrderId = withJenisOrder
       ? await this.resolveJenisOrderId(trx, filters?.jenisOrderan)
@@ -387,7 +389,7 @@ export class PanjarheaderService {
 
       // totalItems SELALU dihitung dengan filter yang sama seperti grid.
       const totalRecords = await this.baseQuery(trx)
-        .count('u.id as total')
+        .count('* as total')
         .modify((qb: any) => this.applyFilters(qb, filters, search))
         .first();
       const totalItems = Number(totalRecords?.total ?? 0);
@@ -451,7 +453,7 @@ export class PanjarheaderService {
       // tabel) membuat totalPages dan posisi baris ikut salah begitu ada filter
       // kolom / search aktif.
       const countResult = await this.baseQuery(trx)
-        .count('u.id as total')
+        .count('* as total')
         .modify((qb: any) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
@@ -633,7 +635,7 @@ export class PanjarheaderService {
     db: any,
   ): Promise<number> {
     const result = await db(`${this.viewName} as u`)
-      .count('u.id as total')
+      .count('* as total')
       .modify((qb: any) => this.applyExportScope(qb, filters, jenisOrderId))
       .modify((qb: any) => this.applyFilters(qb, filters, search))
       .first();
@@ -752,7 +754,7 @@ export class PanjarheaderService {
       );
 
       const totalRecords = await this.baseQuery(trx)
-        .count('u.id as total')
+        .count('* as total')
         .modify((qb: any) => this.applyFilters(qb, filters, search))
         .first();
       const totalItems = Number(totalRecords?.total ?? 0);
