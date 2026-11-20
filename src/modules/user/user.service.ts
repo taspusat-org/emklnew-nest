@@ -37,7 +37,7 @@ export class UserService {
     private readonly logTrailService: LogtrailService,
     private readonly globalService: GlobalService,
     private readonly locksService: LocksService,
-  ) { }
+  ) {}
 
   /**
    * Teks status (statusaktif_text/_memo) dan nama cabang sudah dirangkai di
@@ -140,6 +140,18 @@ export class UserService {
     });
   }
 
+  /**
+   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
+   * bantu dari frontend (sortBy, filters, namakaryawan, userId, text, dll)
+   * tidak ikut ditulis -> "Invalid column name". Uppercase HANYA kolom teks
+   * manusiawi: id, statusaktif, dan karyawan_id adalah uuid v7 HURUF KECIL,
+   * meng-uppercase-nya menulis id yang tidak ada sehingga lookup tampil kosong
+   * (lihat pengeluaranheader).
+   *
+   * `username` juga TIDAK di-uppercase walau berupa teks: login mencocokkannya
+   * dengan `where({ username })` yang case-sensitive di Postgres, jadi
+   * mengubah huruf saat simpan akan mengunci user dari akunnya sendiri.
+   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
@@ -217,6 +229,11 @@ export class UserService {
     return posisi > 0 ? posisi : 1;
   }
 
+  /**
+   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
+   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
+   * SELURUH tabel lalu findIndex seperti implementasi lama.
+   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
@@ -271,6 +288,12 @@ export class UserService {
     };
   }
 
+  /**
+   * Menyalin hak akses (useracl + userrole) dari `sourceUserId` ke
+   * `targetUserId`, lalu menyusun ulang string menu milik target sesuai
+   * ability hasil salinan. Dipakai create() maupun update() — dulu logikanya
+   * digandakan di kedua tempat.
+   */
   private async copyAccessFromUser(
     trx: any,
     targetUserId: string,
@@ -285,9 +308,9 @@ export class UserService {
     const abilityIds = userAccess.abilities.map((ability) => ability.id);
     const existingUserAclRecords = abilityIds.length
       ? await trx('useracl')
-        .where('user_id', targetUserId)
-        .whereIn('aco_id', abilityIds)
-        .select('aco_id')
+          .where('user_id', targetUserId)
+          .whereIn('aco_id', abilityIds)
+          .select('aco_id')
       : [];
     const existingAcoIds = new Set(
       existingUserAclRecords.map((record) => record.aco_id),
@@ -671,6 +694,7 @@ export class UserService {
     }
   }
 
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
   private readonly EXPORT_COLUMNS = [
     'u.username',
     'u.name',
@@ -678,6 +702,14 @@ export class UserService {
     'u.statusaktif_text as text',
   ];
 
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
   buildExportQuery(
     {
       search,
@@ -715,6 +747,7 @@ export class UserService {
     return Number(result?.total ?? 0);
   }
 
+  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
