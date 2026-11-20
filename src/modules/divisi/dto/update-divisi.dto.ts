@@ -3,11 +3,16 @@ import { z } from 'zod';
 
 export const UpdateDivisiSchema = z
   .object({
-    nama: z.string().trim(),
+    // id & statusaktif = varchar UUID, bukan angka. z.number() bikin
+    // self-exclude di isRecordExistCI meleset (id UUID != angka) sehingga edit
+    // tanpa ganti nama salah dianggap "nama sudah ada".
     id: z.string().optional(),
-    keterangan: z.string(),
-    statusaktif: z.string()
-      .min(0, { message: 'statusaktif must be a non-negative integer' }),
+    nama: z.string().min(1, { message: 'NAMA is required' }),
+    keterangan: z.string().trim().min(1, { message: 'KETERANGAN is required' }),
+
+    statusaktif: z.string().min(1, { message: 'Status Aktif is required' }),
+    text: z.string().nullable().optional(),
+
     info: z.string().nullable().optional(),
     modifiedby: z.string().nullable().optional(),
   })

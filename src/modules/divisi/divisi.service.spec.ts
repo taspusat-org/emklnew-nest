@@ -8,7 +8,9 @@ describe('DivisiService', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [DivisiService],
-    }).useMocker(autoMocker).compile();
+    })
+      .useMocker(autoMocker)
+      .compile();
 
     service = module.get<DivisiService>(DivisiService);
   });

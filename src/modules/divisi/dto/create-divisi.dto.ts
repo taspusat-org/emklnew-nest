@@ -15,9 +15,14 @@ export const CreateDivisiSchema = z.object({
         message: 'Divisi dengan dengan nama ini sudah ada',
       },
     ),
-  keterangan: z.string(),
-  statusaktif: z.string()
-    .min(0, { message: 'statusaktif must be a non-negative integer' }),
+  keterangan: z.string().trim().min(1, { message: 'KETERANGAN is required' }),
+
+  // statusaktif menyimpan id parameter (varchar UUID), bukan angka. Jangan
+  // z.number() — frontend mengirim id string sehingga z.number() menolaknya.
+  statusaktif: z.string().min(1, { message: 'Status Aktif is required' }),
+  text: z.string().nullable().optional(),
+
+  info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });
 

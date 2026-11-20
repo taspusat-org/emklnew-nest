@@ -10,7 +10,9 @@ describe('DivisiController', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [DivisiController],
       providers: [DivisiService],
-    }).useMocker(autoMocker).compile();
+    })
+      .useMocker(autoMocker)
+      .compile();
 
     controller = module.get<DivisiController>(DivisiController);
   });
