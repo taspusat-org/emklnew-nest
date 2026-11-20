@@ -128,6 +128,14 @@ export class TypeAkuntansiService {
     });
   }
 
+  /**
+   * Payload insert/update dibangun EKSPLISIT dari kolom tabel supaya field
+   * bantu dari frontend (sortBy, filters, statusaktif_text, akuntansi_nama,
+   * method, dll) tidak ikut ditulis -> "Invalid column name". Uppercase HANYA
+   * nama & keterangan: id, akuntansi_id, dan statusaktif adalah uuid v7 HURUF
+   * KECIL — meng-uppercase-nya menulis id yang tidak ada sehingga relasi
+   * akuntansi/status tampil kosong dan perubahan terlihat "tidak tersimpan".
+   */
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
@@ -169,6 +177,13 @@ export class TypeAkuntansiService {
     }
   }
 
+  /**
+   * Posisi (1-based) baris `id` pada dataset yang sedang tampil di grid:
+   * jumlah baris yang urutannya <= (asc) / >= (desc) baris tersebut, dengan
+   * filter + search yang sama. Nilai pembanding diambil MENTAH dari database
+   * (lewat alias `posval`), bukan dari hasil select yang sudah di-TO_CHAR,
+   * supaya sort kolom tanggal/angka dibandingkan sebagai tanggal/angka.
+   */
   private async resolvePosition(
     trx: any,
     id: string,
@@ -199,6 +214,11 @@ export class TypeAkuntansiService {
     return posisi > 0 ? posisi : 1;
   }
 
+  /**
+   * Rakit window halaman di sekitar `posisi` lalu balikan datanya per halaman.
+   * Satu kali findAll dengan customOffset, dipecah di memory — bukan menarik
+   * SELURUH tabel lalu findIndex seperti implementasi lama.
+   */
   private async buildPagedResult(
     trx: any,
     posisi: number,
