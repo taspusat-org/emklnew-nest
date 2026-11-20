@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  HttpException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import * as fs from 'fs';
@@ -38,11 +39,10 @@ export class ShippingInstructionService {
     private readonly runningNumberService: RunningNumberService,
     private readonly shippingInstructionDetailService: ShippingInstructionDetailService,
     private readonly shippingInstructionDetailRincianService: ShippingInstructionDetailRincianService,
-  ) { }
+  ) {}
 
   async create(data: any, trx: any) {
     try {
-
       const formattedTglBukti = formatDateToSQL(data.tglbukti);
       const updated_at = this.utilsService.getTime();
       const created_at = this.utilsService.getTime();
@@ -179,7 +179,7 @@ export class ShippingInstructionService {
         'Error process approval creating shipping instruction in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -650,7 +650,7 @@ export class ShippingInstructionService {
         'Error process approval update shipping instruction in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -710,7 +710,7 @@ export class ShippingInstructionService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -935,12 +935,8 @@ export class ShippingInstructionService {
         ...this.EXPORT_COLUMNS,
         db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
         db.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
-        db.raw(
-          "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-        ),
-        db.raw(
-          "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-        ),
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
       ])
       .modify((qb: any) => this.applyDateRange(qb, filters))
       .modify((qb: any) => this.applyFilters(qb, filters, search));

@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateEstimasiBiayaDetailInvoiceDto } from './dto/create-estimasi-biaya-detail-invoice.dto';
 import { UpdateEstimasiBiayaDetailInvoiceDto } from './dto/update-estimasi-biaya-detail-invoice.dto';
@@ -245,7 +245,7 @@ export class EstimasiBiayaDetailInvoiceService {
         'Error process creating estimasi biaya detail invoice in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -399,7 +399,7 @@ export class EstimasiBiayaDetailInvoiceService {
         'Error deleting data estimasi biaya detail invoice in service:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

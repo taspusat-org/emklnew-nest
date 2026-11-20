@@ -1,4 +1,5 @@
 import {
+  HttpException,
   Inject,
   Injectable,
   InternalServerErrorException,
@@ -1264,7 +1265,7 @@ export class OffdaysService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error; // Rethrow NotFoundException to return a 404 response
       }
       throw new InternalServerErrorException('Failed to delete data');

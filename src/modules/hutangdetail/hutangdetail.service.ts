@@ -23,6 +23,32 @@ export class HutangdetailService {
 
   private readonly logger = new Logger(HutangdetailService.name);
 
+  /**
+   * vhutangdetail memangkas barisnya sendiri lewat `tas.hutang_nobukti`, jadi
+   * satu bukti sudah tersaring SEBELUM LEFT JOIN akunpusat. Namanya sengaja
+   * ber-prefix `hutang_` (bukan `tas.nobukti` seperti vjurnalumumdetail) supaya
+   * tidak bertabrakan di transaksi yang menyentuh dua modul sekaligus.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi — findAll tetap
+   * memasang WHERE nobukti eksplisit untuk pemanggil tanpa trx (cetak/export).
+   */
+  private async setSessionContext(
+    trx: any,
+    filters: Record<string, any>,
+  ): Promise<void> {
+    if (filters?.nobukti) {
+      await trx.raw(`SELECT set_config('tas.hutang_nobukti', ?, true)`, [
+        String(filters.nobukti),
+      ]);
+    }
+  }
+
+  /**
+   * Kolom tabel hutangdetail (selain `id` yang diisi withUuidV7) — satu-satunya
+   * sumber kebenaran untuk INSERT maupun UPDATE, supaya kedua daftar kolom tidak
+   * lagi ditulis terpisah dan bisa menyimpang. Key kiriman frontend di luar
+   * daftar ini (mis. coa_text, aksi) dibuang.
+   */
   private buildDetailRow(
     row: any,
     hutangId: any,
@@ -64,7 +90,8 @@ export class HutangdetailService {
     // invalid input syntax for type numeric. Kosong → null (kolom nullable).
     const toNumeric = (value: any): number | null => {
       if (value === null || value === undefined || value === '') return null;
-      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      if (typeof value === 'number')
+        return Number.isFinite(value) ? value : null;
       const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
       return Number.isNaN(parsed) ? null : parsed;
     };
@@ -194,9 +221,10 @@ export class HutangdetailService {
             // Di view kolom ini sudah dinormalkan jadi DATE dan di select
             // diformat 'DD-MM-YYYY'; pakai format yang sama supaya yang dicari
             // = yang tampil di grid.
-            query.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
-              `%${sanitizedValue}%`,
-            ]);
+            query.orWhereRaw(
+              "TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?",
+              [`%${sanitizedValue}%`],
+            );
           } else if (field === 'nominal' || field === 'dpp') {
             // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
             // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
@@ -251,6 +279,8 @@ export class HutangdetailService {
   ) {
     const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
+    await this.setSessionContext(trx, filters || {});
+
     if (!filters?.nobukti) {
       // Bentuk balikan tetap lengkap (bukan cuma `{ data: [] }`) supaya grid
       // yang membaca pagination.totalItems saat header belum dipilih tidak
@@ -301,8 +331,12 @@ export class HutangdetailService {
           'p.nofakturpajakemkl',
           'p.info',
           'p.modifiedby',
-          trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'p.link',
         )
         .where('p.nobukti', safeFilters.nobukti);
@@ -343,7 +377,8 @@ export class HutangdetailService {
 
       const data = await query;
 
-      const totalPages = Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
       const responseType = total > 500 ? 'json' : 'local';
 
       if (!data.length) {

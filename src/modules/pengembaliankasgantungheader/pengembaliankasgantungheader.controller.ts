@@ -3,45 +3,50 @@ import {
   Get,
   Post,
   Body,
-  Patch,
   Param,
   Delete,
-  UsePipes,
   Query,
+  UsePipes,
   UseGuards,
   Req,
   Put,
-  Res,
+  InternalServerErrorException,
+  HttpException,
   HttpStatus,
 } from '@nestjs/common';
+
 import { PengembaliankasgantungheaderService } from './pengembaliankasgantungheader.service';
-import { CreatePengembaliankasgantungheaderDto } from './dto/create-pengembaliankasgantungheader.dto';
-import { UpdatePengembaliankasgantungheaderDto } from './dto/update-pengembaliankasgantungheader.dto';
-import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import {
   FindAllDto,
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
 import { dbMssql } from 'src/common/utils/db';
+import { ZodValidationPipe } from 'src/common/pipes/zod-validation.pipe';
 import { AuthGuard } from '../auth/auth.guard';
-import * as fs from 'fs';
-import { Response } from 'express';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportPengembaliankasgantungheaderDto,
+  ReportPengembaliankasgantungheaderSchema,
+} from './dto/report-pengembaliankasgantungheader.dto';
+import {
+  ExportPengembaliankasgantungheaderDto,
+  ExportPengembaliankasgantungheaderSchema,
+} from './dto/export-pengembaliankasgantungheader.dto';
 
 @Controller('pengembaliankasgantungheader')
 export class PengembaliankasgantungheaderController {
   constructor(
     private readonly pengembaliankasgantungheaderService: PengembaliankasgantungheaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
   @Post()
   //@PENGEMBALIAN-KAS-GANTUNG
-  async create(
-    @Body()
-    data: any,
-    @Req() req,
-  ) {
+  async create(@Body() data: any, @Req() req) {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
@@ -50,21 +55,45 @@ export class PengembaliankasgantungheaderController {
         data,
         trx,
       );
-
-      trx.commit();
+      await trx.commit();
       return result;
     } catch (error) {
-      trx.rollback();
-      throw new Error(`Error: ${error.message}`);
+      await trx.rollback();
+
+      // PENTING: jangan bungkus HttpException dengan Error baru — statusCode
+      // dan pesan validasinya hilang dan user selalu dapat 500 generik.
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
+
   @UseGuards(AuthGuard)
   @Get()
   //@PENGEMBALIAN-KAS-GANTUNG
   @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAll(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+  async findAll(@Query() query: any) {
+    // isreload dibuang di sini: sudah tak dipakai sejak findAll baca view,
+    // tapi frontend masih mengirimnya dan tak boleh ikut jadi filter kolom.
+    const {
+      search,
+      page,
+      limit,
+      sortBy,
+      sortDirection,
+      isLookUp,
+      isreload,
+      ...filters
+    } = query;
 
     const sortParams = {
       sortBy: sortBy || 'nobukti',
@@ -83,22 +112,23 @@ export class PengembaliankasgantungheaderController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
 
+    const trx = await dbMssql.transaction();
     try {
       const result = await this.pengembaliankasgantungheaderService.findAll(
         params,
         trx,
       );
-      trx.commit();
+      await trx.commit();
 
       return result;
     } catch (error) {
-      trx.rollback();
+      await trx.rollback();
       console.error('Error in findAll:', error);
       throw error; // Re-throw the error to be handled by the global exception filter
     }
   }
+
   @UseGuards(AuthGuard)
   @Put(':id')
   //@PENGEMBALIAN-KAS-GANTUNG
@@ -117,8 +147,19 @@ export class PengembaliankasgantungheaderController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error updating menu in controller:', error);
-      throw new Error('Failed to update menu');
+
+      if (error instanceof HttpException) {
+        throw error;
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || 'Internal server error',
+          error: 'Internal Server Error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -135,147 +176,147 @@ export class PengembaliankasgantungheaderController {
         modifiedby,
       );
 
-      trx.commit();
+      await trx.commit();
       return result;
     } catch (error) {
-      trx.rollback();
+      await trx.rollback();
       console.error('Error deleting pengembaliankasgantungheader:', error);
       throw new Error(
         `Error deleting pengembaliankasgantungheader: ${error.message}`,
       );
     }
   }
-  @Get('report-all')
+
+  /**
+   * POST /pengembaliankasgantungheader/report
+   *
+   * Cetak bukti pengembalian kas gantung di background. Request langsung balas
+   * { jobId }; progres render dikirim lewat socket namespace `/report` (event
+   * `report:progress`, room = jobId), dan PDF-nya diambil di
+   * GET /report/download/:jobId.
+   *
+   * Beda dengan laporan daftar yang mencetak seluruh baris hasil filter grid:
+   * LaporanPengembalianKasGantung.mrt adalah bukti PER TRANSAKSI, jadi yang
+   * dikirim frontend hanya id baris yang dicentang. Datanya dua tabel — `data`
+   * (header) dan `detail` (rincian) — sesuai datasource template.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportPengembaliankasgantungheaderSchema))
+    body: ReportPengembaliankasgantungheaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        // Sengaja TANPA transaksi: pembacaan murni untuk laporan, dan job-nya
+        // berumur panjang (render bisa menit-an). Membuka transaksi di sini
+        // hanya menahan koneksi database lebih lama tanpa manfaat konsistensi.
+        this.pengembaliankasgantungheaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  /**
+   * POST /pengembaliankasgantungheader/export
+   *
+   * Export Excel SATU bukti pengembalian kas gantung beserta rinciannya di
+   * background — cakupannya sama dengan cetak bukti, bukan daftar seluruh
+   * baris grid. Request langsung balas { jobId }; progresnya dikirim lewat
+   * socket namespace `/report` (kanal yang sama dengan cetak laporan), dan
+   * file-nya diambil di GET /report/download/:jobId.
+   *
+   * Sengaja TANPA transaksi: pembacaan murni untuk export, dan job-nya berumur
+   * panjang. Membuka transaksi di sini hanya menahan koneksi database.
+   */
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportPengembaliankasgantungheaderSchema))
+    body: ExportPengembaliankasgantungheaderDto,
+  ) {
+    const header =
+      await this.pengembaliankasgantungheaderService.loadExportBuktiHeader(
+        body.id,
+        dbMssql,
+      );
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const nobukti = String(header.nobukti ?? '').replace(
+      /[^A-Za-z0-9_-]+/g,
+      '',
+    );
+
+    return this.exportJobService.start({
+      filename: `pengembalian_kas_gantung_${nobukti}_${stamp}.xlsx`,
+      countRows: () =>
+        this.pengembaliankasgantungheaderService.countExportBuktiRows(
+          header.nobukti,
+          dbMssql,
+        ),
+      streamRows: () =>
+        this.pengembaliankasgantungheaderService
+          .buildExportBuktiQuery(header.nobukti, dbMssql)
+          .stream(),
+      sheet:
+        this.pengembaliankasgantungheaderService.buildExportBuktiSheet(header),
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('check-validation')
   //@PENGEMBALIAN-KAS-GANTUNG
-  @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAllReport(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+  async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
+    const { aksi, value } = body;
 
-    const sortParams = {
-      sortBy: sortBy || 'nobukti',
-      sortDirection: sortDirection || 'asc',
-    };
-
-    const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
-    };
-
-    const params: FindAllParams = {
-      search,
-      filters,
-      pagination,
-      sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
-      isLookUp: isLookUp === 'true',
-    };
     const trx = await dbMssql.transaction();
-
+    const editedby = req.user?.user?.username;
     try {
-      const result =
-        await this.pengembaliankasgantungheaderService.findAllReport(
-          params,
+      const forceEdit =
+        await this.pengembaliankasgantungheaderService.checkValidasi(
+          aksi,
+          value,
+          editedby,
           trx,
         );
-      trx.commit();
-
-      return result;
+      await trx.commit();
+      return forceEdit;
     } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
+      await trx.rollback();
+      console.error('Error checking validation:', error);
+      throw new InternalServerErrorException('Failed to check validation');
     }
   }
 
   @UseGuards(AuthGuard)
   @Get(':id')
-  //@KAS-GANTUNG
-  async findOne(@Param('id') id: string, @Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
-
-    const sortParams = {
-      sortBy: sortBy || 'nobukti',
-      sortDirection: sortDirection || 'asc',
-    };
-
-    const pagination = {
-      page: page || 1,
-      limit: limit === 0 || !limit ? undefined : limit,
-    };
-
-    const params: FindAllParams = {
-      search,
-      filters,
-      pagination,
-      sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
-    };
+  //@PENGEMBALIAN-KAS-GANTUNG
+  async findOne(@Param('id') id: string) {
     const trx = await dbMssql.transaction();
 
     try {
       const result = await this.pengembaliankasgantungheaderService.findOne(
-        params,
         id,
         trx,
       );
-      trx.commit();
+      await trx.commit();
 
       return result;
     } catch (error) {
-      trx.rollback();
+      await trx.rollback();
       console.error('Error in findOne:', error);
       throw error; // Re-throw the error to be handled by the global exception filter
-    }
-  }
-  @Get('/export/:id')
-  async exportToExcel(
-    @Param('id') id: string,
-    @Query() query: any,
-    @Res() res: Response,
-  ) {
-    try {
-      // Ambil data
-      const trx = await dbMssql.transaction();
-      const { data } = await this.pengembaliankasgantungheaderService.findOne(
-        query,
-        id,
-        trx,
-      );
-
-      if (!Array.isArray(data)) {
-        return res
-          .status(HttpStatus.BAD_REQUEST)
-          .send('Data is not an array or is undefined.');
-      }
-
-      // Buat Excel file
-      const tempFilePath =
-        await this.pengembaliankasgantungheaderService.exportToExcel(data, trx);
-
-      // Stream file ke response
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="laporan_pengembaliankasgantung.xlsx"',
-      );
-
-      const fileStream = fs.createReadStream(tempFilePath);
-      fileStream.pipe(res);
-
-      // Optional: hapus file temp setelah selesai streaming
-      fileStream.on('end', () => {
-        fs.unlink(tempFilePath, (err) => {
-          if (err) console.error('Error deleting temp file:', err);
-        });
-      });
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      return res
-        .status(HttpStatus.INTERNAL_SERVER_ERROR)
-        .send('Failed to export file');
     }
   }
 }

@@ -247,7 +247,7 @@ export class AkuntansiController {
       await trx.rollback();
       console.error('Error deleting akuntansi in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

@@ -1,6 +1,11 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { CreatePenerimaanheaderDto } from './create-penerimaanheader.dto';
+import { z } from 'zod';
+import { CreatePenerimaanheaderSchema } from './create-penerimaanheader.dto';
 
-export class UpdatePenerimaanheaderDto extends PartialType(
-  CreatePenerimaanheaderDto,
-) {}
+/**
+ * Aturan update sama dengan create: bank & tanggal bukti tetap wajib karena
+ * jurnalnya dirakit ulang dari kedua nilai itu pada setiap simpan.
+ */
+export const UpdatePenerimaanheaderSchema = CreatePenerimaanheaderSchema;
+export type UpdatePenerimaanheaderDto = z.infer<
+  typeof UpdatePenerimaanheaderSchema
+>;

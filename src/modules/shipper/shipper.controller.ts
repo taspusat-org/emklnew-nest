@@ -33,30 +33,53 @@ import {
 } from 'src/common/interfaces/all.interface';
 import { dbMssql } from 'src/common/utils/db';
 import { AuthGuard } from '../auth/auth.guard';
+import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { Response } from 'express';
 import * as fs from 'fs';
-
+import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import {
+  ExportShipperDto,
+  ExportShipperSchema,
+} from './dto/export-shipper.dto';
+import {
+  ReportShipperDto,
+  ReportShipperSchema,
+} from './dto/report-shipper.dto';
 @Controller('shipper')
 export class ShipperController {
-  constructor(private readonly shipperService: ShipperService) {}
+  constructor(
+    private readonly shipperService: ShipperService,
+    private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
   //@SHIPPER
-  @UsePipes(new ZodValidationPipe(CreateShipperSchema))
-  async create(@Body() data: CreateShipperDto, @Req() req) {
+  async create(
+    @Body(
+      new ZodValidationPipe(CreateShipperSchema),
+      KeyboardOnlyValidationPipe,
+    )
+    data: CreateShipperDto,
+    @Req() req,
+  ) {
     const trx = await dbMssql.transaction();
     try {
       data.modifiedby = req.user?.user?.username || 'unknown';
+
       const result = await this.shipperService.create(data, trx);
-      trx.commit();
+      await trx.commit();
       return result;
     } catch (error) {
-      trx.rollback();
+      await trx.rollback();
       console.error('Error while creating shipper in controller', error);
+
       if (error instanceof HttpException) {
         throw error;
       }
+
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
@@ -70,7 +93,7 @@ export class ShipperController {
   @Get()
   //@SHIPPER
   @UsePipes(new ZodValidationPipe(FindAllSchema))
-  async findAll(@Query() query: FindAllDto, @Req() req) {
+  async findAll(@Query() query: FindAllDto) {
     const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
       query;
 
@@ -91,18 +114,11 @@ export class ShipperController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-
-    try {
-      const result = await this.shipperService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
-    }
+    // Endpoint baca: TANPA transaksi. Transaksi menahan satu koneksi pool
+    // selama seluruh request; dengan pool max 30 dan grid yang menembak banyak
+    // lookup sekaligus, pool habis dan semua request lain kena
+    // 'Timeout acquiring a connection'. dbMssql melepas koneksi per query.
+    return this.shipperService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
@@ -110,7 +126,8 @@ export class ShipperController {
   //@SHIPPER
   async update(
     @Param('id') id: string,
-    @Body(new ZodValidationPipe(UpdateShipperSchema)) data: UpdateShipperDto,
+    @Body(new ZodValidationPipe(UpdateShipperSchema))
+    data: UpdateShipperDto,
     @Req() req,
   ) {
     const trx = await dbMssql.transaction();
@@ -124,24 +141,36 @@ export class ShipperController {
     } catch (error) {
       await trx.rollback();
       console.error('Error updating shipper in controller:', error);
-      // Ensure any other errors get caught and returned
-      if (error instanceof HttpException) {
-        throw error; // If it's already a HttpException, rethrow it
+
+      if (error instanceof HttpException) throw error;
+
+      const lockTimeout =
+        error?.number === 1222 ||
+        error?.originalError?.info?.number === 1222 ||
+        /lock request time out/i.test(error?.message ?? '');
+
+      if (lockTimeout) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.CONFLICT,
+            message: 'Data sedang diproses transaksi lain, silakan coba lagi.',
+          },
+          HttpStatus.CONFLICT,
+        );
       }
 
-      // Generic error handling, if something unexpected happens
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Failed to update shipper',
+          message: 'Failed to Update shipper ',
         },
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
-
   @UseGuards(AuthGuard)
   @Delete(':id')
+
   //@SHIPPER
   async delete(@Param('id') id: string, @Req() req) {
     const trx = await dbMssql.transaction();
@@ -160,20 +189,85 @@ export class ShipperController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error deleting shipper in controller:', error);
+      console.error('Error deleting shipper  in controller:', error);
 
       if (error instanceof HttpException) {
         throw error;
       }
 
-      throw new InternalServerErrorException('Failed to delete shipper');
+      throw new InternalServerErrorException('Failed to delete shipper ');
     }
   }
 
+  /** Cetak LaporanShipper.mrt di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  //@SHIPPER
+  async report(
+    @Body(new ZodValidationPipe(ReportShipperSchema))
+    body: ReportShipperDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.shipperService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportShipperSchema))
+    body: ExportShipperDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_shipper_${stamp}.xlsx`,
+      countRows: () =>
+        this.shipperService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.shipperService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.shipperService.exportSheet,
+    });
+  }
+
   @Get('/export')
-  async exportToExcel(@Query() params: any, @Res() res: Response, @Req() req) {
+  async exportToExcel(@Query() params: any, @Res() res: Response) {
     try {
-      const { data } = await this.findAll(params, req);
+      const { data } = await this.findAll(params);
 
       if (!Array.isArray(data)) {
         throw new Error('Data is not an array or is undefined.');
@@ -196,29 +290,6 @@ export class ShipperController {
     } catch (error) {
       console.error('Error exporting to Excel:', error);
       res.status(500).send('Failed to export file');
-    }
-  }
-
-  @UseGuards(AuthGuard)
-  @Get('/column')
-  async getShipperColumns() {
-    const trx = await dbMssql.transaction();
-    try {
-      const columns = await this.shipperService.findShipperColumns(trx);
-      return {
-        status: 'success',
-        total: columns.length,
-        data: columns,
-      };
-    } catch (error) {
-      console.error('Error in getShipperColumns controller:', error);
-      throw new HttpException(
-        {
-          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Failed to get shipper columns',
-        },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
     }
   }
 }

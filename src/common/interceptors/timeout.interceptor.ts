@@ -43,6 +43,22 @@ export class TimeoutInterceptor implements NestInterceptor {
 
       const timer = setTimeout(() => {
         if (settled) return;
+
+        // 408 adalah sebuah janji: transaksinya sudah di-rollback, jadi datanya
+        // PASTI tidak tersimpan — frontend menampilkan "DATA TIDAK TERSIMPAN"
+        // atas dasar itu. Begitu commit terlanjur dimulai, janji itu tidak bisa
+        // ditepati lagi. Jangan kirim 408; lepaskan timer dan biarkan handler
+        // menyelesaikan balasannya sendiri. Sinyal abort sengaja TIDAK dinyalakan
+        // supaya sisa kode setelah commit tidak berubah jadi error palsu, tapi
+        // transaksi lain yang masih terbuka tetap dilepas agar koneksi pool bebas.
+        if (store.commitAttempted) {
+          console.warn(
+            `[TIMEOUT] Batas ${timeoutMs}ms terlampaui, tetapi transaksi sudah masuk tahap commit — 408 tidak dikirim karena datanya mungkin sudah tersimpan`,
+          );
+          this.rollbackActiveTransactions(store);
+          return;
+        }
+
         settled = true;
 
         console.warn(

@@ -9,19 +9,24 @@ import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { LabaRugiKalkulasiService } from './laba-rugi-kalkulasi.service';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { LabaRugiKalkulasiController } from './laba-rugi-kalkulasi.controller';
-import { JurnalumumheaderModule } from '../jurnalumumheader/jurnalumumheader.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
-  controllers: [LabaRugiKalkulasiController],
-  providers: [LabaRugiKalkulasiService],
   imports: [
     JwtModule,
     AuthModule,
     RedisModule,
     LocksModule,
     UtilsModule,
-    GlobalModule,
     LogtrailModule,
+    LogtrailModule,
+    RunningNumberModule,
+    GlobalModule,
+    LocksModule,
+    ReportModule,
   ],
+  controllers: [LabaRugiKalkulasiController],
+  providers: [LabaRugiKalkulasiService],
+  exports: [LabaRugiKalkulasiService],
 })
 export class LabaRugiKalkulasiModule {}

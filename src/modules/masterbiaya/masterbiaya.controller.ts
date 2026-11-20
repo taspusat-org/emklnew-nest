@@ -175,7 +175,7 @@ export class MasterbiayaController {
       await trx.rollback();
       console.error('Error deleting Master Biaya in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

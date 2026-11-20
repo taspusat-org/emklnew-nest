@@ -5,19 +5,20 @@ import { UtilsModule } from 'src/utils/utils.module';
 import { RedisModule } from 'src/common/redis/redis.module';
 import { AuthModule } from '../auth/auth.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
-import { RelasiModule } from '../relasi/relasi.module';
-import { StatuspendukungModule } from '../statuspendukung/statuspendukung.module';
-
+import { RunningNumberModule } from '../running-number/running-number.module';
+import { ReportModule } from 'src/common/report/report.module';
 @Module({
   imports: [
     UtilsModule,
     RedisModule,
     AuthModule,
     LogtrailModule,
-    RelasiModule,
-    StatuspendukungModule,
+    RunningNumberModule,
+    // Menyediakan ExportJobService (export Excel background + socket progres).
+    ReportModule,
   ],
   controllers: [ShipperController],
   providers: [ShipperService],
+  exports: [ShipperService],
 })
 export class ShipperModule {}

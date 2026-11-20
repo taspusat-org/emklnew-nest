@@ -2,7 +2,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateErrorDto } from './dto/create-error.dto';
 import { dbMssql, dbMysqlTes } from 'src/common/utils/db';
@@ -709,7 +709,7 @@ export class ErrorService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

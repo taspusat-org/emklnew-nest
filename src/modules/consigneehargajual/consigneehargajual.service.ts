@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateConsigneehargajualDto } from './dto/create-consigneehargajual.dto';
 import { UpdateConsigneehargajualDto } from './dto/update-consigneehargajual.dto';
@@ -289,7 +289,7 @@ export class ConsigneehargajualService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

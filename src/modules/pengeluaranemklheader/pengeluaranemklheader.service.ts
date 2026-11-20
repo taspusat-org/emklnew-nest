@@ -3,7 +3,6 @@ import {
   HttpStatus,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
@@ -841,7 +840,7 @@ export class PengeluaranemklheaderService implements OnModuleInit {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

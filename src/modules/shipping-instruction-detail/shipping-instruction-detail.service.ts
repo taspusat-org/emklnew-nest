@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateShippingInstructionDetailDto } from './dto/create-shipping-instruction-detail.dto';
 import { UpdateShippingInstructionDetailDto } from './dto/update-shipping-instruction-detail.dto';
@@ -345,7 +345,7 @@ export class ShippingInstructionDetailService {
         'Error process creating shipping instruction detail in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -581,7 +581,7 @@ export class ShippingInstructionDetailService {
         'Error deleting data shipping instruction detail in service:',
         error,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

@@ -1,4 +1,5 @@
 import {
+  HttpException,
   Controller,
   Get,
   Post,
@@ -232,10 +233,7 @@ export class RoleController {
       await trx.rollback();
       console.error('Error deleting data in controller:', error);
 
-      if (
-        error instanceof NotFoundException ||
-        error instanceof BadRequestException
-      ) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

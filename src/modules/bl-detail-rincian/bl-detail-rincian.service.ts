@@ -1,7 +1,7 @@
 import {
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateBlDetailRincianDto } from './dto/create-bl-detail-rincian.dto';
 import { UpdateBlDetailRincianDto } from './dto/update-bl-detail-rincian.dto';
@@ -263,7 +263,7 @@ export class BlDetailRincianService {
         'Error process creating bl detail rincian in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -330,7 +330,7 @@ export class BlDetailRincianService {
         'Error to create temp pivot rincian biaya in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -483,7 +483,7 @@ export class BlDetailRincianService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data bl detail rincian in service:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

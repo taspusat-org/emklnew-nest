@@ -3,7 +3,6 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
 } from '@nestjs/common';
 import { UpdateOrderanHeaderDto } from './dto/update-orderan-header.dto';
 import {
@@ -131,7 +130,7 @@ export class OrderanMuatanService {
         'Error process approval creating orderan muatan in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -1015,7 +1014,7 @@ export class OrderanMuatanService {
         'Error process approval Error delete orderan muatan in service in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

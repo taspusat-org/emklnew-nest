@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateAsuransiDto } from './dto/create-asuransi.dto';
 import { UpdateAsuransiDto } from './dto/update-asuransi.dto';
@@ -56,24 +56,24 @@ export class AsuransiService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys: string[] = [];
+    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
     );
     const dateFields = ['created_at', 'updated_at'];
 
-    if (search && filters && Object.keys(filters).length > 0) {
+    if (search && searchFields.length > 0) {
       const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(va.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "TO_CHAR(va.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhereRaw('va.??::text ilike ?', [
+            query.orWhereRaw(`CAST(va.?? AS TEXT) ILIKE ?`, [
               field,
               `%${sanitizedValue}%`,
             ]);
@@ -83,18 +83,19 @@ export class AsuransiService {
     }
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
-      if (excludeSearchKeys.includes(key)) return;
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("to_char(va.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+        qb.andWhereRaw("TO_CHAR(va.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
           key,
           `%${sanitizedValue}%`,
         ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`va.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhereRaw('va.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+        qb.andWhere(`va.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
@@ -142,11 +143,11 @@ export class AsuransiService {
       case 'statusaktif':
         return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on va.nama
       case 'statusbank':
-        return { col: 'statusbank_nama', dir };
+        return { col: 'statusbank_text', dir };
       case 'statusdefault':
-        return { col: 'statusdefault_nama', dir };
+        return { col: 'statusdefault_text', dir };
       case 'statuslangsungcair':
-        return { col: 'statuslangsungcair_nama', dir };
+        return { col: 'statuslangsungcair_text', dir };
       default:
         return { col: sortBy, dir };
     }
@@ -278,7 +279,7 @@ export class AsuransiService {
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
 
-      const countResult = await trx(`${this.tableName} as va`)
+      const countResult = await trx(`${this.viewName} as va`)
         .count('va.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
@@ -522,7 +523,7 @@ export class AsuransiService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

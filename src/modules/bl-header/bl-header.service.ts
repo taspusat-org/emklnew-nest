@@ -18,7 +18,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { BlDetailRincianBiayaService } from '../bl-detail-rincian-biaya/bl-detail-rincian-biaya.service';
 
@@ -192,7 +192,7 @@ export class BlHeaderService {
         'Error process approval creating bl header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -776,7 +776,7 @@ export class BlHeaderService {
         'Error process update bl header in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -847,7 +847,7 @@ export class BlHeaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

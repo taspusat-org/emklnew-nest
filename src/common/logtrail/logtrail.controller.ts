@@ -18,6 +18,7 @@ import {
   FindAllParams,
   FindAllSchema,
 } from '../interfaces/all.interface';
+import { dbMssql } from '../utils/db';
 
 @Controller('logtrail')
 export class LogtrailController {
@@ -51,8 +52,17 @@ export class LogtrailController {
       pagination,
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
     };
+    const trx = await dbMssql.transaction();
+    try {
+      const result = await this.logtrailService.findAll(params, trx);
+      trx.commit();
 
-    return this.logtrailService.findAll(params);
+      return result;
+    } catch (error) {
+      trx.rollback();
+      console.error('Error in findAll:', error);
+      throw error;
+    }
   }
   @Get(':id/header')
   async processHeader(
@@ -62,13 +72,24 @@ export class LogtrailController {
     @Query('sortKey') sortKey: string = 'id',
     @Query('sortOrder') sortOrder: 'asc' | 'desc' = 'asc',
   ) {
-    return this.logtrailService.processHeader(
-      id,
-      page,
-      pageSize,
-      sortKey,
-      sortOrder,
-    );
+    const trx = await dbMssql.transaction();
+    try {
+      const result = await this.logtrailService.processHeader(
+        id,
+        page,
+        pageSize,
+        sortKey,
+        sortOrder,
+        trx,
+      );
+      trx.commit();
+
+      return result;
+    } catch (error) {
+      trx.rollback();
+      console.error('Error in findAll:', error);
+      throw error;
+    }
   }
 
   @Get(':id/detail')
@@ -79,12 +100,23 @@ export class LogtrailController {
     @Query('sortKey') sortKey: string = 'id',
     @Query('sortOrder') sortOrder: 'asc' | 'desc' = 'asc',
   ) {
-    return this.logtrailService.processDetail(
-      id,
-      page,
-      pageSize,
-      sortKey,
-      sortOrder,
-    );
+    const trx = await dbMssql.transaction();
+    try {
+      const result = await this.logtrailService.processDetail(
+        id,
+        page,
+        pageSize,
+        sortKey,
+        sortOrder,
+        trx,
+      );
+      trx.commit();
+
+      return result;
+    } catch (error) {
+      trx.rollback();
+      console.error('Error in findAll:', error);
+      throw error;
+    }
   }
 }

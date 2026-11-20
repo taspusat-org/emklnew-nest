@@ -13,7 +13,6 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
-  NotFoundException,
 } from '@nestjs/common';
 
 @Injectable()
@@ -356,7 +355,7 @@ export class JenisprosesfeeService {
       };
     } catch (error) {
       console.error('Error deleting data jenis proses fee in service: ', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

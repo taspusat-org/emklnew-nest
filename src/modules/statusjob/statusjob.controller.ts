@@ -175,7 +175,7 @@ export class StatusjobController {
       await trx.rollback();
       console.error('Error delete data status job in controller: ', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

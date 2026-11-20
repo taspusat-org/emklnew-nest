@@ -1581,7 +1581,7 @@ export class BookingOrderanMuatanService {
       };
     } catch (error) {
       console.error('Error deleting data booking orderan muatan: ', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

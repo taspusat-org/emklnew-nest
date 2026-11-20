@@ -2,7 +2,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreatePackinglistdetailDto } from './dto/create-packinglistdetail.dto';
 import { UpdatePackinglistdetailDto } from './dto/update-packinglistdetail.dto';
@@ -427,7 +427,7 @@ export class PackinglistdetailService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

@@ -1,57 +1,34 @@
-import { dbMssql } from 'src/common/utils/db';
-import { isRecordExistCI } from 'src/utils/utils.service';
 import { z } from 'zod';
-// ------------------------
-// 1. BASE FIELDS
-// ------------------------
-const baseFields = {
+import { isRecordExistCI } from 'src/utils/utils.service';
+export const CreatePelayaranSchema = z.object({
+  // relasi_id menyimpan id relasi (varchar UUID), bukan angka. Jangan z.number()
+  // — frontend mengirim id string sehingga z.number() menolaknya.
+  relasi_id: z.string().nullable().optional(),
+  relasi_id_text: z.string().nullable().optional(),
   nama: z
     .string()
     .trim()
-    .min(1, { message: 'Nama Pelayaran Wajib Diisi' })
-    .max(255),
+    .refine(
+      async (value) => {
+        if (!value) return true;
+        const exists = await isRecordExistCI('nama', value, 'pelayaran');
+        return !exists; // Validasi jika nama sudah ada
+      },
+      {
+        message: 'Pelayaran dengan nama ini sudah ada',
+      },
+    )
+    .nullable()
+    .optional(),
   keterangan: z.string().trim().nullable().optional(),
-  statusaktif: z.string(), // Ensure non-negative
-  modifiedby: z.string().nullable().optional(),
-};
-export const CreatePelayaranSchema = z
-  .object({
-    ...baseFields,
-  })
-  .superRefine(async (data, ctx) => {
-    // Cek unik hanya untuk create (excludeId tidak ada)
-    const existsName = await isRecordExistCI('nama', data.nama, 'pelayaran');
-    if (existsName) {
-      ctx.addIssue({
-        path: ['nama'],
-        code: 'custom',
-        message: 'Pelayaran dengan nama ini sudah ada',
-      });
-    }
-    // Validasi khusus penambahan create dapat disimpan di sini
-  });
-export type CreatePelayaranDto = z.infer<typeof CreatePelayaranSchema>;
 
-export const UpdatePelayaranSchema = z
-  .object({
-    ...baseFields,
-    id: z.string({ required_error: 'Id wajib diisi untuk update' }),
-  })
-  .superRefine(async (data, ctx) => {
-    // Cek unik hanya untuk create (excludeId tidak ada)
-    const existsName = await isRecordExistCI(
-      'nama',
-      data.nama,
-      'pelayaran',
-      data.id,
-    );
-    if (existsName) {
-      ctx.addIssue({
-        path: ['nama'],
-        code: 'custom',
-        message: 'Pelayaran dengan nama ini sudah ada',
-      });
-    }
-    // Validasi khusus penambahan create dapat disimpan di sini
-  });
-export type UpdatePelayaranDto = z.infer<typeof UpdatePelayaranSchema>;
+  // statusaktif menyimpan id parameter (varchar UUID), bukan angka. Jangan z.number()
+  // — frontend mengirim id string sehingga z.number() menolaknya.
+  statusaktif: z.string().nullable().optional(),
+  statusaktif_text: z.string().nullable().optional(),
+
+  info: z.string().nullable().optional(),
+  modifiedby: z.string().nullable().optional(),
+});
+
+export type CreatePelayaranDto = z.infer<typeof CreatePelayaranSchema>;

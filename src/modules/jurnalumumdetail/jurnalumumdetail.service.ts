@@ -33,13 +33,19 @@ export class JurnalumumdetailService {
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly logger = new Logger(JurnalumumdetailService.name);
+  /**
+   * vjurnalumumdetail memangkas barisnya sendiri lewat `tas.nobukti`, jadi
+   * filter per-bukti sudah diterapkan sebelum LEFT JOIN akunpusat.
+   * `set_config(..., true)` hanya hidup selama transaksi — findAll tetap
+   * memasang WHERE nobukti eksplisit untuk jalur tanpa trx (report/export).
+   */
   private async setSessionContext(
     trx: any,
     filters: Record<string, any>,
   ): Promise<void> {
     if (filters?.nobukti) {
       await trx.raw(`SELECT set_config('tas.nobukti', ?, true)`, [
-        filters.nobukti,
+        String(filters.nobukti),
       ]);
     }
   }
@@ -62,7 +68,11 @@ export class JurnalumumdetailService {
     for (const data of details) {
       const isNew = !data.id || String(data.id) === '0';
       if (!isNew) {
-        const existingData = await trx(this.viewName)
+        // Pembanding diambil dari TABEL, bukan view: view memformat
+        // tglbukti/created_at/updated_at jadi teks 'DD-MM-YYYY' dan meng-ABS
+        // nominal, sehingga created_at hasil bacaan itu ditulis balik ke kolom
+        // timestamp dalam format yang ditolak Postgres.
+        const existingData = await trx(this.tableName)
           .where('id', data.id)
           .first();
         if (existingData) {
@@ -171,50 +181,40 @@ export class JurnalumumdetailService {
     return updatedData || insertedData;
   }
 
-  // Ekspresi SQL per kolom grid. Sebagian kolom yang tampil bukan kolom base:
-  // coa_nama datang dari akunpusat, nominaldebet/nominalkredit diturunkan dari
-  // tanda p.nominal. Filter, search, dan sort harus memakai ekspresi yang sama
-  // dengan yang di-select supaya hasilnya cocok dengan yang dilihat user.
+  // Ekspresi SQL per kolom grid, mengikuti bentuk kolom di vjurnalumumdetail:
+  // tglbukti/created_at/updated_at sudah keluar sebagai TEKS ter-format dari
+  // view (TO_CHAR lagi di sini = error to_char(text, unknown)), coa_nama datang
+  // dari akunpusat, dan nominaldebet/nominalkredit sudah dipecah view dari
+  // tanda nominal — nominal-nya sendiri sudah ABS. Filter, search, dan sort
+  // harus memakai ekspresi yang sama dengan yang di-select supaya hasilnya
+  // cocok dengan yang dilihat user.
   private filterExpression(trx: any, key: string) {
     switch (key) {
-      case 'tglbukti':
-        return trx.raw("TO_CHAR(p.tglbukti, 'DD-MM-YYYY')");
-      case 'created_at':
-      case 'updated_at':
-        return trx.raw(`TO_CHAR(p.${key}, 'DD-MM-YYYY HH24:MI:SS')`);
       case 'coa_nama':
       case 'keterangancoa':
-        return trx.raw('p.keterangancoa');
+        return trx.raw('p.coa_nama');
       case 'nominaldebet':
-        return trx.raw(
-          '(CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END)::text',
-        );
       case 'nominalkredit':
-        return trx.raw(
-          '(CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END)::text',
-        );
       case 'nominal':
-        return trx.raw('ABS(p.nominal)::text');
+        return trx.raw(`p.${key}::text`);
       default:
         return trx.raw(`p.${key}`);
     }
   }
 
-  // Sort dari grid dipakai sebagai primary order, jadi ekspresinya harus
-  // ekspresi asli (bukan ::text) supaya numerik/tanggal terurut benar.
+  // Sort dari grid dipakai sebagai primary order, jadi kolom tanggal yang di
+  // view sudah jadi teks dikembalikan ke tipe aslinya — tanpa itu urutannya
+  // alfabetis ('02-01-2026' dianggap sebelum '10-12-2025').
   private sortExpression(trx: any, key: string) {
     switch (key) {
+      case 'tglbukti':
+        return trx.raw("TO_DATE(p.tglbukti, 'DD-MM-YYYY')");
+      case 'created_at':
+      case 'updated_at':
+        return trx.raw(`TO_TIMESTAMP(p.${key}, 'DD-MM-YYYY HH24:MI:SS')`);
       case 'coa_nama':
       case 'keterangancoa':
-        return trx.raw('p.keterangancoa');
-      case 'nominaldebet':
-        return trx.raw('CASE WHEN p.nominal > 0 THEN p.nominal ELSE 0 END');
-      case 'nominalkredit':
-        return trx.raw(
-          'CASE WHEN p.nominal < 0 THEN ABS(p.nominal) ELSE 0 END',
-        );
-      case 'nominal':
-        return trx.raw('ABS(p.nominal)');
+        return trx.raw('p.coa_nama');
       default:
         return trx.raw(`p.${key}`);
     }
@@ -280,8 +280,17 @@ export class JurnalumumdetailService {
     try {
       const safeFilters = filters || {};
 
+      // set_config di atas sudah memangkas view, tapi WHERE eksplisit tetap
+      // dipasang supaya rincian bukti lain tidak bocor kalau session context
+      // tidak berlaku — pemanggil tanpa transaksi (cetak/export bukti) memang
+      // begitu, karena set_config(..., true) hanya hidup selama transaksi.
+      const scoped = (qb: any) => {
+        qb.where('p.nobukti', String(safeFilters.nobukti));
+        this.applyFilters(trx, qb, safeFilters, search);
+      };
+
       const countResult = await trx(`${this.viewName} as p`)
-        .modify((qb: any) => this.applyFilters(trx, qb, safeFilters, search))
+        .modify(scoped)
         .count('p.id as total')
         .first();
       const total = Number(countResult?.total ?? 0);
@@ -306,9 +315,7 @@ export class JurnalumumdetailService {
           'p.updated_at',
         );
 
-      query.modify((qb: any) =>
-        this.applyFilters(trx, qb, safeFilters, search),
-      );
+      query.modify(scoped);
 
       // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
       // baris yang sama di dua halaman berbeda (atau melewatkan baris) saat
@@ -320,7 +327,7 @@ export class JurnalumumdetailService {
 
       query.orderBy(this.sortExpression(trx, sortBy), sortDirection);
       if (sortBy !== 'created_at') {
-        query.orderBy('p.created_at', 'asc');
+        query.orderBy(this.sortExpression(trx, 'created_at'), 'asc');
       }
       if (sortBy !== 'id') {
         query.orderBy('p.id', 'asc');

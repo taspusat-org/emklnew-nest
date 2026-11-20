@@ -192,7 +192,7 @@ export class OrderanHeaderController {
       await trx.rollback();
       console.error('Error deleting orderan header in controller: ', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

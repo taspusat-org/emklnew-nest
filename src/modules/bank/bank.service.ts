@@ -2,6 +2,8 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  HttpException,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -12,233 +14,34 @@ import {
   UtilsService,
   getFetchedPages,
   calculateItemIndex,
+  toNumeric,
+  uuidV7,
 } from 'src/utils/utils.service';
 import { RedisService } from 'src/common/redis/redis.service';
+import { ExportSheetDefinition } from 'src/common/report/export-job.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
+import { Knex } from 'knex';
 
 @Injectable()
 export class BankService {
+  private readonly logger = new Logger(BankService.name);
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
   ) {}
   private readonly tableName = 'bank';
-  async create(CreateBankDto: any, trx: any) {
-    try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        nama,
-        keterangan,
-        coa,
-        coagantung,
-        statusbank,
-        statusaktif,
-        statusdefault,
-        formatpenerimaan,
-        formatpengeluaran,
-        formatpenerimaangantung,
-        formatpengeluarangantung,
-        formatpencairan,
-        formatrekappenerimaan,
-        formatrekappengeluaran,
-        modifiedby,
-        id: skipId,
-        created_at,
-        updated_at,
-        info,
-      } = CreateBankDto;
-      const insertData = {
-        nama: nama ? nama.toUpperCase() : null,
-        keterangan: keterangan ? keterangan.toUpperCase() : null,
-        coa: coa,
-        coagantung: coagantung,
-        statusbank: statusbank,
-        statusaktif: statusaktif,
-        statusdefault: statusdefault,
-        formatpenerimaan: formatpenerimaan,
-        formatpengeluaran: formatpengeluaran,
-        formatpenerimaangantung: formatpenerimaangantung,
-        formatpengeluarangantung: formatpengeluarangantung,
-        formatpencairan: formatpencairan,
-        formatrekappenerimaan: formatrekappenerimaan,
-        formatrekappengeluaran: formatrekappengeluaran,
-        modifiedby: modifiedby,
-        created_at: created_at || this.utilsService.getTime(),
-        updated_at: updated_at || this.utilsService.getTime(),
-      };
-      // Insert the new item
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
-      const newItem = insertedItems[0]; // Get the inserted item
-      // Ambil seluruh data terfilter & terurut (limit:0) untuk menghitung
-      // posisi item baru, lalu membangun window halaman (pola alat-bayar).
-      const { data: allData } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page: 1, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
-        trx,
-      );
+  private readonly viewName = 'vbank';
 
-      const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
-      // String() bukan Number(): id kini varchar UUID, Number(uuid)=NaN ->
-      // findIndex selalu -1 -> fokus baris setelah simpan selalu meleset.
-      let zeroIdx = allData.findIndex(
-        (item: any) => String(item.id) === String(newItem.id),
-      );
-      if (zeroIdx === -1) zeroIdx = 0;
-
-      const posisi = zeroIdx + 1; // posisi global 1-based
-      const pageNumber = Math.ceil(posisi / safeLimit);
-      const totalPages = Math.ceil(allData.length / safeLimit) || 1;
-      const fetchedPages = getFetchedPages(pageNumber, totalPages);
-
-      const startPage = fetchedPages[0];
-      const endPage = fetchedPages[fetchedPages.length - 1];
-      const windowData = allData.slice(
-        (startPage - 1) * safeLimit,
-        endPage * safeLimit,
-      );
-
-      const pagedData: Record<number, any[]> = {};
-      fetchedPages.forEach((pageNum) => {
-        pagedData[pageNum] = allData.slice(
-          (pageNum - 1) * safeLimit,
-          pageNum * safeLimit,
-        );
-      });
-
-      const itemIndex = calculateItemIndex(posisi, fetchedPages, safeLimit);
-
-      // Redis per-halaman (dipakai grid windowed). Tetap tulis -allItems agar
-      // konsumen lama (mis. grid shipper) tidak ikut rusak.
-      await this.redisService.set(
-        `${this.tableName}-page-${pageNumber}`,
-        JSON.stringify(windowData),
-      );
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(allData),
-      );
-      await this.logTrailService.create(
-        {
-          namatabel: this.tableName,
-          postingdari: 'ADD BANK',
-          idtrans: newItem.id,
-          nobuktitrans: newItem.id,
-          aksi: 'ADD',
-          datajson: JSON.stringify(newItem),
-          modifiedby: newItem.modifiedby,
-        },
-        trx,
-      );
-      return {
-        newItem,
-        itemIndex: itemIndex.zeroBasedIndex,
-        pageNumber,
-        fetchedPages,
-        pagedData,
-      };
-    } catch (error) {
-      throw new Error(`Error creating biaya: ${error.message}`);
-    }
-  }
-
-  async findAll(
-    {
-      search,
-      filters,
-      pagination,
-      sort,
-      isLookUp,
-      useCustomOffset,
-    }: FindAllParams,
-    trx: any,
-  ) {
-    try {
-      // default pagination
-      let { page, limit, customOffset } = pagination ?? {};
-
-      page = page ?? 1;
-      limit = limit ?? 0;
-
-      // lookup mode: jika total > 500, kirim json saja
-      if (isLookUp) {
-        const countResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-        const totalCount = Number(countResult?.total) || 0;
-        if (totalCount > 500) {
-          return { data: { type: 'json' } };
-        }
-        limit = 0;
-      }
-
-      // build query
-      const query = trx
-        .from(`${this.tableName} as b`)
-        .select([
-          'b.id',
-          'b.nama',
-          'b.keterangan',
-          'b.coa',
-          'b.coagantung',
-          'a.keterangancoa as keterangancoa',
-          'a2.keterangancoa as keterangancoagantung',
-          'b.statusbank',
-          'b.statusaktif',
-          'b.statusdefault',
-          'b.formatpenerimaan',
-          'b.formatpengeluaran',
-          'b.formatpenerimaangantung',
-          'b.formatpengeluarangantung',
-          'b.formatpencairan',
-          'b.formatrekappenerimaan',
-          'b.formatrekappengeluaran',
-          'b.info',
-          'b.modifiedby',
-          trx.raw("TO_CHAR(b.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(b.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text',
-          'p2.text as textbank',
-          'p2.memo as statusbank_memo',
-          'p3.text as textdefault',
-          'p3.memo as statusdefault_memo',
-          'p4.text as formatpenerimaantext',
-          'p5.text as formatpengeluarantext',
-          'p6.text as formatpenerimaangantungtext',
-          'p7.text as formatpengeluarangantungtext',
-          'p8.text as formatpencairantext',
-          'p9.text as formatrekappenerimaantext',
-          'p10.text as formatrekappengeluarantext',
-        ])
-        .leftJoin('akunpusat as a', 'b.coa', 'a.coa')
-        .leftJoin('akunpusat as a2', 'b.coagantung', 'a2.coa')
-        .leftJoin('parameter as p', 'b.statusaktif', 'p.id')
-        .leftJoin('parameter as p2', 'b.statusbank', 'p2.id')
-        .leftJoin('parameter as p3', 'b.statusdefault', 'p3.id')
-        .leftJoin('parameter as p4', 'b.formatpenerimaan', 'p4.id')
-        .leftJoin('parameter as p5', 'b.formatpengeluaran', 'p5.id')
-        .leftJoin('parameter as p6', 'b.formatpenerimaangantung', 'p6.id')
-        .leftJoin('parameter as p7', 'b.formatpengeluarangantung', 'p7.id')
-        .leftJoin('parameter as p8', 'b.formatpencairan', 'p8.id')
-        .leftJoin('parameter as p9', 'b.formatrekappenerimaan', 'p9.id')
-        .leftJoin('parameter as p10', 'b.formatrekappengeluaran', 'p10.id');
-
-      const excludeSearchKeys = [
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon',
         'statusbank',
         'statusaktif',
         'statusdefault',
@@ -251,269 +54,423 @@ export class BankService {
         'formatrekappengeluaran',
         'coa',
         'coagantung',
-      ];
+    ];
 
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
 
-      if (search) {
-        const sanitizedValue = String(search);
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-                field,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (field === 'keterangancoa') {
-              qb.orWhere('a.keterangancoa', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'keterangancoagantung') {
-              qb.orWhere('a2.keterangancoa', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'memo' || field === 'text') {
-              qb.orWhere(`p.${field}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'textbank' || field === 'statusbank_memo') {
-              const col = field === 'textbank' ? 'text' : 'memo';
-              qb.orWhere(`p2.${col}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (
-              field === 'textdefault' ||
-              field === 'statusdefault_memo'
-            ) {
-              const col = field === 'textdefault' ? 'text' : 'memo';
-              qb.orWhere(`p3.${col}`, 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpenerimaantext') {
-              qb.orWhere('p4.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpengeluarantext') {
-              qb.orWhere('p5.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpenerimaangantungtext') {
-              qb.orWhere('p6.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpengeluarangantungtext') {
-              qb.orWhere('p7.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatpencairantext') {
-              qb.orWhere('p8.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatrekappenerimaantext') {
-              qb.orWhere('p9.text', 'ilike', `%${sanitizedValue}%`);
-            } else if (field === 'formatrekappengeluarantext') {
-              qb.orWhere('p10.text', 'ilike', `%${sanitizedValue}%`);
-            } else {
-              qb.orWhere(`b.${field}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          });
-        });
-      }
-
-      // filter berdasarkan key yang valid
-      if (filters) {
-        for (const [key, rawValue] of Object.entries(filters)) {
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue; // Lewati filter jika key adalah 'tglDari' atau 'tglSampai'
-          }
-          if (!rawValue) continue;
-          const val = String(rawValue);
-
-          if (key === 'created_at' || key === 'updated_at') {
-            query.andWhereRaw("TO_CHAR(b.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-              key,
-              `%${val}%`,
-            ]);
-          } else if (key === 'text') {
-            query.andWhere(`b.statusaktif`, 'ilike', `%${val}%`);
-          } else if (key === 'memo') {
-            query.andWhere(`p.memo`, 'ilike', `%${val}%`);
-          } else if (key === 'textbank') {
-            query.andWhere(`b.statusbank`, 'ilike', `%${val}%`);
-          } else if (key === 'textdefault') {
-            query.andWhere(`b.statusdefault`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpenerimaantext') {
-            query.andWhere(`p4.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpengeluarantext') {
-            query.andWhere(`p5.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpenerimaangantungtext') {
-            query.andWhere(`p6.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpengeluarangantungtext') {
-            query.andWhere(`p7.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatpencairantext') {
-            query.andWhere(`p8.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatrekappenerimaantext') {
-            query.andWhere(`p9.text`, 'ilike', `%${val}%`);
-          } else if (key === 'formatrekappengeluarantext') {
-            query.andWhere(`p10.text`, 'ilike', `%${val}%`);
-          } else if (key === 'keterangancoa') {
-            query.andWhere(`a.keterangancoa`, 'ilike', `%${val}%`);
-          } else if (key === 'keterangancoagantung') {
-            query.andWhere(`a2.keterangancoa`, 'ilike', `%${val}%`);
+    if (search && searchFields.length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "TO_CHAR(vb.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.andWhere(`b.${key}`, 'ilike', `%${val}%`);
+            query.orWhereRaw(`CAST(vb.?? AS TEXT) ILIKE ?`, [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
           }
-        }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("TO_CHAR(vb.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'text' || key === 'memo') {
+        qb.andWhere(`vb.statusaktif_${key}`, '=', sanitizedValue);
+      } else {
+        qb.andWhere(`vb.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
+    });
+  }
 
-      // Count ikut TERFILTER: clone query (join + where) tanpa select/order,
-      // lalu COUNT. Penting agar totalPages pada windowed pagination akurat
-      // saat ada filter/search aktif (count lama menghitung seluruh tabel).
-      const countResult = await query
-        .clone()
-        .clearSelect()
-        .count('b.id as total')
-        .first();
-      const total = Number(countResult?.total ?? 0);
-      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.uuid,
+      nama: dto.nama ? dto.nama.toUpperCase() : null,
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      coa: dto.coa,
+      coagantung: dto.coagantung,
+      statusbank: dto.statusbank,
+      statusaktif: dto.statusaktif,
+      statusdefault: dto.statusdefault,
+      formatpenerimaan: dto.formatpenerimaan,
+      formatpengeluaran: dto.formatpengeluaran,
+      formatpenerimaangantung: dto.formatpenerimaangantung,
+      formatpengeluarangantung: dto.formatpengeluarangantung,
+      formatpencairan: dto.formatpencairan,
+      formatrekappenerimaan: dto.formatrekappenerimaan,
+      formatrekappengeluaran: dto.formatrekappengeluaran,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
-      // Tiebreaker stabil agar urutan baris konsisten antar-halaman (offset/fetch)
-      query.orderBy('b.id', 'asc');
-
-      // Offset window: pakai customOffset saat create/update menarik 5-halaman.
-      const offset =
-        useCustomOffset === true && customOffset !== undefined
-          ? customOffset
-          : (page - 1) * limit;
-      if (limit > 0) {
-        query.offset(offset).limit(limit);
-      }
-
-      const data = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
-
-      return {
-        data: data,
-        type: responseType,
-        total,
-        pagination: {
-          currentPage: page,
-          totalPages: totalPages,
-          totalItems: total,
-          itemsPerPage: limit,
-        },
-      };
-    } catch (error) {
-      console.error('Error fetching bank data:', error);
-      throw new Error('Failed to fetch bank data');
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on vb.nama
+      case 'statusbank':
+        return { col: 'statusbank_text', dir };
+      case 'statusdefault':
+        return { col: 'statusdefault_text', dir };
+      case 'statuslangsungcair':
+        return { col: 'statuslangsungcair_text', dir };
+      default:
+        return { col: sortBy, dir };
     }
   }
 
-  async update(id: string, data: any, trx: any) {
+  async create(CreateBankDto: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName).where('id', id).first();
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateBankDto;
 
-      if (!existingData) {
-        throw new Error('Bank not found');
+      const uuid = await uuidV7(trx);
+      const insertData = this.buildInsertData(CreateBankDto, uuid);
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as vb`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vb`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vb`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        text,
-        textbank,
-        textdefault,
-        formatpenerimaantext,
-        formatpengeluarantext,
-        formatpenerimaangantungtext,
-        formatpengeluarangantungtext,
-        formatpencairantext,
-        formatrekappenerimaantext,
-        formatrekappengeluarantext,
-        keterangancoa,
-        id: skipId,
-        keterangancoagantung,
-        ...insertData
-      } = data;
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['nama', 'keterangan'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
+        {
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
+        },
+        trx,
+      );
+
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
+
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
+      // 6. Side-effects
+      await this.logTrailService.create(
+        {
+          namatabel: this.tableName,
+          postingdari: 'ADD BANK',
+          idtrans: newItem.id,
+          nobuktitrans: newItem.id,
+          aksi: 'ADD',
+          datajson: JSON.stringify(newItem),
+          modifiedby: newItem.modifiedby,
+        },
+        trx,
+      );
+
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
+      return {
+        newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
+        pageNumber,
+        fetchedPages,
+        pagedData,
+      };
+    } catch (error) {
+      throw new Error(`Error creating bank: ${error.message}`);
+    }
+  }
+
+  async findAll(
+      {
+        search,
+        filters,
+        pagination,
+        sort,
+        isLookUp,
+        useCustomOffset,
+      }: FindAllParams,
+      trx: Knex.Transaction,
+    ) {
+      try {
+        const { page = 1, limit = 0, customOffset } = pagination ?? {};
+  
+        const sortBy = sort?.sortBy || 'nama';
+        const sortDirection =
+          sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+        const safeFilters = filters || {};
+  
+        const countResult = await trx(`${this.viewName} as vb`)
+          .count('vb.id as total')
+          .modify((qb) => this.applyFilters(qb, safeFilters, search))
+          .first();
+        const total = Number(countResult?.total ?? 0);
+  
+        if (isLookUp && total > 500) {
+          return {
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
+            },
+          };
+        }
+  
+        // SELECT disesuaikan DENGAN SCHEMA BANK yang sebenarnya
+        const query = trx(`${this.viewName} as vb`).select([
+          'vb.id',
+          'vb.nama',
+          'vb.keterangan',
+          'vb.coa',
+          'vb.coagantung',
+          'vb.keterangancoa',
+          'vb.keterangancoagantung',
+          'vb.statusbank',
+          'vb.statusaktif',
+          'vb.statusdefault',
+          'vb.formatpenerimaan',
+          'vb.formatpengeluaran',
+          'vb.formatpenerimaangantung',
+          'vb.formatpengeluarangantung',
+          'vb.formatpencairan',
+          'vb.formatrekappenerimaan',
+          'vb.formatrekappengeluaran',
+          'vb.info',
+          'vb.modifiedby',
+          trx.raw("TO_CHAR(vb.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+          trx.raw("TO_CHAR(vb.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          'vb.memo',
+          'vb.text',
+          'vb.statusbank_text',
+          'vb.statusbank_memo',
+          'vb.statusdefault_text',
+          'vb.statusdefault_memo',
+          'vb.formatpenerimaantext',
+          'vb.formatpengeluarantext',
+          'vb.formatpenerimaangantungtext',
+          'vb.formatpengeluarangantungtext',
+          'vb.formatpencairantext',
+          'vb.formatrekappenerimaantext',
+          'vb.formatrekappengeluarantext',
+        ]);
+  
+        query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+  
+        if (sortBy === 'statusaktif') {
+          query.orderBy('vb.text', sortDirection);
+        } else {
+          query.orderBy(`vb.${sortBy}`, sortDirection);
+        }
+  
+        const offset =
+          useCustomOffset === true && customOffset !== undefined
+            ? customOffset
+            : (page - 1) * limit;
+  
+        if (limit > 0) {
+          query.offset(offset).limit(limit);
+        }
+  
+        const data = await query;
+        const totalPages = Math.ceil(total / limit);
+        const responseType = total > 500 ? 'json' : 'local';
+  
+        return {
+          data,
+          type: responseType,
+          total,
+          pagination: {
+            currentPage: Number(page),
+            totalPages,
+            totalItems: total,
+            itemsPerPage: limit,
+          },
+        };
+      } catch (error) {
+        this.logger.error('Error fetching bank data', error?.stack);
+        throw new InternalServerErrorException('Failed to fetch bank data');
+      }
+    }
+
+  async update(id: string, data: any, trx: any) {
+    try {
+      const existedData = await trx(this.tableName).where('id', id).first();
+
+      if (!existedData) {
+        throw new NotFoundException('Bank tidak ditemukan');
+      }
+
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
+
+      Object.keys(insertData).forEach((key) => {
+        if (typeof insertData[key] === 'string') {
+          insertData[key] = insertData[key].toUpperCase();
         }
       });
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
+
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
         await trx(this.tableName).where('id', id).update(insertData);
       }
+      const updatedItem = await trx(this.viewName).where('id', id).first();
 
-      // Ambil seluruh data terfilter & terurut lalu hitung posisi item yang
-      // diupdate untuk membangun window halaman (pola alat-bayar windowed).
-      const { data: allData } = await this.findAll(
-        {
-          search,
-          filters,
-          pagination: { page: 1, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
-        trx,
-      );
+      const existingData = await trx(`${this.viewName} as vb`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
 
-      const safeLimit = Number(limit) > 0 ? Number(limit) : 50;
-      // String() bukan Number(): id varchar UUID -> Number(uuid)=NaN.
-      let zeroIdx = allData.findIndex(
-        (item: any) => String(item.id) === String(id),
-      );
-      if (zeroIdx === -1) zeroIdx = 0;
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
 
-      const posisi = zeroIdx + 1;
-      const pageNumber = Math.ceil(posisi / safeLimit);
-      const totalPages = Math.ceil(allData.length / safeLimit) || 1;
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as vb`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vb`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
       const fetchedPages = getFetchedPages(pageNumber, totalPages);
 
       const startPage = fetchedPages[0];
       const endPage = fetchedPages[fetchedPages.length - 1];
-      const windowData = allData.slice(
-        (startPage - 1) * safeLimit,
-        endPage * safeLimit,
-      );
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
 
-      const pagedData: Record<number, any[]> = {};
-      fetchedPages.forEach((pageNum) => {
-        pagedData[pageNum] = allData.slice(
-          (pageNum - 1) * safeLimit,
-          pageNum * safeLimit,
-        );
-      });
-
-      const itemIndex = calculateItemIndex(posisi, fetchedPages, safeLimit);
-
-      await this.redisService.set(
-        `${this.tableName}-page-${pageNumber}`,
-        JSON.stringify(windowData),
-      );
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(allData),
-      );
-
-      await this.logTrailService.create(
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          namatabel: this.tableName,
-          postingdari: 'EDIT BANK',
-          idtrans: id,
-          nobuktitrans: id,
-          aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      return {
-        updatedItem: {
-          id,
-          ...data,
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
+
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+      await this.logTrailService.create(
+        {
+          namatabel: this.tableName,
+          postingdari: 'EDIT BANK',
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
+          aksi: 'EDIT',
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
-        itemIndex: itemIndex.zeroBasedIndex,
+        trx,
+      );
+
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+      return {
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
         fetchedPages,
         pagedData,
@@ -549,12 +506,109 @@ export class BankService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
+  private readonly EXPORT_COLUMNS = [
+    'vb.nama',
+    'vb.keterangan',
+
+    'vb.coa',
+    'vb.coagantung',
+
+    'vb.statusbank_text',
+    'vb.text',
+  ];
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as vb`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('vb.text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('vb.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('vb.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('vb.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`vb.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as vb`)
+      .count('vb.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN BANK',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'KETERANGAN',
+      'COA',
+      'COA GANTUNG',
+      'STATUS BANK',
+      'STATUS AKTIF',
+    ],
+    columnWidths: [
+      5, 25, 50, 10, 15, 15, 15
+    ],
+    columnFormats: [
+      null, // NO. — default sudah rata kanan
+      null, // NAMA
+      { wrapText: true }, // KETERANGAN — teks panjang dibungkus
+      null, // COA
+      null, // COA GANTUNG
+      { align: 'center' as const }, // STATUS BANK ... — teks ditengah
+      { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+
+      row.coa,
+      row.gantung,
+
+      row.statusbank_text,
+      row.text,
+    ],
+  };
+
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
@@ -619,7 +673,7 @@ export class BankService {
       worksheet.getCell(currentRow, 3).value = row.keterangan;
       worksheet.getCell(currentRow, 4).value = row.keterangancoa;
       worksheet.getCell(currentRow, 5).value = row.keterangancoagantung;
-      worksheet.getCell(currentRow, 6).value = row.textbank;
+      worksheet.getCell(currentRow, 6).value = row.statusbank_text;
       worksheet.getCell(currentRow, 7).value = row.text;
 
       // Styling untuk setiap cell

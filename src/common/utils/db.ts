@@ -37,6 +37,10 @@ function wrapTransaction(trx: any, store?: RequestStore): any {
           ) {
             return;
           }
+          // Ditandai SEBELUM commit dijalankan, bukan sesudah: begitu COMMIT
+          // dikirim ke Postgres kita tidak lagi tahu apakah ia sempat mendarat,
+          // jadi sejak detik itu request ini tidak boleh dijawab 408.
+          if (store) store.commitAttempted = true;
           return target.commit.apply(target, args);
         };
       }

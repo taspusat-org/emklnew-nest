@@ -197,7 +197,7 @@ export class AsuransiController {
       await trx.rollback();
       console.error('Error deleting asuransi in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

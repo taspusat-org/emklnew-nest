@@ -3,6 +3,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { withUuidV7, UtilsService } from 'src/utils/utils.service';
@@ -176,7 +177,7 @@ export class PanjarmuatandetailService {
         'Error process creating panjar muatan detail in service:',
         error.message,
       );
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -388,8 +389,11 @@ export class PanjarmuatandetailService {
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
-      console.log('Error deleting panjar muatan detail in service:', error);
-      if (error instanceof NotFoundException) {
+      console.log(
+        'Error deleting panjar muatan detail rincian biaya in service:',
+        error,
+      );
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(

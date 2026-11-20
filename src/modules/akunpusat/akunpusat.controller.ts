@@ -1,4 +1,5 @@
 import {
+  HttpException,
   Controller,
   Get,
   Post,
@@ -147,7 +148,7 @@ export class AkunpusatController {
       await trx.rollback();
       console.error('Error deleting akun pusat in controller:', error);
 
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
 

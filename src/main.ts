@@ -39,6 +39,7 @@ async function bootstrap() {
         'http://192.168.3.211:3001',
         'http://192.168.3.21:3000',
         'http://localhost:3000',
+        'http://localhost:4000',
         'http://192.168.4.59:5000',
         'http://localhost:3002',
         'http://localhost:5173',
@@ -47,7 +48,7 @@ async function bootstrap() {
         'https://emkldev.transporindo.com',
       ], // List of allowed origins
       methods: ['GET', 'POST', 'PUT', 'DELETE'], // Allowed methods
-      allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
+      allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
       // Tanpa ini browser menyembunyikan Content-Disposition dari response
       // lintas origin, sehingga frontend tidak bisa membaca nama file hasil
       // download (mis. export Excel di /report/download/:jobId).

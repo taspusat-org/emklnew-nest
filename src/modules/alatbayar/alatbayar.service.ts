@@ -3,7 +3,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { CreateAlatbayarDto } from './dto/create-alatbayar.dto';
 import { UpdateAlatbayarDto } from './dto/update-alatbayar.dto';
@@ -51,13 +51,15 @@ export class AlatbayarService {
       const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (['created_at', 'updated_at'].includes(field)) {
-            qb.orWhereRaw("to_char(ab.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
-              field,
-              `%${sanitizedValue}%`,
-            ]);
+          if (dateFields.includes(field)) {
+            // pakai query, bukan qb — statement yang ditambahkan ke qb saat
+            // callback grup dievaluasi tidak ikut ter-compile (hilang diam-diam)
+            query.orWhereRaw(
+              "to_char(ab.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+              [field, `%${sanitizedValue}%`],
+            );
           } else {
-            query.orWhere(field, 'ilike', `%${sanitizedValue}%`);
+            query.orWhere(`ab.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
         });
       });
@@ -501,7 +503,7 @@ export class AlatbayarService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');
@@ -561,6 +563,33 @@ export class AlatbayarService {
     return Number(result?.total ?? 0);
   }
 
+  /**
+   * Data LaporanAlatbayar.mrt: baris yang lolos filter & sort grid. Memakai
+   * query export karena kolom yang dibaca template sama dengan EXPORT_COLUMNS.
+   */
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Alat Bayar',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

@@ -19,6 +19,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  HttpException,
 } from '@nestjs/common';
 import { PanjarmuatandetailService } from 'src/modules/panjarmuatandetail/panjarmuatandetail.service';
 
@@ -160,7 +161,8 @@ export class PanjarheaderService {
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
       if (excludeSearchKeys.includes(key)) return;
-      if (rawValue === null || rawValue === undefined || rawValue === '') return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
 
       const value = String(rawValue);
       if (key === 'tglbukti') {
@@ -416,8 +418,11 @@ export class PanjarheaderService {
 
       return { newItem, ...paged };
     } catch (error) {
-      console.error('Error creating panjar header in service:', error.message);
-      if (error instanceof NotFoundException) {
+      console.error(
+        'Error process approval creating panjar header in service:',
+        error.message,
+      );
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -781,8 +786,11 @@ export class PanjarheaderService {
 
       return { updatedItem, ...paged };
     } catch (error) {
-      console.error('Error update panjar header in service:', error.message);
-      if (error instanceof NotFoundException) {
+      console.error(
+        'Error process update panjar header in service:',
+        error.message,
+      );
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException(
@@ -830,7 +838,7 @@ export class PanjarheaderService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.log('Error deleting data:', error);
-      if (error instanceof NotFoundException) {
+      if (error instanceof HttpException) {
         throw error;
       }
       throw new InternalServerErrorException('Failed to delete data');

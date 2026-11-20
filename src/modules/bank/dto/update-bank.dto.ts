@@ -15,13 +15,13 @@ export const UpdateBankSchema = z
     keterangancoagantung: z.string().nullable().optional(),
 
     statusbank: z.string().min(1, { message: 'STATUSBANK is required' }),
-    textbank: z.string().nullable().optional(),
+    statusbank_text: z.string().nullable().optional(),
 
     statusaktif: z.string().min(1, { message: 'STATUSAKTIF is required' }),
     text: z.string().nullable().optional(),
 
     statusdefault: z.string().min(1, { message: 'STATUSDEFAULT is required' }),
-    textdefault: z.string().nullable().optional(),
+    statusdefault_text: z.string().nullable().optional(),
 
     formatpenerimaan: z
       .string()
