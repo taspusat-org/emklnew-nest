@@ -6,7 +6,11 @@ import { GlobalService } from '../global/global.service';
 import { RedisService } from 'src/common/redis/redis.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  formatDateToSQL,
+  UtilsService,
+} from 'src/utils/utils.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import {
   Inject,
@@ -20,9 +24,13 @@ import { EstimasiBiayaDetailInvoiceService } from '../estimasi-biaya-detail-invo
 @Injectable()
 export class EstimasiBiayaHeaderService {
   private readonly tableName: string = 'estimasibiayaheader';
+  // Tabel untuk TULIS, view untuk BACA — sama seperti bl-header/alatbayar.
+  private readonly viewName: string = 'vestimasibiayaheader';
   private readonly detailBiayaTableName: string = 'estimasibiayadetailbiaya';
+  // Postgres case-sensitive untuk identifier berkutip: tabelnya
+  // 'estimasibiayadetailinvoice' (huruf kecil semua), bukan ...detailInvoice.
   private readonly detailInvoiceTableName: string =
-    'estimasibiayadetailInvoice';
+    'estimasibiayadetailinvoice';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -58,7 +66,7 @@ export class EstimasiBiayaHeaderService {
         tglbukti: data.tglbukti,
         jenisorder_id: data.jenisorder_id,
         orderan_nobukti: data.orderan_nobukti,
-        nominal: data.nominal,
+        nominal: this.parseCurrency(data.nominal),
         shipper_id: data.shipper_id,
         statusppn: data.statusppn,
         asuransi_id: data.asuransi_id,
@@ -69,6 +77,11 @@ export class EstimasiBiayaHeaderService {
         updated_at,
       };
 
+      // HANYA tanggal yang dikonversi. Blanket toUpperCase() atas semua
+      // string ikut mengenai kolom id/FK yang bertipe text dan
+      // case-sensitive (mis. shipper_id 02-019fbb26-... jadi 02-019FBB26-...),
+      // sehingga insert melanggar foreign key. BlHeaderService hanya
+      // meng-uppercase modifiedby.
       Object.keys(headerData).forEach((key) => {
         if (typeof headerData[key] === 'string') {
           const value = headerData[key];
@@ -76,8 +89,8 @@ export class EstimasiBiayaHeaderService {
 
           if (dateRegex.test(value)) {
             headerData[key] = formatDateToSQL(value);
-          } else {
-            headerData[key] = headerData[key].toUpperCase();
+          } else if (key === 'modifiedby') {
+            headerData[key] = value.toUpperCase();
           }
         }
       });
@@ -94,11 +107,11 @@ export class EstimasiBiayaHeaderService {
           estimasibiaya_id: newItem.id,
           link_id: detail.link_id || null,
           biayaemkl_id: detail.biayaemkl_id || null,
-          nominal: detail.nominal || '',
-          nilaiasuransi: detail.nilaiasuransi || '',
-          nominaldisc: detail.nominaldisc || '',
-          nominalsebelumdisc: detail.nominalsebelumdisc || '',
-          nominaltradoluar: detail.nominaltradoluar || '',
+          nominal: this.parseCurrency(detail.nominal),
+          nilaiasuransi: this.parseCurrency(detail.nilaiasuransi),
+          nominaldisc: this.parseCurrency(detail.nominaldisc),
+          nominalsebelumdisc: this.parseCurrency(detail.nominalsebelumdisc),
+          nominaltradoluar: this.parseCurrency(detail.nominaltradoluar),
           modifiedby: newItem.modifiedby,
         }));
 
@@ -117,7 +130,7 @@ export class EstimasiBiayaHeaderService {
             estimasibiaya_id: newItem.id,
             link_id: detail.link_id || null,
             biayaemkl_id: detail.biayaemkl_id || null,
-            nominal: detail.nominal || '',
+            nominal: this.parseCurrency(detail.nominal),
             modifiedby: newItem.modifiedby,
           }),
         );
@@ -194,7 +207,7 @@ export class EstimasiBiayaHeaderService {
       limit = limit ?? 0;
 
       const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
+        .from(trx.raw(`${this.viewName} as u`))
         .select([
           'u.id',
           'u.nobukti',
@@ -208,151 +221,57 @@ export class EstimasiBiayaHeaderService {
           'u.comodity_id',
           'u.consignee_id',
           'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
 
-          'jenisorderan.nama as jenisorder_nama',
-          'shipper.nama as shipper_nama',
-          'ppn.text as statusppn_nama',
-          'ppn.memo as statusppn_memo',
-          'asuransi.nama as asuransi_nama',
-          'comodity.keterangan as comodity_nama',
-          'consignee.namaconsignee as consignee_nama',
-        ])
-        .leftJoin('jenisorder as jenisorderan', 'u.jenisorder_id', 'jenisorderan.id')
-        .leftJoin('shipper', 'u.shipper_id', 'shipper.id')
-        .leftJoin('parameter as ppn', 'u.statusppn', 'ppn.id')
-        .leftJoin('typeakuntansi as asuransi', 'u.asuransi_id', 'asuransi.id') //INI NANTI UBAH KALO BG DENIS UDH PUSH ASURANSI
-        .leftJoin('comodity', 'u.comodity_id', 'comodity.id')
-        .leftJoin('consignee', 'u.consignee_id', 'consignee.id');
-
-      if (filters?.tglDari && filters?.tglSampai) {
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
-
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
+          'u.jenisorder_nama',
+          'u.shipper_nama',
+          'u.statusppn_nama',
+          'u.statusppn_memo',
+          'u.asuransi_nama',
+          'u.comodity_nama',
+          'u.consignee_nama',
         ]);
-      }
 
-      const excludeSearchKeys = ['tglDari', 'tglSampai', 'statusppn_text'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      query.modify((qb: any) => this.applyDateRange(qb, filters));
+      query.modify((qb: any) => this.applyFilters(qb, filters, search));
 
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'jenisorder_text') {
-              qb.orWhere(`jenisorderan.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'shipper_text') {
-              qb.orWhere(`shipper.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'asuransi_text') {
-              qb.orWhere(`asuransi.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'comodity_text') {
-              qb.orWhere(`comodity.keterangan`, 'like', `%${sanitized}%`);
-            } else if (field === 'consignee_text') {
-              qb.orWhere(`consignee.namaconsignee`, 'like', `%${sanitized}%`);
-            } else if (field === 'tglbukti') {
-              qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue;
-          }
-
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'tglbukti') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'jenisorder_text') {
-              query.andWhere(
-                `jenisorderan.nama`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'shipper_text') {
-              query.andWhere(`shipper.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'statusppn_text') {
-              query.andWhere(`ppn.id`, '=', sanitizedValue);
-            } else if (key === 'asuransi_text') {
-              query.andWhere(`asuransi.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'comodity_text') {
-              query.andWhere(
-                `comodity.keterangan`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'consignee_text') {
-              query.andWhere(
-                `consignee.namaconsignee`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
+      // customOffset: offset absolut dari grid saat window pagination harus
+      // mulai di halaman logis mana pun, bukan kelipatan WINDOW_SIZE.
+      const customOffset = (pagination as any)?.customOffset;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
+        const offset =
+          typeof customOffset === 'number' && customOffset >= 0
+            ? customOffset
+            : (page - 1) * limit;
         query.limit(limit).offset(offset);
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'jenisorder_text') {
-          query.orderBy(`jenisorderan.nama`, sort.sortDirection);
-        } else if (sort?.sortBy === 'shipper_text') {
-          query.orderBy('shipper.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'statusppn_text') {
-          const memoExpr = '(CASE WHEN ppn.memo IS JSON THEN ppn.memo::jsonb END)';
-          query.orderByRaw(
-            `JSON_VALUE(${memoExpr}, '$.MEMO') ${sort.sortDirection}`,
-          );
-        } else if (sort?.sortBy === 'asuransi_text') {
-          query.orderBy('asuransi.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'comodity_text') {
-          query.orderBy('comodity.keterangan', sort.sortDirection);
-        } else if (sort?.sortBy === 'consignee_text') {
-          query.orderBy('consignee.namaconsignee', sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
+      this.applySort(query, sort?.sortBy, sort?.sortDirection);
+      // Tiebreaker WAJIB: tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, dan ORDER BY yang nilainya seri (mis. sort STATUS AKTIF yang
+      // cuma punya 2 nilai) tak dijamin stabil antar query → satu baris bisa
+      // muncul di dua halaman ("two children with the same key" di grid).
+      query.orderBy('u.id', 'asc');
 
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
+      // Count HARUS memakai filter & rentang tanggal yang sama dengan query
+      // data (pola bl-header). Kalau menghitung seluruh tabel, grid mengira
+      // halamannya jauh lebih banyak dari yang ada, lalu terus menarik halaman
+      // kosong dan window pagination tidak pernah selesai bergeser.
+      const countResult = await trx(`${this.viewName} as u`)
+        .count('u.id as total')
+        .modify((qb: any) => this.applyDateRange(qb, filters))
+        .modify((qb: any) => this.applyFilters(qb, filters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
       const data = await query;
-      console.log('data', data);
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
         data: data,
@@ -371,9 +290,215 @@ export class EstimasiBiayaHeaderService {
     }
   }
 
+  // Kolom numerik di Postgres tidak menerima teks berformat ribuan
+  // ("2,312,321.00") maupun string kosong. Pola yang sama dipakai
+  // KasGantungHeaderService, JurnalUmumHeaderService dan PindahBukuService.
+  private parseCurrency(value: any): number {
+    if (value === null || value === undefined || value === '') return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const cleanValue = value.replace(/[^0-9.-]/g, '');
+      const parsed = parseFloat(cleanValue);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }
+
+  // Kolom turunan di view dicari lewat nama hasil join-nya, bukan id-nya.
+  private readonly SEARCH_ALIAS: Record<string, string> = {
+    jenisorder_text: 'u.jenisorder_nama',
+    shipper_text: 'u.shipper_nama',
+    asuransi_text: 'u.asuransi_nama',
+    comodity_text: 'u.comodity_nama',
+    consignee_text: 'u.consignee_nama',
+  };
+
+  private applyDateRange(
+    qb: any,
+    filters: Record<string, any> | undefined,
+  ): void {
+    if (!filters?.tglDari || !filters?.tglSampai) return;
+
+    qb.whereBetween('u.tglbukti', [
+      formatDateToSQL(String(filters.tglDari)),
+      formatDateToSQL(String(filters.tglSampai)),
+    ]);
+  }
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    const excludeSearchKeys = ['tglDari', 'tglSampai', 'statusppn_text'];
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search) {
+      const sanitized = String(search).trim();
+      qb.where((query: any) => {
+        searchFields.forEach((field) => {
+          const alias = this.SEARCH_ALIAS[field];
+          if (alias) {
+            query.orWhere(alias, 'ilike', `%${sanitized}%`);
+          } else if (field === 'tglbukti') {
+            query.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
+              `%${sanitized}%`,
+            ]);
+          } else if (field === 'created_at' || field === 'updated_at') {
+            query.orWhereRaw(
+              `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
+              [`%${sanitized}%`],
+            );
+          } else {
+            // Kolom non-teks (u.nominal = numeric) menolak ilike dan
+            // menggagalkan SELURUH pencarian, bukan cuma kolom itu.
+            query.orWhereRaw('u.??::text ilike ?', [field, `%${sanitized}%`]);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, value]) => {
+      if (key === 'tglDari' || key === 'tglSampai') return;
+      if (!value) return;
+
+      const sanitizedValue = String(value);
+      const alias = this.SEARCH_ALIAS[key];
+
+      if (key === 'created_at' || key === 'updated_at') {
+        qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'tglbukti') {
+        qb.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (key === 'statusppn_text') {
+        qb.andWhere('u.statusppn', '=', sanitizedValue);
+      } else if (alias) {
+        qb.andWhere(alias, 'ilike', `%${sanitizedValue}%`);
+      } else {
+        qb.andWhereRaw('u.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+      }
+    });
+  }
+
+  private applySort(query: any, sortBy?: string, sortDirection?: string): void {
+    if (!sortBy) return;
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    if (sortBy === 'statusppn_text') {
+      // memo status PPN disimpan sebagai JSON; urutkan lewat isi MEMO-nya.
+      const memoExpr =
+        '(CASE WHEN u.statusppn_memo IS JSON THEN u.statusppn_memo::jsonb END)';
+      query.orderByRaw(`JSON_VALUE(${memoExpr}, '$.MEMO') ${dir}`);
+      return;
+    }
+
+    const alias = this.SEARCH_ALIAS[sortBy];
+    query.orderBy(alias ?? sortBy, dir);
+  }
+
+  private readonly EXPORT_COLUMNS = [
+    'u.nobukti',
+    'u.orderan_nobukti',
+    'u.jenisorder_nama',
+    'u.shipper_nama',
+    'u.statusppn_nama',
+    'u.asuransi_nama',
+    'u.comodity_nama',
+    'u.nominal',
+    'u.modifiedby',
+  ];
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const query = db(`${this.viewName} as u`)
+      .select([
+        ...this.EXPORT_COLUMNS,
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ])
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search));
+
+    this.applySort(query, sortBy, sortDirection);
+    query.orderBy('u.id', 'asc');
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN ESTIMASI BIAYA',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'NO BUKTI ORDERAN',
+      'JENIS ORDERAN',
+      'SHIPPER',
+      'STATUS PPN',
+      'ASURANSI',
+      'COMODITY',
+      'NOMINAL',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    columnWidths: [5, 25, 15, 25, 25, 30, 15, 30, 25, 18, 20, 22, 22],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.orderan_nobukti,
+      row.jenisorder_nama,
+      row.shipper_nama,
+      row.statusppn_nama,
+      row.asuransi_nama,
+      row.comodity_nama,
+      row.nominal,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
+
   async findOne(id: string, trx: any) {
     try {
-      const query = trx(`${this.tableName} as u`)
+      const query = trx(`${this.viewName} as u`)
         .select([
           'u.id',
           'u.nobukti',
@@ -386,29 +511,20 @@ export class EstimasiBiayaHeaderService {
           'u.asuransi_id',
           'u.comodity_id',
           'u.consignee_id',
-          'jenisorderan.nama as jenisorder_nama',
-          'shipper.nama as shipper_nama',
-          'ppn.text as statusppn_nama',
-          'asuransi.nama as asuransi_nama',
-          'comodity.keterangan as comodity_nama',
-          'consignee.namaconsignee as consignee_nama',
+          'u.jenisorder_nama',
+          'u.shipper_nama',
+          'u.statusppn_nama',
+          'u.asuransi_nama',
+          'u.comodity_nama',
+          'u.consignee_nama',
         ])
-        .leftJoin('jenisorder as jenisorderan', 'u.jenisorder_id', 'jenisorderan.id')
-        .leftJoin('shipper', 'u.shipper_id', 'shipper.id')
-        .leftJoin('parameter as ppn', 'u.statusppn', 'ppn.id')
-        .leftJoin('typeakuntansi as asuransi', 'u.asuransi_id', 'asuransi.id')
-        .leftJoin('comodity', 'u.comodity_id', 'comodity.id')
-        .leftJoin('consignee', 'u.consignee_id', 'consignee.id')
         .where('u.id', id);
 
       const data = await query;
 
-      const findOneDetailBiaya = await this.detailBiayaService.findOne(
-        +id,
-        trx,
-      );
+      const findOneDetailBiaya = await this.detailBiayaService.findOne(id, trx);
       const findOneDetailInvoice = await this.detailInvoiceService.findOne(
-        +id,
+        id,
         trx,
       );
 
@@ -417,7 +533,6 @@ export class EstimasiBiayaHeaderService {
         detailbiaya: findOneDetailBiaya,
         detailinvoice: findOneDetailInvoice,
       };
-      console.log('result', result);
       // throw new Error('HAHA')
 
       return {
@@ -440,14 +555,14 @@ export class EstimasiBiayaHeaderService {
         // tglbukti: data.tglbukti,
         jenisorder_id: data.jenisorder_id,
         orderan_nobukti: data.orderan_nobukti,
-        nominal: data.nominal,
+        nominal: this.parseCurrency(data.nominal),
         shipper_id: data.shipper_id,
         statusppn: data.statusppn,
         asuransi_id: data.asuransi_id,
         comodity_id: data.comodity_id ? data.comodity_id : null,
         consignee_id: data.consignee_id ? data.consignee_id : null,
-        biayaemkl_id: data.biayaemkl_id,
-        keterangan: data.keterangan,
+        // biayaemkl_id & keterangan TIDAK ada kolomnya di estimasibiayaheader;
+        // menyetelnya membuat UPDATE gagal dan hasChanges() selalu true.
         modifiedby: data.modifiedby,
       };
 
@@ -459,6 +574,7 @@ export class EstimasiBiayaHeaderService {
           updated_at,
         };
 
+        // Alasan sama seperti di create(): id/FK tidak boleh di-uppercase.
         Object.keys(fixHeaderData).forEach((key) => {
           if (typeof fixHeaderData[key] === 'string') {
             const value = fixHeaderData[key];
@@ -466,8 +582,8 @@ export class EstimasiBiayaHeaderService {
 
             if (dateRegex.test(value)) {
               fixHeaderData[key] = formatDateToSQL(value);
-            } else {
-              fixHeaderData[key] = fixHeaderData[key].toUpperCase();
+            } else if (key === 'modifiedby') {
+              fixHeaderData[key] = value.toUpperCase();
             }
           }
         });
@@ -501,11 +617,11 @@ export class EstimasiBiayaHeaderService {
           estimasibiaya_id: updatedData ? updatedData.id : existingData.id,
           link_id: detail.link_id || null,
           biayaemkl_id: detail.biayaemkl_id || null,
-          nominal: detail.nominal || '',
-          nilaiasuransi: detail.nilaiasuransi || '',
-          nominaldisc: detail.nominaldisc || '',
-          nominalsebelumdisc: detail.nominalsebelumdisc || '',
-          nominaltradoluar: detail.nominaltradoluar || '',
+          nominal: this.parseCurrency(detail.nominal),
+          nilaiasuransi: this.parseCurrency(detail.nilaiasuransi),
+          nominaldisc: this.parseCurrency(detail.nominaldisc),
+          nominalsebelumdisc: this.parseCurrency(detail.nominalsebelumdisc),
+          nominaltradoluar: this.parseCurrency(detail.nominaltradoluar),
           modifiedby: updatedData
             ? updatedData.modifiedby
             : existingData.modifiedby,
@@ -524,7 +640,7 @@ export class EstimasiBiayaHeaderService {
             estimasibiaya_id: updatedData ? updatedData.id : existingData.id,
             link_id: detail.link_id || null,
             biayaemkl_id: detail.biayaemkl_id || null,
-            nominal: detail.nominal || '',
+            nominal: this.parseCurrency(detail.nominal),
             modifiedby: updatedData
               ? updatedData.modifiedby
               : existingData.modifiedby,
