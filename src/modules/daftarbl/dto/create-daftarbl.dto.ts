@@ -20,8 +20,9 @@ export const CreateDaftarblSchema = z.object({
   // statusaktif menyimpan id parameter (varchar UUID), bukan angka. Jangan
   // z.number() — frontend mengirim id string sehingga z.number() menolaknya.
   statusaktif: z.string().min(1, { message: 'Status Aktif is required' }),
-  statusaktif_text: z.string().nullable().optional(),
+  text: z.string().nullable().optional(),
 
+  info: z.string().nullable().optional(),
   modifiedby: z.string().nullable().optional(),
 });
 

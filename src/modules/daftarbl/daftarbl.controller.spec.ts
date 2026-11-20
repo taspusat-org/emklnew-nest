@@ -10,7 +10,9 @@ describe('DaftarblController', () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [DaftarblController],
       providers: [DaftarblService],
-    }).useMocker(autoMocker).compile();
+    })
+      .useMocker(autoMocker)
+      .compile();
 
     controller = module.get<DaftarblController>(DaftarblController);
   });

@@ -8,7 +8,9 @@ describe('DaftarblService', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [DaftarblService],
-    }).useMocker(autoMocker).compile();
+    })
+      .useMocker(autoMocker)
+      .compile();
 
     service = module.get<DaftarblService>(DaftarblService);
   });
