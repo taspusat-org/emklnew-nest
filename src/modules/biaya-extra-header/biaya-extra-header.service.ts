@@ -885,6 +885,17 @@ export class BiayaExtraHeaderService {
     }
   }
 
+  /**
+   * Query dasar export daftar Biaya Extra: filter, jenis order, dan sort yang
+   * sama dengan findAll, TANPA paging dan hanya kolom yang dipakai file Excel.
+   *
+   * `jenisorderId` sudah diresolusi di controller (lewat resolveJenisOrderId)
+   * karena ExportJobService meminta stream secara sinkron.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
+   * kehabisan heap saat datanya banyak.
+   */
   buildExportQuery(
     {
       search,
@@ -946,6 +957,7 @@ export class BiayaExtraHeaderService {
     return Number(result?.total ?? 0);
   }
 
+  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
