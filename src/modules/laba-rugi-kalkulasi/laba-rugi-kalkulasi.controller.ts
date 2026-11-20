@@ -118,23 +118,7 @@ export class LabaRugiKalkulasiController {
       isLookUp: isLookUp === 'true',
     };
 
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.labaRugiKalkulasiService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error(
-        'Error fetching all laba rugi kalkulasi ini controller:',
-        error,
-        error.message,
-      );
-      throw new InternalServerErrorException(
-        'Failed to fetch laba rugi kalkulasi',
-      );
-    }
+    return await this.labaRugiKalkulasiService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)

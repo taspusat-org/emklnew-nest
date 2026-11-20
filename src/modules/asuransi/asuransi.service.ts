@@ -278,7 +278,6 @@ export class AsuransiService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
-
       const countResult = await trx(`${this.viewName} as va`)
         .count('va.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))

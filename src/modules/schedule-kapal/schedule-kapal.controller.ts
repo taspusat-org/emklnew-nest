@@ -99,23 +99,7 @@ export class ScheduleKapalController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
     };
 
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.scheduleKapalService.findAll(params, trx);
-      trx.commit();
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error(
-        'Error fetching all schedule kapal in controller:',
-        error,
-        'ini error message',
-        error.message,
-      );
-      throw new InternalServerErrorException(
-        'Failed to fetch schedule kapal in controller',
-      );
-    }
+    return this.scheduleKapalService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
