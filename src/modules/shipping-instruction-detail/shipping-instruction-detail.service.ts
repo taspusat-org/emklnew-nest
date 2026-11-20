@@ -354,15 +354,121 @@ export class ShippingInstructionDetailService {
     }
   }
 
+  /**
+   * shippinginstruction_id diturunkan ke vshippinginstructiondetail lewat GUC
+   * supaya kelima LEFT JOIN referensi di view hanya kena baris satu bukti,
+   * bukan seluruh isi tabel detail lalu disaring belakangan.
+   *
+   * `set_config(..., true)` transaksi-lokal, jadi tidak bocor lewat pool.
+   */
+  private async setSessionContext(trx: any, id: string): Promise<void> {
+    await trx.raw(
+      `SELECT set_config('tas.si_shippinginstruction_id', ?, true)`,
+      [id ? String(id) : ''],
+    );
+  }
+
+  private static readonly ALIASED_COLUMNS: Record<string, string> = {
+    detail_nobukti: 'p.shippinginstructiondetail_nobukti',
+    emkllain_text: 'p.emkllain_nama',
+    containerpelayaran_text: 'p.containerpelayaran_nama',
+    tujuankapal_text: 'p.tujuankapal_nama',
+    daftarbl_text: 'p.daftarbl_nama',
+    statuspisahbl_text: 'p.statuspisahbl_nama',
+  };
+
+  private columnFor(key: string): string {
+    return (
+      ShippingInstructionDetailService.ALIASED_COLUMNS[key] ?? `p.${key}`
+    );
+  }
+
+  /**
+   * Search global + filter per kolom. Dipisah dari findAll supaya COUNT dan
+   * query data memakai penyaringan yang sama persis — kalau disalin, keduanya
+   * langsung berbeda begitu salah satu diubah dan totalPages grid jadi ngawur.
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    // statuspisahbl_text disaring sebagai kecocokan id persis, bukan ilike,
+    // jadi tidak ikut dalam pencarian global.
+    const excludeSearchKeys = ['statuspisahbl_text'];
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search && searchFields.length > 0) {
+      const sanitized = String(search).trim();
+      qb.where((inner: any) => {
+        searchFields.forEach((field) => {
+          inner.orWhere(this.columnFor(field), 'ilike', `%${sanitized}%`);
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (key === 'statuspisahbl_text') {
+        qb.andWhere('p.statuspisahbl', '=', sanitizedValue);
+      } else {
+        qb.andWhere(this.columnFor(key), 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private sortColumn(sortBy?: string): string {
+    return this.columnFor(sortBy || 'shippinginstructiondetail_nobukti');
+  }
+
   async findAll(
     id: string,
     trx: any,
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    { search, filters, pagination, sort }: FindAllParams,
   ) {
+    const { page = 1, limit = 0 } = pagination ?? {};
+
+    if (!id) {
+      // Bentuk balikan tetap lengkap supaya grid yang membaca
+      // pagination.totalItems saat header belum dipilih tidak menemukan
+      // undefined lalu menghitung totalPages = NaN.
+      return {
+        status: false,
+        message: 'No data found',
+        data: [],
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
+      };
+    }
+
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      await this.setSessionContext(trx, id);
+
+      // set_config di atas sudah memangkas view, tapi WHERE eksplisit TETAP
+      // dipasang. Hasil endpoint ini dipakai FormShippingInstruction sebagai
+      // payload simpan dan create() menghapus baris yang tidak ada di payload —
+      // kalau session context gagal ter-set, tanpa WHERE ini detail milik bukti
+      // lain ikut terbawa. JANGAN dihapus dengan alasan "sudah ada di view".
+      const scoped = (qb: any) => {
+        qb.where('p.shippinginstruction_id', id);
+        this.applyFilters(qb, filters, search);
+      };
+
+      const countResult = await trx(`${this.viewName} as p`)
+        .modify(scoped)
+        .count('* as total')
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
       const query = trx(`${this.viewName} as p`)
         .select(
@@ -389,106 +495,53 @@ export class ShippingInstructionDetailService {
           'p.tujuankapal_nama',
           'p.daftarbl_nama',
         )
-        .where('p.shippinginstruction_id', id);
+        .modify(scoped);
 
-      const excludeSearchKeys = ['statuspisahbl_text'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda (atau melewatkan baris) saat
+      // grid menggeser window. Sort dari grid jadi primary, id (PK, unik)
+      // sebagai tiebreaker supaya urutan total dan stabil.
+      const sortBy = sort?.sortBy || 'shippinginstructiondetail_nobukti';
+      const sortDirection =
+        String(sort?.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const orderCol = this.sortColumn(sortBy);
 
-      if (search) {
-        const sanitized = String(search).trim();
-
-        query.where((qb: any) => {
-          searchFields.forEach((field) => {
-            if (field === 'detail_nobukti') {
-              qb.orWhere(
-                'p.shippinginstructiondetail_nobukti',
-                'ilike',
-                `%${sanitized}%`,
-              );
-            } else if (field === 'emkllain_text') {
-              qb.orWhere('p.emkllain_nama', 'ilike', `%${sanitized}%`);
-            } else if (field === 'containerpelayaran_text') {
-              qb.orWhere(
-                'p.containerpelayaran_nama',
-                'ilike',
-                `%${sanitized}%`,
-              );
-            } else if (field === 'tujuankapal_text') {
-              qb.orWhere('p.tujuankapal_nama', 'ilike', `%${sanitized}%`);
-            } else if (field === 'daftarbl_text') {
-              qb.orWhere('p.daftarbl_nama', 'ilike', `%${sanitized}%`);
-            } else {
-              qb.orWhere(`p.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
+      query.orderBy(orderCol, sortDirection);
+      if (orderCol !== 'p.id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value === null || value === undefined || value === '') continue;
-
-          const sanitizedValue = String(value);
-          if (key === 'detail_nobukti') {
-            query.andWhere(
-              'p.shippinginstructiondetail_nobukti',
-              'ilike',
-              `%${sanitizedValue}%`,
-            );
-          } else if (key === 'emkllain_text') {
-            query.andWhere('p.emkllain_nama', 'ilike', `%${sanitizedValue}%`);
-          } else if (key === 'containerpelayaran_text') {
-            query.andWhere(
-              'p.containerpelayaran_nama',
-              'ilike',
-              `%${sanitizedValue}%`,
-            );
-          } else if (key === 'tujuankapal_text') {
-            query.andWhere(
-              'p.tujuankapal_nama',
-              'ilike',
-              `%${sanitizedValue}%`,
-            );
-          } else if (key === 'daftarbl_text') {
-            query.andWhere('p.daftarbl_nama', 'ilike', `%${sanitizedValue}%`);
-          } else if (key === 'statuspisahbl_text') {
-            query.andWhere('p.statuspisahbl', '=', sanitizedValue);
-          } else {
-            query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
-          }
-        }
+      // limit 0/undefined = ambil semua. Dipakai pemanggil non-grid yang butuh
+      // seluruh detail satu bukti sekaligus (findOne header untuk form edit,
+      // export/cetak).
+      if (Number(limit) > 0) {
+        query.offset((Number(page) - 1) * Number(limit)).limit(Number(limit));
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        const sortDirection =
-          String(sort.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
-
-        if (sort.sortBy === 'detail_nobukti') {
-          query.orderBy('p.shippinginstructiondetail_nobukti', sortDirection);
-        } else if (sort.sortBy === 'emkllain_text') {
-          query.orderBy('p.emkllain_nama', sortDirection);
-        } else if (sort.sortBy === 'containerpelayaran_text') {
-          query.orderBy('p.containerpelayaran_nama', sortDirection);
-        } else if (sort.sortBy === 'tujuankapal_text') {
-          query.orderBy('p.tujuankapal_nama', sortDirection);
-        } else if (sort.sortBy === 'daftarbl_text') {
-          query.orderBy('p.daftarbl_nama', sortDirection);
-        } else if (sort.sortBy === 'statuspisahbl_text') {
-          query.orderBy('p.statuspisahbl_nama', sortDirection);
-        } else {
-          query.orderBy(`p.${sort.sortBy}`, sortDirection);
-        }
-      }
-
-      const result = await query;
+      const data = await query;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
 
       return {
-        data: result,
+        status: data.length > 0,
+        message:
+          data.length > 0
+            ? 'Shipping instruction detail data fetched successfully'
+            : 'No data found',
+        data,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
-      console.error('Error to findAll Schedule detail in service', error);
+      console.error(
+        'Error to findAll shipping instruction detail in service',
+        error,
+      );
       throw new Error(error);
     }
   }

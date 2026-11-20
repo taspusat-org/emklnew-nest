@@ -221,15 +221,96 @@ export class ShippingInstructionDetailRincianService {
     }
   }
 
+  /**
+   * shippinginstructiondetail_id diturunkan ke
+   * vshippinginstructiondetailrincian lewat GUC supaya join ke orderanmuatan &
+   * shipper hanya kena baris satu detail, bukan seluruh isi tabel rincian.
+   *
+   * `set_config(..., true)` transaksi-lokal, jadi tidak bocor lewat pool.
+   */
+  private async setSessionContext(trx: any, id: string): Promise<void> {
+    await trx.raw(
+      `SELECT set_config('tas.si_shippinginstructiondetail_id', ?, true)`,
+      [id ? String(id) : ''],
+    );
+  }
+
+  private columnFor(key: string): string {
+    return key === 'detail_nobukti'
+      ? 'p.shippinginstructiondetail_nobukti'
+      : `p.${key}`;
+  }
+
+  /**
+   * Search global + filter per kolom. Dipisah dari findAll supaya COUNT dan
+   * query data memakai penyaringan yang sama persis.
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    const searchFields = Object.keys(filters || {});
+
+    if (search && searchFields.length > 0) {
+      const sanitized = String(search).trim();
+      qb.where((inner: any) => {
+        searchFields.forEach((field) => {
+          inner.orWhere(this.columnFor(field), 'ilike', `%${sanitized}%`);
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      qb.andWhere(this.columnFor(key), 'ilike', `%${String(rawValue)}%`);
+    });
+  }
+
   async findAll(
     id: string,
     trx: any,
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    { search, filters, pagination, sort }: FindAllParams,
   ) {
+    const { page = 1, limit = 0 } = pagination ?? {};
+
+    if (!id) {
+      // Bentuk balikan tetap lengkap supaya grid yang membaca
+      // pagination.totalItems saat baris detail belum dipilih tidak menemukan
+      // undefined lalu menghitung totalPages = NaN.
+      return {
+        status: false,
+        message: 'No data found',
+        data: [],
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
+      };
+    }
+
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      await this.setSessionContext(trx, id);
+
+      // set_config di atas sudah memangkas view, tapi WHERE eksplisit TETAP
+      // dipasang — alasan sama seperti di service detail: hasil endpoint ini
+      // ikut jadi payload simpan, dan create() menghapus baris yang tidak ada
+      // di payload. JANGAN dihapus dengan alasan "sudah ada di view".
+      const scoped = (qb: any) => {
+        qb.where('p.shippinginstructiondetail_id', id);
+        this.applyFilters(qb, filters, search);
+      };
+
+      const countResult = await trx(`${this.viewName} as p`)
+        .modify(scoped)
+        .count('* as total')
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
       const query = trx(`${this.viewName} as p`)
         .select(
@@ -244,66 +325,48 @@ export class ShippingInstructionDetailRincianService {
           'p.noseal',
           'p.shipper_nama',
         )
-        .where('p.shippinginstructiondetail_id', id);
+        .modify(scoped);
 
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => filters![k],
-      );
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda saat grid menggeser window.
+      const sortBy = sort?.sortBy || 'shippinginstructiondetail_nobukti';
+      const sortDirection =
+        String(sort?.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const orderCol = this.columnFor(sortBy);
 
-      if (search) {
-        const sanitized = String(search).trim();
-
-        query.where((qb: any) => {
-          searchFields.forEach((field) => {
-            if (field === 'detail_nobukti') {
-              qb.orWhere(
-                'p.shippinginstructiondetail_nobukti',
-                'ilike',
-                `%${sanitized}%`,
-              );
-            } else {
-              qb.orWhere(`p.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
+      query.orderBy(orderCol, sortDirection);
+      if (orderCol !== 'p.id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          if (value === null || value === undefined || value === '') continue;
-
-          const sanitizedValue = String(value);
-          if (key === 'detail_nobukti') {
-            query.andWhere(
-              'p.shippinginstructiondetail_nobukti',
-              'ilike',
-              `%${sanitizedValue}%`,
-            );
-          } else {
-            query.andWhere(`p.${key}`, 'ilike', `%${sanitizedValue}%`);
-          }
-        }
+      // limit 0/undefined = ambil semua, dipakai findOne header saat form edit
+      // memuat seluruh rincian satu detail sekaligus.
+      if (Number(limit) > 0) {
+        query.offset((Number(page) - 1) * Number(limit)).limit(Number(limit));
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        const sortDirection =
-          String(sort.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
-
-        if (sort.sortBy === 'detail_nobukti') {
-          query.orderBy('p.shippinginstructiondetail_nobukti', sortDirection);
-        } else {
-          query.orderBy(`p.${sort.sortBy}`, sortDirection);
-        }
-      }
-
-      const result = await query;
+      const data = await query;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
 
       return {
-        data: result,
+        status: data.length > 0,
+        message:
+          data.length > 0
+            ? 'Shipping instruction detail rincian data fetched successfully'
+            : 'No data found',
+        data,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error(
-        'Error to findAll Schedule detail rincian in service',
+        'Error to findAll shipping instruction detail rincian in service',
         error,
       );
       throw new Error(error);

@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   InternalServerErrorException,
 } from '@nestjs/common';
@@ -24,6 +25,7 @@ import { dbMssql } from 'src/common/utils/db';
 
 @Injectable()
 export class ShippingInstructionService {
+  private readonly logger = new Logger(ShippingInstructionService.name);
   private readonly tableName: string = 'shippinginstructionheader';
   private readonly viewName: string = 'vshippinginstructionheader';
 
@@ -154,27 +156,17 @@ export class ShippingInstructionService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Dulu di sini findAll dipanggil dengan limit: 0 (= TANPA LIMIT) hanya
+      // untuk mencari index baris baru lewat findIndex, lalu hasil potongannya
+      // ditulis ke Redis. Artinya setiap simpan menarik SELURUH baris hasil
+      // filter ke memori Node — di tabel 1 juta baris itu satu query raksasa
+      // plus JSON.stringify ratusan ribu baris. Blob Redis-nya pun tidak pernah
+      // dibaca siapa pun: GridShippingInstruction hanya memakai pageNumber &
+      // dataIndex dari response ini.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        newItem.id,
+        data,
       );
 
       return {
@@ -196,25 +188,128 @@ export class ShippingInstructionService {
     }
   }
 
+  /**
+   * Periode diturunkan ke vshippinginstructionheader lewat GUC
+   * (`tas.si_tgldari`, `tas.si_tglsampai`), bukan sebagai predikat di query
+   * luar: view menyaring shippinginstructionheader SEBELUM LEFT JOIN
+   * schedulekapal/pelayaran/kapal/tujuankapal, jadi keempat join itu hanya kena
+   * baris satu periode.
+   *
+   * `set_config(..., true)` hanya hidup selama transaksi, jadi tidak bocor ke
+   * request lain lewat connection pool — tapi juga berarti WAJIB dipanggil
+   * ulang di setiap transaksi yang membaca view ini.
+   */
   private async setDateRangeSessionContext(
     trx: any,
     filters: Record<string, any> | undefined,
   ): Promise<void> {
-    const tglDari =
-      filters?.tglDari && filters?.tglSampai
-        ? formatDateToSQL(String(filters.tglDari))
-        : '';
-    const tglSampai =
-      filters?.tglDari && filters?.tglSampai
-        ? formatDateToSQL(String(filters.tglSampai))
-        : '';
+    // Tiap batas berdiri SENDIRI. Versi sebelumnya baru mengisi GUC kalau
+    // tglDari DAN tglSampai dua-duanya ada, sehingga periode separuh terbuka
+    // diam-diam berubah jadi "tanpa filter" — di tabel besar itu berarti grid
+    // menghitung dan menyortir seluruh tabel.
+    const tglDari = filters?.tglDari
+      ? String(formatDateToSQL(String(filters.tglDari)))
+      : '';
+    const tglSampai = filters?.tglSampai
+      ? String(formatDateToSQL(String(filters.tglSampai)))
+      : '';
 
-    await trx.raw(`SELECT set_config('tas.si_tgldari', ?, true)`, [
-      tglDari ? String(tglDari) : '',
-    ]);
-    await trx.raw(`SELECT set_config('tas.si_tglsampai', ?, true)`, [
-      tglSampai ? String(tglSampai) : '',
-    ]);
+    await trx.raw(
+      `SELECT set_config('tas.si_tgldari', ?, true),
+              set_config('tas.si_tglsampai', ?, true)`,
+      [tglDari, tglSampai],
+    );
+  }
+
+  /** Kolom ORDER BY yang dipakai grid, dipetakan dari sortBy yang dikirim UI. */
+  private resolveSortColumn(sortBy?: string): string {
+    switch (sortBy) {
+      case 'pelayaran_text':
+        return 'u.pelayaran_nama';
+      case 'kapal_text':
+        return 'u.kapal_nama';
+      case 'tujuankapal_text':
+        return 'u.tujuankapal_nama';
+      default:
+        // Fallback wajib: create/update memanggil ini dengan payload yang
+        // kadang tidak membawa sortBy, dan `u.undefined` bikin query gagal.
+        return `u.${sortBy || 'nobukti'}`;
+    }
+  }
+
+  /**
+   * Posisi 1-based baris `id` pada urutan grid — dihitung lewat COUNT, bukan
+   * dengan menarik seluruh baris hasil filter ke memori lalu findIndex.
+   *
+   * Pemanggil WAJIB sudah memanggil setDateRangeSessionContext di transaksi
+   * yang sama, karena hitungan ini membaca view.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any> | undefined,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const orderCol = this.resolveSortColumn(sortBy);
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const existingData = await trx(`${this.viewName} as u`)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await trx(`${this.viewName} as u`)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Halaman + index baris hasil simpan, untuk memposisikan ulang kursor grid.
+   *
+   * `dataIndex` adalah index DI DALAM halamannya, bukan index global: grid
+   * menghitung `rowIdxInWindow = (pageNumber - logicalStartPage) * limit +
+   * dataIndex`, jadi mengirim index global membuat baris ter-highlight melompat
+   * sejauh satu halaman ekstra untuk setiap halaman setelah yang pertama.
+   *
+   * Kegagalan di sini TIDAK boleh menggagalkan simpan yang sudah berhasil —
+   * ini cuma soal posisi kursor.
+   */
+  private async resolveGridPosition(
+    trx: any,
+    id: string,
+    data: any,
+  ): Promise<{ pageNumber: number; dataIndex: number }> {
+    const limit = Number(data?.limit) > 0 ? Number(data.limit) : 50;
+    try {
+      await this.setDateRangeSessionContext(trx, data?.filters);
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        data?.filters,
+        data?.search,
+        data?.sortBy,
+        data?.sortDirection,
+      );
+
+      return {
+        pageNumber: Math.ceil(posisi / limit),
+        dataIndex: (posisi - 1) % limit,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Simpan shipping instruction ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung: ${error?.message}`,
+      );
+      return { pageNumber: 1, dataIndex: 0 };
+    }
   }
 
   private applyFilters(
@@ -302,8 +397,13 @@ export class ShippingInstructionService {
 
       await this.setDateRangeSessionContext(trx, filters);
 
+      // count(*), BUKAN count(u.id): tanpa kolom heap yang harus dibaca,
+      // Postgres bisa menyelesaikan COUNT lewat Index Only Scan di
+      // idx_shippinginstructionheader_tglbukti dan membuang LEFT JOIN
+      // schedulekapal yang tidak dirujuk. Jumlahnya sama — id NOT NULL dan ada
+      // di sisi FROM view, bukan sisi yang di-LEFT JOIN.
       const countResult = await trx(`${this.viewName} as u`)
-        .count('u.id as total')
+        .count('* as total')
         .modify((qb: any) => this.applyFilters(qb, filters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
@@ -328,14 +428,14 @@ export class ShippingInstructionService {
 
       query.modify((qb: any) => this.applyFilters(qb, filters, search));
 
-      if (sortBy === 'pelayaran_text') {
-        query.orderBy('u.pelayaran_nama', sortDirection);
-      } else if (sortBy === 'kapal_text') {
-        query.orderBy('u.kapal_nama', sortDirection);
-      } else if (sortBy === 'tujuankapal_text') {
-        query.orderBy('u.tujuankapal_nama', sortDirection);
-      } else {
-        query.orderBy(`u.${sortBy}`, sortDirection);
+      const orderCol = this.resolveSortColumn(sortBy);
+      query.orderBy(orderCol, sortDirection);
+      // Urutan HARUS total/deterministik. Kolom seperti pelayaran_nama atau
+      // tglbukti penuh baris kembar; tanpa tiebreaker unik, dua request dengan
+      // OFFSET berbeda bisa memulangkan baris yang sama dua kali (atau
+      // melewatkannya) saat grid menggeser window. nobukti unik di tabel ini.
+      if (orderCol !== 'u.nobukti') {
+        query.orderBy('u.nobukti', 'asc');
       }
 
       if (limit > 0) {
@@ -532,29 +632,12 @@ export class ShippingInstructionService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Lihat catatan yang sama di create(): posisi dihitung lewat COUNT,
+      // bukan dengan menarik seluruh hasil filter ke memori.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex(
-        (item) => item.id === updatedData.id,
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        updatedData.id,
+        data,
       );
 
       return {

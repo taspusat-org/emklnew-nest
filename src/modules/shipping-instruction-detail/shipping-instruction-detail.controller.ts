@@ -59,15 +59,10 @@ export class ShippingInstructionDetailController {
         trx,
         params,
       );
-      if (result.data.length === 0) {
-        await trx.commit();
-
-        return {
-          status: false,
-          message: 'No data found',
-          data: [],
-        };
-      }
+      // Balikkan `result` apa adanya, termasuk saat kosong: service sudah
+      // menyusun bentuk lengkap berikut `pagination`. Short-circuit lama
+      // membuang blok itu, sehingga grid membaca pagination.totalItems =
+      // undefined dan menghitung totalPages = NaN begitu hasil filter kosong.
       await trx.commit();
 
       return result;
