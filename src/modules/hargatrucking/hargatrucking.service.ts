@@ -571,6 +571,11 @@ export class HargatruckingService {
     return query;
   }
 
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
+   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
+   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
+   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -583,6 +588,7 @@ export class HargatruckingService {
     return Number(result?.total ?? 0);
   }
 
+  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
