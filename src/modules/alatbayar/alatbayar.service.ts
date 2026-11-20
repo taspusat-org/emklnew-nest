@@ -318,6 +318,11 @@ export class AlatbayarService {
       } else {
         query.orderBy(`ab.${sortBy}`, sortDirection);
       }
+      // Tiebreaker WAJIB: tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, dan ORDER BY yang nilainya seri (mis. sort STATUS AKTIF yang
+      // cuma punya 2 nilai) tak dijamin stabil antar query → satu baris bisa
+      // muncul di dua halaman ("two children with the same key" di grid).
+      query.orderBy('ab.id', 'asc');
 
       const offset =
         useCustomOffset === true && customOffset !== undefined
