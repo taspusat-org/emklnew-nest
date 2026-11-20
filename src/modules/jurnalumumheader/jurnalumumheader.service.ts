@@ -851,6 +851,11 @@ export class JurnalumumheaderService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+  /**
+   * Data untuk cetak bukti jurnal umum di background: satu header beserta
+   * rinciannya, dipetakan ke dua datasource LaporanJurnalUmum.mrt — `data`
+   * (header) dan `detail` (rincian coa/nominal).
+   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
