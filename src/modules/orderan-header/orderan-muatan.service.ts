@@ -1046,16 +1046,51 @@ export class OrderanMuatanService {
     }
   }
 
-  async processShipping(schedule_id: number, trx: any) {
+  async processShipping(schedule_id: any, trx: any) {
     try {
+      // Default comodity diambil dari parameter supaya bisa diubah tanpa deploy.
+      // Kalau barisnya belum ada, jatuh ke 'GENERAL CARGO'.
+      const defaultComodityRow = await trx('parameter')
+        .select('text')
+        .where('grp', 'COMODITY DEFAULT')
+        .andWhere('subgrp', 'SHIPPING INSTRUCTION')
+        .first();
+
+      const defaultComodity = defaultComodityRow?.text || 'GENERAL CARGO';
+
       const query = trx
         .from(trx.raw(`${this.tableName} as u`))
+        .leftJoin('shipper as s', 'u.shipper_id', 's.id')
         .select([
           'u.daftarbl_id',
           trx.raw('MAX(u.emkl_id) AS emkl_id'),
           trx.raw('MAX(u.pelayarancontainer_id) AS pelayarancontainer_id'),
           trx.raw('MAX(u.tujuankapal_id) AS tujuankapal_id'),
           trx.raw('MAX(u.id) AS orderan_id'),
+          trx.raw('MAX(u.asalmuatan) AS asalpelabuhan'),
+          trx.raw('MAX(s.nama) AS shipper'),
+          trx.raw('?::text AS comodity', [defaultComodity]),
+          // SEMENTARA dipatok. `consignee` belum punya kolom sumber di
+          // orderanmuatan maupun daftarbl, tapi di form dibuat read-only, jadi
+          // nilainya harus datang dari sini. Begitu sumber aslinya ada, ganti
+          // literal ini dengan kolomnya (atau ikuti pola parameter seperti
+          // COMODITY DEFAULT di atas).
+          trx.raw(`?::text AS consignee`, ['PT TAS']),
+          // Satu baris rincian per orderan muatan di grup ini.
+          trx.raw(
+            `json_agg(
+               json_build_object(
+                 'orderanmuatan_nobukti', COALESCE(u.nobukti, ''),
+                 'comodity', ?::text,
+                 'nocontainer', COALESCE(u.nocontainer, ''),
+                 'noseal', COALESCE(u.noseal, ''),
+                 'shipper_id', u.shipper_id,
+                 'shipper_nama', COALESCE(s.nama, '')
+               )
+               ORDER BY u.nobukti
+             ) AS detailsrincian`,
+            [defaultComodity],
+          ),
         ])
         .where('u.schedule_id', schedule_id)
         .groupBy('u.daftarbl_id');
@@ -1066,7 +1101,7 @@ export class OrderanMuatanService {
         data,
       };
     } catch (error) {
-      console.error('Error to findAll Orderan Muatan', error);
+      console.error('Error to processShipping Orderan Muatan', error);
       throw new Error(error);
     }
   }

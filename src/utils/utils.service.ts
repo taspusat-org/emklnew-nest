@@ -48,19 +48,6 @@ export class UtilsService {
     }
   }
 
-  /**
-   * Create temporary table from data array (auto-detect structure)
-   * OPTIMIZED FOR BIG DATA - Support jutaan records dengan bulk insert
-   *
-   * @param data Array of objects to insert
-   * @param trx Transaction object
-   * @param customPrefix Optional custom prefix for temp table name
-   * @param options Optional configuration
-   *   - chunkSize: Number of rows per batch (default: 5000 for big data)
-   *   - addPositionField: Add auto-increment position field (default: true)
-   *   - onProgress: Callback for progress tracking
-   * @returns Object containing temp table name, inserted count, and execution time
-   */
   async createTempTableFromData(
     data: any[],
     trx: any,
@@ -161,11 +148,6 @@ export class UtilsService {
       throw new Error(`Failed to create temp table: ${error.message}`);
     }
   }
-  /**
-   * Create temp table directly from SQL query using SELECT INTO (optimized for BIG DATA)
-   * This method is MUCH FASTER than fetching to Node.js then inserting
-   * Perfect for 500k+ rows
-   */
   async createTempFisikTableFromQuery(
     queryBuilder: any,
     trx: any,
@@ -417,67 +399,170 @@ export class UtilsService {
   // bookingorderanmuatan.service.ts) tetap memakainya persis seperti sebelum
   // — `` `${dataTempStatusPendukung} as pivot` `` di .leftJoin() — tanpa
   // perubahan apa pun di sana.
+  /** Ekspresi kolom pivot status pendukung untuk tempPivotStatusPendukung. */
+  private buildStatusPendukungColumns(fieldTempHasil: any, tablename: string) {
+    const categories: string[] = (fieldTempHasil as string[]).filter(
+      (f) => !f.endsWith('_nama') && !f.endsWith('_memo'),
+    );
+
+    if (categories.length === 0) {
+      throw new Error(
+        `statusPendukung: fieldTempHasil untuk '${tablename}' tidak berisi kategori valid`,
+      );
+    }
+
+    // Parse memo sebagai JSON hanya bila memang JSON valid.
+    const memoJson = (col: string) =>
+      `(CASE WHEN ${col} IS JSON THEN ${col}::jsonb END)`;
+
+    // "judul" = label kategori dari parameter.memo->>'MEMO' pada baris
+    // statusdatapendukung. TOP/OPEN historis diberi suffix _field.
+    const judulKeyExpr = `LOWER(REPLACE(
+      CASE
+        WHEN (${memoJson('memo')}->>'MEMO') IN ('TOP', 'OPEN')
+          THEN (${memoJson('memo')}->>'MEMO') || '_FIELD'
+        ELSE COALESCE(${memoJson('memo')}->>'MEMO', '')
+      END,
+      ' ', ''
+    ))`;
+
+    // Kolom pivot menunjuk k.kunci & n.* — hasil CTE MATERIALIZED di bawah,
+    // BUKAN ekspresi JSON yang dihitung ulang per baris. Lihat catatan di
+    // tempPivotStatusPendukung.
+    const categoryColumns = categories
+      .map((category) => {
+        const cat = String(category).toLowerCase().replace(/\s+/g, '');
+        return `
+          MAX(n.id::text) FILTER (WHERE k.kunci = '${cat}') AS ${category},
+          MAX(n.nama)     FILTER (WHERE k.kunci = '${cat}') AS ${category}_nama,
+          MAX(n.memo)     FILTER (WHERE k.kunci = '${cat}') AS ${category}_memo`;
+      })
+      .join(',\n');
+
+    return { categories, categoryColumns, judulKeyExpr, memoJson };
+  }
+
+  /**
+   * Pivot status pendukung jadi kolom, disimpan di TEMP TABLE lalu di-join oleh
+   * pemanggil. Dipakai bookingorderanmuatan & orderan-muatan.
+   *
+   * Biayanya mengikuti ukuran tabel transaksi, jadi index penunjangnya wajib
+   * ada — lihat migration *_add_statuspendukung_indexes.ts. Diukur di
+   * bookingorderanmuatan 100rb baris / 1 juta baris statuspendukung:
+   *   tanpa index parameter & statuspendukung : 14.334 ms
+   *   dengan index                            :    901 ms
+   */
+  /**
+   * @param sumberBaca Relasi yang dibaca sebagai sumber baris transaksi.
+   *   Default = `tablename` (perilaku lama, baca tabel base).
+   *
+   *   Pemanggil yang tabelnya besar sebaiknya mengisi ini dengan NAMA VIEW
+   *   modulnya — view itu sudah dipangkas periode lewat session context
+   *   (`set_config`), jadi pivot ikut menyempit tanpa perlu predikat tambahan.
+   *   `tablename` TETAP dipakai apa adanya untuk `c.subgrp`, karena itu menunjuk
+   *   nama tabel di parameter, bukan sumber bacanya.
+   *
+   *   Diukur di bookingorderanmuatan 100rb baris / 1 juta baris statuspendukung,
+   *   periode 1 bulan:
+   *     baca tabel base (seluruh tabel) : 14.181 ms
+   *     baca view (tersaring GUC)       :  1.072 ms
+   */
+  /**
+   * SELECT pivot status pendukung sebagai TEKS, tanpa membuat temp table.
+   *
+   * Dipakai dua jalur:
+   *   - tempPivotStatusPendukung -> dibungkus CREATE TEMP TABLE (butuh transaksi)
+   *   - export Excel yang streaming -> dipakai sebagai DERIVED TABLE, karena
+   *     export berjalan di luar transaksi sehingga temp table ON COMMIT DROP
+   *     tidak tersedia di sana.
+   *
+   * `sumberBaca` boleh berupa nama relasi ATAU subquery berkurung. Untuk
+   * export, isi dengan subquery yang sudah dibatasi periode — kalau diisi nama
+   * tabel base, pivot mengolah SELURUH tabel sebelum di-join.
+   */
+  buildStatusPendukungSelect(
+    tablename: string,
+    fieldTempHasil: any,
+    sumberBaca?: string,
+  ): string {
+    const { categoryColumns, judulKeyExpr, memoJson } =
+      this.buildStatusPendukungColumns(fieldTempHasil, tablename);
+
+    return `
+      -- Kedua CTE ini WAJIB MATERIALIZED.
+      --
+      -- Kunci kategori dihitung dari parameter.memo yang disimpan sebagai
+      -- teks: memo diperiksa IS JSON, di-cast ke jsonb, diambil ->>'MEMO',
+      -- lalu LOWER(REPLACE(...)). Kalau ekspresi itu ditulis langsung di
+      -- klausa FILTER, Postgres menghitungnya ULANG untuk setiap baris hasil
+      -- join dikali jumlah agregat — 10 kategori x 3 kolom = 30 kali per
+      -- baris. Menaruhnya di CTE membuatnya dihitung SEKALI per baris
+      -- parameter (ratusan baris saja).
+      --
+      -- MATERIALIZED-nya tidak boleh dilepas: sejak Postgres 12 CTE non-
+      -- rekursif yang dipakai sekali otomatis di-INLINE kembali ke query
+      -- utama, jadi tanpa kata kunci itu ekspresinya kembali dihitung per
+      -- baris dan CTE-nya sama sekali tidak menolong (terukur 40.925 ms,
+      -- praktis sama dengan versi tanpa CTE).
+      --
+      -- Diukur di bookingorderanmuatan 100rb baris / 1 juta baris
+      -- statuspendukung, periode 1 bulan (12.975 baris transaksi):
+      --   ekspresi diulang di FILTER      : 41.315 ms
+      --   CTE tanpa MATERIALIZED          : 40.925 ms
+      --   CTE MATERIALIZED (dipakai kini) :    817 ms
+      WITH kategori AS MATERIALIZED (
+        SELECT
+          id,
+          ${judulKeyExpr} AS kunci
+        FROM parameter
+        -- parameter.subgrp disimpan HURUF BESAR ('BOOKINGORDERANMUATAN'),
+        -- sedangkan kedua pemanggil mengirim this.tableName yang huruf kecil.
+        -- Perbandingan di Postgres peka huruf, jadi WHERE ini dulu tidak
+        -- pernah cocok: temp table pivotnya SELALU KOSONG dan seluruh kolom
+        -- status (pisahbl, jobptd, transit, stuffingdepo, opendoor,
+        -- batalmuat, soc, pengurusandoor, tradoluar, approval) selalu NULL di
+        -- grid — untuk bookingorderanmuatan MAUPUN orderanmuatan.
+        --
+        -- Yang di-uppercase adalah NILAI dari sisi JS, BUKAN kolomnya.
+        -- Membungkus kolom dengan UPPER(subgrp) juga memperbaiki
+        -- kecocokannya, tapi membuat predikatnya tidak sargable sehingga
+        -- idx_parameter_subgrp tidak terpakai. Diukur di 1 juta baris
+        -- statuspendukung: 14.334 ms dengan UPPER(kolom), 901 ms tanpa.
+        WHERE subgrp = '${String(tablename).toUpperCase()}'
+      ),
+      nilai AS MATERIALIZED (
+        SELECT
+          id,
+          ${memoJson('memo')}->>'MEMO' AS nama,
+          memo::text AS memo
+        FROM parameter
+      )
+      SELECT
+        a.id,
+        a.nobukti,
+        ${categoryColumns}
+      FROM ${sumberBaca || tablename} a
+      INNER JOIN statuspendukung b ON a.id = b.transaksi_id
+      INNER JOIN kategori k ON b.statusdatapendukung = k.id
+      INNER JOIN nilai n ON b.statuspendukung = n.id
+      GROUP BY a.id, a.nobukti
+    `;
+  }
+
   async tempPivotStatusPendukung(
     trx: any,
     tablename: string,
     fieldTempHasil: any,
+    sumberBaca?: string,
   ) {
     try {
-      const categories: string[] = (fieldTempHasil as string[]).filter(
-        (f) => !f.endsWith('_nama') && !f.endsWith('_memo'),
-      );
-
-      if (categories.length === 0) {
-        throw new Error(
-          `tempPivotStatusPendukung: fieldTempHasil untuk '${tablename}' tidak berisi kategori valid`,
-        );
-      }
-
-      // Pola yang sama dengan statuspendukung.service.ts: parse memo sebagai
-      // JSON hanya bila memang JSON valid.
-      const memoJson = (col: string) =>
-        `(CASE WHEN ${col} IS JSON THEN ${col}::jsonb END)`;
-
-      // "judul" = label kategori yang dikonfigurasi lewat
-      // parameter.memo->>'MEMO' pada baris statusdatapendukung. TOP/OPEN
-      // historis diberi suffix _field (lihat versi MSSQL lama) — belum
-      // dipakai oleh kedua caller saat ini, tapi dipertahankan untuk
-      // caller lain yang mungkin memakai kategori tsb.
-      const judulKeyExpr = `LOWER(REPLACE(
-        CASE
-          WHEN (${memoJson('c.memo')}->>'MEMO') IN ('TOP', 'OPEN')
-            THEN (${memoJson('c.memo')}->>'MEMO') || '_FIELD'
-          ELSE COALESCE(${memoJson('c.memo')}->>'MEMO', '')
-        END,
-        ' ', ''
-      ))`;
-
-      const categoryColumns = categories
-        .map((category) => {
-          const cat = String(category).toLowerCase().replace(/\s+/g, '');
-          return `
-            MAX(d.id::text) FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category},
-            MAX(${memoJson('d.memo')}->>'MEMO') FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category}_nama,
-            MAX(d.memo::text) FILTER (WHERE ${judulKeyExpr} = '${cat}') AS ${category}_memo`;
-        })
-        .join(',\n');
-
       const tempHasil = `temp_pivot_statuspendukung_${Math.random().toString(36).substring(2, 15)}`;
 
       await trx.raw(`
         CREATE TEMP TABLE "${tempHasil}"
         ON COMMIT DROP
         AS
-        SELECT
-          a.id,
-          a.nobukti,
-          ${categoryColumns}
-        FROM ${tablename} a
-        INNER JOIN statuspendukung b ON a.id = b.transaksi_id
-        INNER JOIN parameter c ON b.statusdatapendukung = c.id
-        INNER JOIN parameter d ON b.statuspendukung = d.id
-        WHERE c.subgrp = '${tablename}'
-        GROUP BY a.id, a.nobukti
+        ${this.buildStatusPendukungSelect(tablename, fieldTempHasil, sumberBaca)}
       `);
 
       return tempHasil;
@@ -534,14 +619,6 @@ export class UtilsService {
     }
   }
 
-  /**
-   * Cari baris anak pertama yang masih mereferensikan `tableName`.id = value lewat
-   * foreign key (baca katalog PG, jadi otomatis mengikuti SEMUA FK yang ada).
-   * Mengembalikan { ref_table, ref_column } bila masih dipakai, atau null bila
-   * aman dihapus. `excludeTables` untuk melewati tabel yang referensinya ikut
-   * terhapus (mis. tabel master itu sendiri saat mengecek relasi_id-nya —
-   * `<master>.relasi_id` adalah self-reference yang dihapus lebih dulu).
-   */
   async findFirstReference(
     tableName: string,
     value: any,
@@ -1251,13 +1328,6 @@ export async function uuidV7(trx: any): Promise<string> {
   return uuid ?? null;
 }
 
-/**
- * Generate banyak uuid v7 sekaligus dengan 2 query saja (kode cabang + batch),
- * BUKAN 2 query per baris.
- *
- * Sebelumnya insert massal memanggil uuidV7() per baris: 591 baris ACL = 1.182
- * round-trip DB berurutan, yang membuat PUT /roleacl kena timeout.
- */
 export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
   if (count <= 0) return [];
 
@@ -1279,14 +1349,6 @@ export async function uuidV7Many(trx: any, count: number): Promise<string[]> {
   return fallback;
 }
 
-/**
- * Attaches a freshly generated uuidV7 to the `id` field before insert.
- * - For a single object: returns a copy with `id` set.
- * - For an array of rows: sets `id` on each row and returns it.
- *
- * Satu statement untuk seluruh array (bukan Promise.all): transaksi knex
- * memakai satu koneksi dan tidak bisa menjalankan query paralel.
- */
 export async function withUuidV7(trx: any, data: any): Promise<any> {
   if (Array.isArray(data)) {
     const uuids = await uuidV7Many(trx, data.length);

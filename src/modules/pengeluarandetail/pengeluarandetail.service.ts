@@ -175,12 +175,6 @@ export class PengeluarandetailService {
     return updatedData || insertedData;
   }
 
-  /**
-   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
-   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
-   * menunjuk ke view (coadebet_text sudah jadi kolom view, bukan hasil JOIN
-   * ad-hoc lagi).
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,

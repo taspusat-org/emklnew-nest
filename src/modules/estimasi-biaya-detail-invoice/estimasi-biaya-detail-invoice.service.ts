@@ -5,13 +5,40 @@ import {
 } from '@nestjs/common';
 import { CreateEstimasiBiayaDetailInvoiceDto } from './dto/create-estimasi-biaya-detail-invoice.dto';
 import { UpdateEstimasiBiayaDetailInvoiceDto } from './dto/update-estimasi-biaya-detail-invoice.dto';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 
 @Injectable()
 export class EstimasiBiayaDetailInvoiceService {
-  private readonly tableName: string = 'estimasibiayadetailInvoice';
+  private readonly tableName: string = 'estimasibiayadetailinvoice';
+  // Tabel untuk TULIS, view untuk BACA — sama seperti bl-header/alatbayar.
+  private readonly viewName: string = 'vestimasibiayadetailinvoice';
+
+  // Grid mengirim key kolom saat sort (biayaemkl, link), sementara filter
+  // mengirim '*_text'. 'nama' warisan era JOIN: dulu tanpa prefiks sehingga
+  // nyangkut ke biayaemkl.nama; di view kolomnya bernama biayaemkl_nama.
+  private readonly SORT_ALIAS: Record<string, string> = {
+    nama: 'u.biayaemkl_nama',
+    biayaemkl: 'u.biayaemkl_nama',
+    biayaemkl_text: 'u.biayaemkl_nama',
+    biayaemkl_nama: 'u.biayaemkl_nama',
+    link: 'u.link_nama',
+    link_text: 'u.link_nama',
+    link_nama: 'u.link_nama',
+  };
+
+  private readonly SORT_COLUMNS = new Set([
+    'nobukti',
+    'estimasibiaya_id',
+    'link_id',
+    'biayaemkl_id',
+    'nominal',
+    'modifiedby',
+    'created_at',
+    'updated_at',
+    'id',
+  ]);
 
   constructor(
     private readonly utilsService: UtilsService,
@@ -24,7 +51,10 @@ export class EstimasiBiayaDetailInvoiceService {
       const logData: any[] = [];
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      // Tanpa prefiks '##' (global temp ala MSSQL): '#' bukan identifier valid
+      // di Postgres saat direferensikan mentah, mis. trx.raw(`${temp}.kolom`).
+      // Sama seperti BlDetailService.
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -89,43 +119,37 @@ export class EstimasiBiayaDetailInvoiceService {
 
       await trx.raw(tableTemp);
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
+      // OPENJSON + jsonExtract adalah bentuk SQL Server. Padanannya di Postgres
+      // jsonb_populate_recordset(null::<tabel>, ...): satu baris per elemen
+      // array, kolom & tipenya mengikuti tabel base (temp dibuat dari
+      // `SELECT * ... WHERE 1=0` sehingga bentuknya identik). Pola ini sudah
+      // dipakai BlDetailService.
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
-
-      // **Update or Insert into 'packinglistdetailrincian' with correct idheader**
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          estimasibiaya_id: trx.raw(`${tempTableName}.estimasibiaya_id`),
-          link_id: trx.raw(`${tempTableName}.link_id`),
-          biayaemkl_id: trx.raw(`${tempTableName}.biayaemkl_id`),
-          nominal: trx.raw(`${tempTableName}.nominal`),
-          info: trx.raw(`${tempTableName}.info`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error(
-            'Error updated data estimasi biaya detail biaya:',
-            error,
-          );
-          throw error;
-        });
+      // UPDATE ... FROM, bukan .join().update(). Bentuk join+update itu warisan
+      // SQL Server; di Postgres knex MENGABAIKAN join-nya sehingga SQL yang
+      // dihasilkan menyebut kolom temp tanpa klausa FROM dan gagal dengan
+      // "missing FROM-clause entry for table temp_xxx" (SQLSTATE 42P01).
+      const updatedResult = await trx.raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           estimasibiaya_id = tmp.estimasibiaya_id,
+           link_id = tmp.link_id,
+           biayaemkl_id = tmp.biayaemkl_id,
+           nominal = tmp.nominal,
+           info = tmp.info,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      );
+      const updatedData = updatedResult?.rows ?? [];
 
       // Handle insertion if no update occurs
       const insertedDataQuery = await trx(tempTableName)
@@ -240,7 +264,7 @@ export class EstimasiBiayaDetailInvoiceService {
       page = page ?? 1;
       limit = limit ?? 0;
 
-      const query = trx(`${this.tableName} as u`)
+      const query = trx(`${this.viewName} as u`)
         .select(
           'u.id',
           'u.nobukti',
@@ -248,12 +272,10 @@ export class EstimasiBiayaDetailInvoiceService {
           'u.link_id',
           'u.biayaemkl_id',
           'u.nominal',
-          'p.nama as biayaemkl_nama',
-          'q.keterangan as link_nama',
+          'u.biayaemkl_nama',
+          'u.link_nama',
         )
-        .leftJoin('biayaemkl as p', 'u.biayaemkl_id', 'p.id')
-        .leftJoin('hargatrucking as q', 'u.link_id', 'q.id')
-        .where('estimasibiaya_id', id);
+        .where('u.estimasibiaya_id', id);
 
       const excludeSearchKeys = ['test'];
       const searchFields = Object.keys(filters || {}).filter(
@@ -261,16 +283,16 @@ export class EstimasiBiayaDetailInvoiceService {
       );
 
       if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
+        const sanitized = String(search).trim();
 
         query.where((qb) => {
           searchFields.forEach((field) => {
             if (field === 'biayaemkl_text') {
-              qb.orWhere(`p.nama`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.biayaemkl_nama`, 'ilike', `%${sanitized}%`);
             } else if (field === 'link_text') {
-              qb.orWhere(`q.keterangan`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.link_nama`, 'ilike', `%${sanitized}%`);
             } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
+              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
             }
           });
         });
@@ -278,27 +300,30 @@ export class EstimasiBiayaDetailInvoiceService {
 
       if (filters) {
         for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
+          const sanitizedValue = String(value);
           if (value) {
             if (key === 'biayaemkl_text') {
-              query.andWhere(`p.nama`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(
+                `u.biayaemkl_nama`,
+                'ilike',
+                `%${sanitizedValue}%`,
+              );
             } else if (key === 'link_text') {
-              query.andWhere(`q.keterangan`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.link_nama`, 'ilike', `%${sanitizedValue}%`);
             } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
+              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
             }
           }
         }
       }
 
       if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'biayaemkl_text') {
-          query.orderBy(`p.nama`, sort.sortDirection);
-        } else if (sort?.sortBy === 'link_text') {
-          query.orderBy(`q.keterangan`, sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
+        // Key di luar daftar (mis. kolom semu "nomor") jangan diteruskan ke
+        // SQL — Postgres membalas 42703 dan grid ikut 500.
+        const kolom =
+          this.SORT_ALIAS[sort.sortBy] ??
+          (this.SORT_COLUMNS.has(sort.sortBy) ? `u.${sort.sortBy}` : 'u.id');
+        query.orderBy(kolom, sort.sortDirection);
       }
 
       const result = await query;
@@ -316,7 +341,7 @@ export class EstimasiBiayaDetailInvoiceService {
     }
   }
 
-  async findOne(id: string = 0, trx: any = null) {
+  async findOne(id: string, trx: any = null) {
     try {
       const query = trx(`${this.tableName} as u`)
         .select([
@@ -384,7 +409,7 @@ export class EstimasiBiayaDetailInvoiceService {
   }
 
   update(
-    id: number,
+    id: string,
     updateEstimasiBiayaDetailInvoiceDto: UpdateEstimasiBiayaDetailInvoiceDto,
   ) {
     return `This action updates a #${id} estimasiBiayaDetailInvoice`;

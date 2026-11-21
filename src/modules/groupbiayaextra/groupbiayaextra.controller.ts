@@ -13,6 +13,7 @@ import {
   UsePipes,
   Query,
   InternalServerErrorException,
+  NotFoundException,
   Res,
 } from '@nestjs/common';
 import { GroupbiayaextraService } from './groupbiayaextra.service';
@@ -182,6 +183,10 @@ export class GroupbiayaextraController {
         req.user?.user?.username,
       );
 
+      if (result.status === 404) {
+        throw new NotFoundException(result.message);
+      }
+
       await trx.commit();
       return result;
     } catch (error) {
@@ -198,11 +203,6 @@ export class GroupbiayaextraController {
     }
   }
 
-  /**
-   * Pra-cek sebelum EDIT (ambil lock) / DELETE (apakah masih dipakai
-   * transaksi). Penolakan DELETE tetap ditegakkan lagi di service, endpoint ini
-   * hanya supaya frontend bisa memberi tahu user sebelum dialog konfirmasi.
-   */
   @UseGuards(AuthGuard)
   @Post('check-validation')
   async checkValidasi(@Body() body: { aksi: string; value: any }, @Req() req) {
@@ -297,16 +297,6 @@ export class GroupbiayaextraController {
     });
   }
 
-  /**
-   * POST /groupbiayaextra/export
-   *
-   * Export Excel di background. Request langsung balas { jobId }; progresnya
-   * dikirim lewat socket namespace `/report` (kanal yang sama dengan cetak
-   * laporan), dan file-nya diambil di GET /report/download/:jobId.
-   *
-   * Barisnya di-stream lewat cursor, bukan ditampung di array — export bisa
-   * menyentuh ratusan ribu baris.
-   */
   @UseGuards(AuthGuard)
   @Post('export')
   async exportBackground(

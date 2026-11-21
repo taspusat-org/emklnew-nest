@@ -3,20 +3,17 @@ import { z } from 'zod';
 
 export const UpdateDaftarblSchema = z
   .object({
-    // id & status* = varchar UUID, bukan angka. z.number() bikin self-exclude
-    // di isRecordExist meleset (id UUID != angka) sehingga edit tanpa ganti
-    // nama salah dianggap "nama sudah ada".
+    // id & statusaktif = varchar UUID, bukan angka. z.number() bikin
+    // self-exclude di isRecordExistCI meleset (id UUID != angka) sehingga edit
+    // tanpa ganti nama salah dianggap "nama sudah ada".
     id: z.string().optional(),
-    nama: z
-      .string()
-      .trim()
-      .min(1, { message: 'Daftar BL Wajib Diisi' })
-      .max(255),
-    keterangan: z.string().trim().min(1, { message: 'Keterangan Wajib Diisi' }),
+    nama: z.string().min(1, { message: 'NAMA is required' }),
+    keterangan: z.string().trim().min(1, { message: 'KETERANGAN is required' }),
 
     statusaktif: z.string().min(1, { message: 'Status Aktif is required' }),
-    statusaktif_text: z.string().nullable().optional(),
+    text: z.string().nullable().optional(),
 
+    info: z.string().nullable().optional(),
     modifiedby: z.string().nullable().optional(),
   })
   .superRefine(async (data, ctx) => {

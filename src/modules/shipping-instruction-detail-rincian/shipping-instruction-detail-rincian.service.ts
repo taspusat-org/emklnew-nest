@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { CreateShippingInstructionDetailRincianDto } from './dto/create-shipping-instruction-detail-rincian.dto';
 import { UpdateShippingInstructionDetailRincianDto } from './dto/update-shipping-instruction-detail-rincian.dto';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import { withUuidV7, UtilsService } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
@@ -13,6 +13,7 @@ import { FindAllParams } from 'src/common/interfaces/all.interface';
 @Injectable()
 export class ShippingInstructionDetailRincianService {
   private readonly tableName: string = 'shippinginstructiondetailrincian';
+  private readonly viewName: string = 'vshippinginstructiondetailrincian';
 
   constructor(
     private readonly utilsService: UtilsService,
@@ -21,16 +22,15 @@ export class ShippingInstructionDetailRincianService {
 
   async create(
     detailsrincian: any,
-    shippinginstructiondetail_id: number,
+    shippinginstructiondetail_id: any,
     trx: any,
   ) {
     try {
       let insertedData = null;
-      // let data: any = null;
       const logData: any[] = [];
       const mainDataToInsert: any[] = [];
       const time = this.utilsService.getTime();
-      const tempTableName = `##temp_${Math.random().toString(36).substring(2, 15)}`;
+      const tempTableName = `temp_${Math.random().toString(36).substring(2, 15)}`;
       const tableTemp = await this.utilsService.createTempTable(
         this.tableName,
         trx,
@@ -47,37 +47,37 @@ export class ShippingInstructionDetailRincianService {
       for (const data of detailsrincian) {
         let isDataChanged = false;
 
-        // Uppercase hanya kolom teks manusiawi. id (PK), shippinginstructiondetail_id
-        // (FK), dan *_nobukti adalah UUID/kunci bertipe text (case-sensitive);
-        // blanket uppercase meng-corrupt id sehingga lookup-by-id gagal.
         ['comodity', 'keterangan'].forEach((field) => {
           if (typeof data[field] === 'string') {
             data[field] = data[field].toUpperCase();
           }
         });
 
-        // id kosong atau '0' = baris baru; pengirim antar-service memakai '0'.
-        if (data.id && String(data.id) !== '0') {
-          const existingData = await trx(this.tableName)
-            .where('id', data.id)
-            .first();
+        let existingData: any = null;
+        if (
+          data.id !== null &&
+          data.id !== undefined &&
+          String(data.id) !== '' &&
+          String(data.id) !== '0'
+        ) {
+          existingData = await trx(this.tableName).where('id', data.id).first();
+        }
 
-          if (existingData) {
-            const createdAt = {
-              created_at: existingData.created_at,
-              updated_at: existingData.updated_at,
-            };
-            Object.assign(data, createdAt);
+        if (existingData) {
+          const createdAt = {
+            created_at: existingData.created_at,
+            updated_at: existingData.updated_at,
+          };
+          Object.assign(data, createdAt);
 
-            if (this.utilsService.hasChanges(data, existingData)) {
-              data.updated_at = time;
-              isDataChanged = true;
-              data.aksi = 'UPDATE';
-            }
+          if (this.utilsService.hasChanges(data, existingData)) {
+            data.updated_at = time;
+            isDataChanged = true;
+            data.aksi = 'UPDATE';
           }
         } else {
+          data.id = 0;
           const newTimestamps = {
-            // New record: Set timestamps
             created_at: time,
             updated_at: time,
           };
@@ -90,8 +90,21 @@ export class ShippingInstructionDetailRincianService {
           data.aksi = 'NO UPDATE';
         }
 
-        const { aksi, ...dataForInsert } = data;
-        mainDataToInsert.push(dataForInsert);
+        mainDataToInsert.push({
+          id: data.id,
+          nobukti: data.nobukti,
+          shippinginstructiondetail_id:
+            data.shippinginstructiondetail_id ?? shippinginstructiondetail_id,
+          shippinginstructiondetail_nobukti:
+            data.shippinginstructiondetail_nobukti,
+          orderanmuatan_nobukti: data.orderanmuatan_nobukti,
+          comodity: data.comodity,
+          keterangan: data.keterangan,
+          modifiedby: data.modifiedby,
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+        });
+
         logData.push({
           ...data,
           created_at: time,
@@ -101,49 +114,28 @@ export class ShippingInstructionDetailRincianService {
       await trx.raw(tableTemp);
 
       const jsonString = JSON.stringify(mainDataToInsert);
-      const mappingData = Object.keys(mainDataToInsert[0]).map((key) => [
-        'value',
-        `$.${key}`,
-        key,
-      ]);
 
-      const openJson = await trx
-        .from(trx.raw('OPENJSON(?)', [jsonString]))
-        .jsonExtract(mappingData)
-        .as('jsonData');
+      await trx.raw(
+        `insert into "${tempTableName}" select * from jsonb_populate_recordset(null::${this.tableName}, ?::jsonb)`,
+        [jsonString],
+      );
 
-      // Insert into temp table
-      await trx(tempTableName).insert(openJson);
-
-      const updatedData = await trx(this.tableName)
-        .join(`${tempTableName}`, `${this.tableName}.id`, `${tempTableName}.id`)
-        .update({
-          nobukti: trx.raw(`${tempTableName}.nobukti`),
-          shippinginstructiondetail_id: trx.raw(
-            `${tempTableName}.shippinginstructiondetail_id`,
-          ),
-          shippinginstructiondetail_nobukti: trx.raw(
-            `${tempTableName}.shippinginstructiondetail_nobukti`,
-          ),
-          orderanmuatan_nobukti: trx.raw(
-            `${tempTableName}.orderanmuatan_nobukti`,
-          ),
-          comodity: trx.raw(`${tempTableName}.comodity`),
-          keterangan: trx.raw(`${tempTableName}.keterangan`),
-          modifiedby: trx.raw(`${tempTableName}.modifiedby`),
-          created_at: trx.raw(`${tempTableName}.created_at`),
-          updated_at: trx.raw(`${tempTableName}.updated_at`),
-        })
-        .returning('*')
-        .then((result: any) => result[0])
-        .catch((error: any) => {
-          console.error(
-            'Error inserting data shipping instruction detail rincian in servoce',
-            error,
-            error.message,
-          );
-          throw error;
-        });
+      const updatedResult = await trx.raw(
+        `update ${this.tableName} as t set
+           nobukti = tmp.nobukti,
+           shippinginstructiondetail_id = tmp.shippinginstructiondetail_id,
+           shippinginstructiondetail_nobukti = tmp.shippinginstructiondetail_nobukti,
+           orderanmuatan_nobukti = tmp.orderanmuatan_nobukti,
+           comodity = tmp.comodity,
+           keterangan = tmp.keterangan,
+           modifiedby = tmp.modifiedby,
+           created_at = tmp.created_at,
+           updated_at = tmp.updated_at
+         from "${tempTableName}" as tmp
+         where t.id = tmp.id
+         returning t.*`,
+      );
+      const updatedData = updatedResult?.rows?.[0] ?? null;
 
       const insertedDataQuery = await trx(tempTableName)
         .select([
@@ -159,8 +151,15 @@ export class ShippingInstructionDetailRincianService {
         ])
         .where(`${tempTableName}.id`, '0');
 
+      const notInTemp = (qb: any) => {
+        qb.whereNotExists(function (this: any) {
+          this.select(trx.raw('1'))
+            .from(tempTableName)
+            .whereRaw(`"${tempTableName}".id = u.id`);
+        });
+      };
+
       const getDeleted = await trx(`${this.tableName} as u`)
-        .leftJoin(`${tempTableName}`, 'u.id', `${tempTableName}.id`)
         .select(
           'u.nobukti',
           'u.shippinginstructiondetail_id',
@@ -172,49 +171,27 @@ export class ShippingInstructionDetailRincianService {
           'u.created_at',
           'u.updated_at',
         )
-        .whereNull(`${tempTableName}.id`)
-        .where('u.shippinginstructiondetail_id', shippinginstructiondetail_id);
+        .where('u.shippinginstructiondetail_id', shippinginstructiondetail_id)
+        .modify(notInTemp);
 
-      let pushToLog: any[] = [];
-
-      if (getDeleted.length > 0) {
-        pushToLog = Object.assign(getDeleted, { aksi: 'DELETE' });
-      }
-
-      const pushToLogWithAction = pushToLog.map((entry) => ({
+      const pushToLogWithAction = getDeleted.map((entry: any) => ({
         ...entry,
         aksi: 'DELETE',
       }));
 
       const finalData = logData.concat(pushToLogWithAction);
 
-      const deletedData = await trx(this.tableName)
-        .leftJoin(
-          `${tempTableName}`,
-          `${this.tableName}.id`,
-          `${tempTableName}.id`,
-        )
-        .whereNull(`${tempTableName}.id`)
-        .where(
-          `${this.tableName}.shippinginstructiondetail_id`,
-          shippinginstructiondetail_id,
-        )
+      await trx(`${this.tableName} as u`)
+        .where('u.shippinginstructiondetail_id', shippinginstructiondetail_id)
+        .modify(notInTemp)
         .del();
 
       if (insertedDataQuery.length > 0) {
         insertedData = await trx(this.tableName)
           .insert(await withUuidV7(trx, insertedDataQuery))
           .returning('*')
-          .then((result: any) => result[0])
-          .catch((error: any) => {
-            console.error(
-              'Error inserting data to shipping instruction detail rincian in service:',
-              error,
-            );
-            throw error;
-          });
+          .then((result: any) => result[0]);
       }
-      console.log('insertedData', insertedData, 'updatedData', updatedData);
 
       await this.logTrailService.create(
         {
@@ -244,17 +221,98 @@ export class ShippingInstructionDetailRincianService {
     }
   }
 
+  /**
+   * shippinginstructiondetail_id diturunkan ke
+   * vshippinginstructiondetailrincian lewat GUC supaya join ke orderanmuatan &
+   * shipper hanya kena baris satu detail, bukan seluruh isi tabel rincian.
+   *
+   * `set_config(..., true)` transaksi-lokal, jadi tidak bocor lewat pool.
+   */
+  private async setSessionContext(trx: any, id: string): Promise<void> {
+    await trx.raw(
+      `SELECT set_config('tas.si_shippinginstructiondetail_id', ?, true)`,
+      [id ? String(id) : ''],
+    );
+  }
+
+  private columnFor(key: string): string {
+    return key === 'detail_nobukti'
+      ? 'p.shippinginstructiondetail_nobukti'
+      : `p.${key}`;
+  }
+
+  /**
+   * Search global + filter per kolom. Dipisah dari findAll supaya COUNT dan
+   * query data memakai penyaringan yang sama persis.
+   */
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    const searchFields = Object.keys(filters || {});
+
+    if (search && searchFields.length > 0) {
+      const sanitized = String(search).trim();
+      qb.where((inner: any) => {
+        searchFields.forEach((field) => {
+          inner.orWhere(this.columnFor(field), 'ilike', `%${sanitized}%`);
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      qb.andWhere(this.columnFor(key), 'ilike', `%${String(rawValue)}%`);
+    });
+  }
+
   async findAll(
     id: string,
     trx: any,
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
+    { search, filters, pagination, sort }: FindAllParams,
   ) {
-    try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+    const { page = 1, limit = 0 } = pagination ?? {};
 
-      const query = trx(`${this.tableName} as p`)
+    if (!id) {
+      // Bentuk balikan tetap lengkap supaya grid yang membaca
+      // pagination.totalItems saat baris detail belum dipilih tidak menemukan
+      // undefined lalu menghitung totalPages = NaN.
+      return {
+        status: false,
+        message: 'No data found',
+        data: [],
+        total: 0,
+        pagination: {
+          currentPage: Number(page),
+          totalPages: 0,
+          totalItems: 0,
+          itemsPerPage: Number(limit),
+        },
+      };
+    }
+
+    try {
+      await this.setSessionContext(trx, id);
+
+      // set_config di atas sudah memangkas view, tapi WHERE eksplisit TETAP
+      // dipasang — alasan sama seperti di service detail: hasil endpoint ini
+      // ikut jadi payload simpan, dan create() menghapus baris yang tidak ada
+      // di payload. JANGAN dihapus dengan alasan "sudah ada di view".
+      const scoped = (qb: any) => {
+        qb.where('p.shippinginstructiondetail_id', id);
+        this.applyFilters(qb, filters, search);
+      };
+
+      const countResult = await trx(`${this.viewName} as p`)
+        .modify(scoped)
+        .count('* as total')
+        .first();
+      const total = Number(countResult?.total ?? 0);
+
+      const query = trx(`${this.viewName} as p`)
         .select(
           'p.id',
           'p.nobukti',
@@ -263,65 +321,52 @@ export class ShippingInstructionDetailRincianService {
           'p.orderanmuatan_nobukti',
           'p.comodity',
           'p.keterangan',
-          'q.nocontainer',
-          'q.noseal',
-          'r.nama as shipper_nama',
+          'p.nocontainer',
+          'p.noseal',
+          'p.shipper_nama',
         )
-        .leftJoin('orderanmuatan as q', 'p.orderanmuatan_nobukti', 'q.nobukti')
-        .leftJoin('shipper as r', 'q.shipper_id', 'r.id')
-        .where('shippinginstructiondetail_id', id);
+        .modify(scoped);
 
-      const excludeSearchKeys = [''];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k) && filters![k],
-      );
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
+      // Urutan HARUS deterministik: tanpa itu offset/limit bisa memulangkan
+      // baris yang sama di dua halaman berbeda saat grid menggeser window.
+      const sortBy = sort?.sortBy || 'shippinginstructiondetail_nobukti';
+      const sortDirection =
+        String(sort?.sortDirection).toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const orderCol = this.columnFor(sortBy);
 
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            qb.orWhere(`p.${field}`, 'like', `%${sanitized}%`);
-          });
-        });
+      query.orderBy(orderCol, sortDirection);
+      if (orderCol !== 'p.id') {
+        query.orderBy('p.id', 'asc');
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            if (key === 'detail_nobukti') {
-              query.andWhere(
-                `p.shippinginstructiondetail_nobukti`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else {
-              query.andWhere(`p.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
+      // limit 0/undefined = ambil semua, dipakai findOne header saat form edit
+      // memuat seluruh rincian satu detail sekaligus.
+      if (Number(limit) > 0) {
+        query.offset((Number(page) - 1) * Number(limit)).limit(Number(limit));
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy === 'detail_nobukti') {
-          query.orderBy(
-            'p.shippinginstructiondetail_nobukti',
-            sort.sortDirection,
-          );
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await query;
-      console.log('result SI RINCIAN', result);
+      const data = await query;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
 
       return {
-        data: result,
+        status: data.length > 0,
+        message:
+          data.length > 0
+            ? 'Shipping instruction detail rincian data fetched successfully'
+            : 'No data found',
+        data,
+        total,
+        pagination: {
+          currentPage: Number(page),
+          totalPages,
+          totalItems: total,
+          itemsPerPage: Number(limit),
+        },
       };
     } catch (error) {
       console.error(
-        'Error to findAll Schedule detail rincian in service',
+        'Error to findAll shipping instruction detail rincian in service',
         error,
       );
       throw new Error(error);

@@ -7,13 +7,13 @@ const baseFields = {
     .nonempty({ message: 'TGL BUKTI WAJIB DIISI' }),
 
   jenisorder_id: z
-    .number({
+    .string({
       required_error: 'JENIS ORDER WAJIB DIISI',
     })
     .min(1, { message: 'JENIS ORDER WAJIB DIISI' }),
   jenisorder_nama: z.string().nullable().optional(),
 
-  orderan_id: z.number().nullable().optional(),
+  orderan_id: z.string().nullable().optional(),
   orderan_nobukti: z
     .string({ message: 'NO BUKTI ORDERAN WAJIB DIISI' })
     .nonempty({ message: 'NO BUKTI ORDERAN WAJIB DIISI' }),
@@ -23,41 +23,42 @@ const baseFields = {
     .nonempty({ message: 'NOMINAL WAJIB DIISI' }),
 
   shipper_id: z
-    .number({
+    .string({
       required_error: 'SHIPPER WAJIB DIISI',
     })
     .min(1, { message: 'SHIPPER WAJIB DIISI' }),
   shipper_nama: z.string().nullable().optional(),
 
-  statusppn: z.string()
-    .min(1, { message: 'STATUS PPN WAJIB DIISI' }),
+  statusppn: z.string().min(1, { message: 'STATUS PPN WAJIB DIISI' }),
   statusppn_nama: z.string().nullable().optional(),
 
   asuransi_id: z
-    .number({
+    .string({
       required_error: 'ASURANSI WAJIB DIISI',
     })
     .min(1, { message: 'ASURANSI WAJIB DIISI' }),
   asuransi_nama: z.string().nullable().optional(),
 
-  comodity_id: z.number().nullable().optional(),
+  comodity_id: z.string().nullable().optional(),
   comodity_nama: z.string().nullable().optional(),
 
-  consignee_id: z.number().nullable().optional(),
+  consignee_id: z.string().nullable().optional(),
   consignee_nama: z.string().nullable().optional(),
 
   modifiedby: z.string().max(200).optional(),
 };
 
 const baseDetailsBiayaFields = z.object({
-  id: z.number().optional(),
+  // Semua id BERTIPE TEKS sejak migrasi UUID. Baris baru dari form dikirim
+  // sebagai '0' (STRING, bukan angka) — sama seperti baseDetailsFields di BL.
+  id: z.string().optional(),
   nobukti: z.string().nullable().optional(),
-  estimasibiaya_id: z.number().nullable().optional(),
+  estimasibiaya_id: z.string().nullable().optional(),
 
-  link_id: z.number().nullable().optional(),
+  link_id: z.string().nullable().optional(),
   link_nama: z.string().nullable().optional(),
 
-  biayaemkl_id: z.number().nullable().optional(),
+  biayaemkl_id: z.string().nullable().optional(),
   biayaemkl_nama: z.string().nullable().optional(),
 
   nominal: z.string().nullable().optional(),
@@ -68,14 +69,16 @@ const baseDetailsBiayaFields = z.object({
 });
 
 const baseDetailsInvoiceFields = z.object({
-  id: z.number().optional(),
+  // Semua id BERTIPE TEKS sejak migrasi UUID. Baris baru dari form dikirim
+  // sebagai '0' (STRING, bukan angka) — sama seperti baseDetailsFields di BL.
+  id: z.string().optional(),
   nobukti: z.string().nullable().optional(),
-  estimasibiaya_id: z.number().nullable().optional(),
+  estimasibiaya_id: z.string().nullable().optional(),
 
-  link_id: z.number().nullable().optional(),
+  link_id: z.string().nullable().optional(),
   link_nama: z.string().nullable().optional(),
 
-  biayaemkl_id: z.number().nullable().optional(),
+  biayaemkl_id: z.string().nullable().optional(),
   biayaemkl_nama: z.string().nullable().optional(),
 
   nominal: z.string().nullable().optional(),
@@ -93,7 +96,7 @@ export type CreateEstimasiBiayaHeaderDto = z.infer<
 
 export const UpdateEstimasiBiayaHeaderSchema = z.object({
   ...baseFields,
-  id: z.number({ required_error: 'Id wajib diisi untuk update' }),
+  id: z.string({ required_error: 'Id wajib diisi untuk update' }),
   detailsbiaya: z.array(baseDetailsBiayaFields).min(1),
   detailsinvoice: z.array(baseDetailsInvoiceFields).min(1),
   // Field atau aturan khusus update bisa ditambah di sini

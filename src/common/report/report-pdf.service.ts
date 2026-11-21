@@ -11,7 +11,6 @@ const STIMULSOFT_LICENSE_KEY =
   'JuDgUf1qamN7rRICPVd0wQpinqLYjPpgNPiVqrkGW0CQPZ2SE2tN4uFRIWw45/IITQl0v9ClCkO/gwUtwtuugegrqs' +
   'e0EZ5j2V4a1XDmVuJaS33pAVLoUgK0M8RG72';
 
-/** Template .mrt dibaca dari <project-root>/reports, font dari <project-root>/fonts. */
 const REPORTS_DIR = () => path.join(process.cwd(), 'reports');
 const FONTS_DIR = () => path.join(process.cwd(), 'fonts');
 
@@ -20,10 +19,6 @@ export class ReportPdfService {
   private readonly logger = new Logger(ReportPdfService.name);
   private stimulsoft: any = null;
 
-  /**
-   * Stimulsoft di-load lazy + sekali saja. Modulnya berat (beberapa MB) dan
-   * registrasi font/lisensi bersifat global, jadi tidak perlu diulang tiap job.
-   */
   private getStimulsoft(): any {
     if (this.stimulsoft) return this.stimulsoft;
 
@@ -52,21 +47,6 @@ export class ReportPdfService {
     return Stimulsoft;
   }
 
-  /**
-   * Render satu template .mrt menjadi buffer PDF.
-   *
-   * Bentuk dataset dibuat identik dengan yang dulu dipakai di browser:
-   *   new DataSet('Data') + readJson({ [tableName]: rows }) + regData('Data', '', dataSet)
-   * Template lama (mis. LaporanGroupbiayaextra.mrt) mereferensikan kolom
-   * lewat `Data.data`, jadi nama tabel default sengaja huruf kecil `data`.
-   * Mengubahnya akan membuat PDF ter-render kosong.
-   *
-   * `data` boleh berupa array (template satu datasource — namanya diambil dari
-   * `tableName`) ATAU objek `{ namaTabel: baris[] }` untuk template yang
-   * memakai lebih dari satu datasource. LaporanHutang.mrt misalnya membaca
-   * `Data.data` (header bukti) DAN `Data.detail` (rincian coa/nominal); tanpa
-   * key `detail` band rinciannya ter-render kosong.
-   */
   async generatePdf(
     data: any[] | Record<string, any[]>,
     mrtName: string,

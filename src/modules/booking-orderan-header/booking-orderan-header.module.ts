@@ -7,6 +7,7 @@ import { GlobalModule } from '../global/global.module';
 import { RedisModule } from 'src/common/redis/redis.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
+import { ReportModule } from 'src/common/report/report.module';
 import { BookingOrderanHeaderService } from './booking-orderan-header.service';
 import { BookingOrderanHeaderController } from './booking-orderan-header.controller';
 import { BookingOrderanMuatanService } from './bookingorderanmuatan.service';
@@ -25,6 +26,7 @@ import { OrderanHeaderModule } from '../orderan-header/orderan-header.module';
     GlobalModule,
     LogtrailModule,
     RunningNumberModule,
+    ReportModule,
     StatuspendukungModule,
     OrderanHeaderModule,
   ],

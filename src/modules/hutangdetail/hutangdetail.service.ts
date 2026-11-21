@@ -90,7 +90,8 @@ export class HutangdetailService {
     // invalid input syntax for type numeric. Kosong → null (kolom nullable).
     const toNumeric = (value: any): number | null => {
       if (value === null || value === undefined || value === '') return null;
-      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      if (typeof value === 'number')
+        return Number.isFinite(value) ? value : null;
       const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
       return Number.isNaN(parsed) ? null : parsed;
     };
@@ -194,11 +195,6 @@ export class HutangdetailService {
     return updatedData || insertedData;
   }
 
-  /**
-   * Filter + search, dipakai bersama oleh query COUNT dan query DATA supaya
-   * total & halaman selalu konsisten. Semua kolom dirujuk lewat alias `p` yang
-   * menunjuk ke view (coa_text sudah jadi kolom view, bukan hasil JOIN ad-hoc).
-   */
   private applyFilters(
     qb: any,
     filters: Record<string, any>,
@@ -225,9 +221,10 @@ export class HutangdetailService {
             // Di view kolom ini sudah dinormalkan jadi DATE dan di select
             // diformat 'DD-MM-YYYY'; pakai format yang sama supaya yang dicari
             // = yang tampil di grid.
-            query.orWhereRaw("TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?", [
-              `%${sanitizedValue}%`,
-            ]);
+            query.orWhereRaw(
+              "TO_CHAR(p.tglinvoiceemkl, 'DD-MM-YYYY') ilike ?",
+              [`%${sanitizedValue}%`],
+            );
           } else if (field === 'nominal' || field === 'dpp') {
             // Bertipe numeric: wajib cast ke text dulu. `like` langsung ke
             // kolom numeric bikin "operator does not exist: numeric ~~ unknown".
@@ -334,8 +331,12 @@ export class HutangdetailService {
           'p.nofakturpajakemkl',
           'p.info',
           'p.modifiedby',
-          trx.raw("TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+          trx.raw(
+            "TO_CHAR(p.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+          ),
+          trx.raw(
+            "TO_CHAR(p.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+          ),
           'p.link',
         )
         .where('p.nobukti', safeFilters.nobukti);
@@ -376,7 +377,8 @@ export class HutangdetailService {
 
       const data = await query;
 
-      const totalPages = Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
+      const totalPages =
+        Number(limit) > 0 ? Math.ceil(total / Number(limit)) : 1;
       const responseType = total > 500 ? 'json' : 'local';
 
       if (!data.length) {

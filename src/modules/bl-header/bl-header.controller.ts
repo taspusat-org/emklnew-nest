@@ -33,10 +33,24 @@ import {
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportBlHeaderDto,
+  ReportBlHeaderSchema,
+} from './dto/report-bl-header.dto';
+import {
+  ExportBlHeaderDto,
+  ExportBlHeaderSchema,
+} from './dto/export-bl-header.dto';
 
 @Controller('blheader')
 export class BlHeaderController {
-  constructor(private readonly blHeaderService: BlHeaderService) {}
+  constructor(
+    private readonly blHeaderService: BlHeaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -79,17 +93,33 @@ export class BlHeaderController {
   //@BL-HEADER
   @UsePipes(new ZodValidationPipe(FindAllSchema))
   async findAll(@Query() query: FindAllDto) {
-    const { search, page, limit, sortBy, sortDirection, isLookUp, ...filters } =
-      query;
+    // customOffset WAJIB ikut di-destructure. Sisa query masuk ke `...filters`
+    // dan diperlakukan sebagai filter kolom — kalau tidak dikeluarkan di sini,
+    // grid akan memfilter kolom bernama "customOffset" yang tidak ada.
+    const {
+      search,
+      page,
+      limit,
+      sortBy,
+      sortDirection,
+      isLookUp,
+      customOffset,
+      ...filters
+    } = query as typeof query & { customOffset?: string | number };
 
     const sortParams = {
       sortBy: sortBy || 'nobukti',
       sortDirection: sortDirection || 'asc',
     };
 
+    const offsetAngka = Number(customOffset);
     const pagination = {
       page: page || 1,
       limit: limit === 0 || !limit ? undefined : limit,
+      customOffset:
+        customOffset !== undefined && Number.isFinite(offsetAngka) && offsetAngka >= 0
+          ? offsetAngka
+          : undefined,
     };
 
     const params: FindAllParams = {
@@ -224,6 +254,83 @@ export class BlHeaderController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportBlHeaderSchema))
+    body: ReportBlHeaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const trx = await dbMssql.transaction();
+        let result: any;
+        try {
+          result = await this.blHeaderService.findOne(String(id), trx);
+          await trx.commit();
+        } catch (error) {
+          await trx.rollback();
+          throw error;
+        }
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+          usercetak: username,
+          tglcetak,
+          judul: 'BILL OF LADING',
+        }));
+      },
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBlHeaderSchema))
+    body: ExportBlHeaderDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_bl_${stamp}.xlsx`,
+      countRows: () =>
+        this.blHeaderService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.blHeaderService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.blHeaderService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

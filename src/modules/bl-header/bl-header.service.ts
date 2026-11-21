@@ -25,6 +25,8 @@ import { BlDetailRincianBiayaService } from '../bl-detail-rincian-biaya/bl-detai
 @Injectable()
 export class BlHeaderService {
   private readonly tableName: string = 'blheader';
+  // Baca lewat view, tulis lewat tabel base (lihat create-vbl-pg.sql).
+  private readonly viewName: string = 'vblheader';
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -36,7 +38,7 @@ export class BlHeaderService {
     private readonly blDetailService: BlDetailService,
     private readonly blDetailRincianService: BlDetailRincianService,
     private readonly blDetailRincianBiayaService: BlDetailRincianBiayaService,
-  ) {}
+  ) { }
 
   async create(data: any, trx: any) {
     try {
@@ -167,27 +169,17 @@ export class BlHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Dulu di sini findAll dipanggil dengan limit: 0 (= TANPA LIMIT) hanya
+      // untuk mencari index baris baru lewat findIndex, lalu hasil potongannya
+      // ditulis ke Redis. Artinya setiap simpan menarik SELURUH baris hasil
+      // filter ke memori Node — di tabel 1 juta baris itu satu query raksasa
+      // plus JSON.stringify ratusan ribu baris. Blob Redis-nya pun tidak pernah
+      // dibaca siapa pun: GridBlHeader hanya memakai pageNumber & dataIndex dari
+      // response ini. Nilai yang dipulangkan tetap sama persis.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        newItem.id,
+        data,
       );
 
       return {
@@ -209,173 +201,298 @@ export class BlHeaderService {
     }
   }
 
+  // ─── Session context ───────────────────────────────────────────────────────
+
+  private async setSessionContext(
+    trx: any,
+    filters: Record<string, any> | undefined,
+  ): Promise<void> {
+    // Tiap batas berdiri SENDIRI. Versi sebelumnya baru mengisi GUC kalau
+    // tglDari DAN tglSampai dua-duanya ada (punyaPeriode), sehingga periode
+    // separuh terbuka diam-diam berubah jadi "tanpa filter" — di tabel besar itu
+    // berarti grid menghitung dan menyortir seluruh tabel. Sisi view-nya
+    // diperbaiki bersamaan di create-vbl-pg.sql.
+    const tglDari = filters?.tglDari
+      ? String(formatDateToSQL(String(filters.tglDari)))
+      : '';
+    const tglSampai = filters?.tglSampai
+      ? String(formatDateToSQL(String(filters.tglSampai)))
+      : '';
+
+    await trx.raw(
+      `SELECT set_config('tas.bl_tgldari', ?, true),
+              set_config('tas.bl_tglsampai', ?, true)`,
+      [tglDari, tglSampai],
+    );
+  }
+
+  // ─── Query dasar ───────────────────────────────────────────────────────────
+
+  private baseQuery(trx: any) {
+    return trx(`${this.viewName} as u`);
+  }
+
+  private selectColumns(trx: any) {
+    return [
+      'u.id',
+      'u.nobukti',
+      trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+      'u.schedule_id',
+      trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+      'u.shippinginstruction_nobukti',
+      'u.modifiedby',
+      trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+      trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      'u.voyberangkat',
+      'u.pelayaran_id',
+      'u.pelayaran_nama',
+      'u.kapal_id',
+      'u.kapal_nama',
+      'u.tujuankapal_id',
+      'u.tujuankapal_nama',
+    ];
+  }
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any> | undefined,
+    search?: string,
+  ): void {
+    // tglDari/tglSampai sudah jadi predikat di dalam view lewat session
+    // context — kalau ikut di-AND-kan di sini, nilainya (mis. '01-08-2026')
+    // akan dicocokkan ke kolom bernama sama yang tidak ada.
+    const excludeSearchKeys = ['tglDari', 'tglSampai'];
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+
+    if (search && searchFields.length > 0) {
+      const sanitized = String(search).trim();
+      qb.where((inner: any) => {
+        searchFields.forEach((field) => {
+          if (field === 'tglbukti' || field === 'tglberangkat') {
+            inner.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') ilike ?`, [
+              `%${sanitized}%`,
+            ]);
+          } else if (field === 'created_at' || field === 'updated_at') {
+            inner.orWhereRaw(
+              `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') ilike ?`,
+              [`%${sanitized}%`],
+            );
+          } else if (field === 'pelayaran_text') {
+            inner.orWhere('u.pelayaran_nama', 'ilike', `%${sanitized}%`);
+          } else if (field === 'kapal_text') {
+            inner.orWhere('u.kapal_nama', 'ilike', `%${sanitized}%`);
+          } else if (field === 'tujuankapal_text') {
+            inner.orWhere('u.tujuankapal_nama', 'ilike', `%${sanitized}%`);
+          } else {
+            inner.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const value = String(rawValue);
+      if (key === 'tglbukti' || key === 'tglberangkat') {
+        qb.andWhereRaw(`TO_CHAR(u.${key}, 'DD-MM-YYYY') ilike ?`, [
+          `%${value}%`,
+        ]);
+      } else if (key === 'created_at' || key === 'updated_at') {
+        qb.andWhereRaw(`TO_CHAR(u.${key}, 'DD-MM-YYYY HH24:MI:SS') ilike ?`, [
+          `%${value}%`,
+        ]);
+      } else if (key === 'pelayaran_text') {
+        qb.andWhere('u.pelayaran_nama', 'ilike', `%${value}%`);
+      } else if (key === 'kapal_text') {
+        qb.andWhere('u.kapal_nama', 'ilike', `%${value}%`);
+      } else if (key === 'tujuankapal_text') {
+        qb.andWhere('u.tujuankapal_nama', 'ilike', `%${value}%`);
+      } else {
+        qb.andWhere(`u.${key}`, 'ilike', `%${value}%`);
+      }
+    });
+  }
+
+  private resolveSortColumn(sortBy: string): string {
+    switch (sortBy) {
+      case 'pelayaran_text':
+        return 'u.pelayaran_nama';
+      case 'kapal_text':
+        return 'u.kapal_nama';
+      case 'tujuankapal_text':
+        return 'u.tujuankapal_nama';
+      default:
+        // Fallback wajib: create/update memanggil ini dengan payload yang
+        // kadang tidak membawa sortBy, dan `u.undefined` bikin query gagal.
+        return `u.${sortBy || 'nobukti'}`;
+    }
+  }
+
+  /**
+   * Posisi 1-based baris `id` pada urutan grid — dihitung lewat COUNT, bukan
+   * dengan menarik seluruh baris hasil filter ke memori lalu findIndex.
+   *
+   * Pemanggil WAJIB sudah memanggil setSessionContext di transaksi yang sama,
+   * karena hitungan ini membaca view.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any> | undefined,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const orderCol = this.resolveSortColumn(sortBy);
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const existingData = await this.baseQuery(trx)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await this.baseQuery(trx)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Halaman + index baris hasil simpan, untuk memposisikan ulang kursor grid.
+   *
+   * `dataIndex` di sini adalah index ABSOLUT 0-based di seluruh daftar
+   * terfilter — BUKAN index di dalam halaman. Itu memang kontrak yang dipakai
+   * GridBlHeader (lihat komentar di onSuccess-nya, yang menghitung
+   * `absoluteIndex - (logicalStartPage - 1) * limit`). Nilainya identik dengan
+   * findIndex versi lama; yang berubah hanya cara menghitungnya.
+   *
+   * Kegagalan di sini TIDAK boleh menggagalkan simpan yang sudah berhasil —
+   * ini cuma soal posisi kursor.
+   */
+  private async resolveGridPosition(
+    trx: any,
+    id: string,
+    data: any,
+  ): Promise<{ pageNumber: number; dataIndex: number }> {
+    const limit = Number(data?.limit) > 0 ? Number(data.limit) : 50;
+    try {
+      await this.setSessionContext(trx, data?.filters);
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        data?.filters,
+        data?.search,
+        data?.sortBy,
+        data?.sortDirection,
+      );
+
+      return {
+        pageNumber: Math.ceil(posisi / limit),
+        dataIndex: posisi - 1,
+      };
+    } catch (error) {
+      console.error(
+        `Simpan bl header ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
+        error?.message,
+      );
+      return { pageNumber: 1, dataIndex: 0 };
+    }
+  }
+
   async findAll(
     { search, filters, pagination, sort, isLookUp }: FindAllParams,
     trx: any,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1 } = pagination ?? {};
+      // customOffset: offset absolut, dipakai grid saat window pagination harus
+      // mulai dari halaman yang BUKAN kelipatan ukuran window (mis. setelah
+      // simpan, baris baru ada di halaman terakhir dan window digeser mundur
+      // supaya tidak cuma berisi satu baris). Tanpa ini offset selalu
+      // (page - 1) * limit sehingga awal window terkunci ke kelipatan saja.
+      const customOffset = pagination?.customOffset;
+      let limit = pagination?.limit ?? 0;
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
-        .select([
-          'u.id',
-          'u.nobukti',
-          trx.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
-          'u.schedule_id',
-          trx.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
-          'u.shippinginstruction_nobukti',
-          'u.modifiedby',
-          trx.raw(
-            "TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          trx.raw(
-            "TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-          'p.voyberangkat',
-          'p.pelayaran_id',
-          'pel.nama as pelayaran_nama',
-          'p.kapal_id',
-          'kapal.nama as kapal_nama',
-          'p.tujuankapal_id',
-          'tujuankapal.nama as tujuankapal_nama',
-        ])
-        .leftJoin('schedulekapal as p', 'u.schedule_id', 'p.id')
-        .leftJoin('pelayaran as pel', 'p.pelayaran_id', 'pel.id')
-        .leftJoin('kapal', 'p.kapal_id', 'kapal.id')
-        .leftJoin('tujuankapal', 'p.tujuankapal_id', 'tujuankapal.id');
+      const sortBy = sort?.sortBy || 'nobukti';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+      const safeFilters = filters || {};
 
-      if (filters?.tglDari && filters?.tglSampai) {
-        const tglDariFormatted = formatDateToSQL(String(filters?.tglDari));
-        const tglSampaiFormatted = formatDateToSQL(String(filters?.tglSampai));
+      await this.setSessionContext(trx, safeFilters);
 
-        query.whereBetween('u.tglbukti', [
-          tglDariFormatted,
-          tglSampaiFormatted,
-        ]);
-      }
+      const countResult = await this.baseQuery(trx)
+        .count('u.id as total')
+        .modify((qb: any) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
 
-      const excludeSearchKeys = ['tglDari', 'tglSampai'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-
-      if (search) {
-        const sanitized = String(search).replace(/\[/g, '[[]').trim();
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'voyberangkat') {
-              qb.orWhere(`p.voyberangkat`, 'like', `%${sanitized}%`);
-            } else if (field === 'pelayaran_text') {
-              qb.orWhere(`pel.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'kapal_text') {
-              qb.orWhere(`kapal.nama`, 'like', `%${sanitized}%`);
-            } else if (field === 'tglbukti') {
-              qb.orWhereRaw(`TO_CHAR(u.${field}, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'tglberangkat') {
-              qb.orWhereRaw(`TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?`, [
-                `%${sanitized}%`,
-              ]);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') LIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else if (field === 'tujuankapal_text') {
-              qb.orWhere(`tujuankapal.nama`, 'like', `%${sanitized}%`);
-            } else {
-              qb.orWhere(`u.${field}`, 'like', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-
-          if (key === 'tglDari' || key === 'tglSampai') {
-            continue;
-          }
-
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
-                [key, `%${sanitizedValue}%`],
-              );
-            } else if (key === 'tglbukti') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') LIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'tglberangkat') {
-              query.andWhereRaw(
-                "TO_CHAR(p.tglberangkat, 'DD-MM-YYYY') LIKE ?",
-                [`%${sanitizedValue}%`],
-              );
-            } else if (key === 'voyberangkat') {
-              query.andWhere(`p.voyberangkat`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'pelayaran_text') {
-              query.andWhere(`pel.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'kapal_text') {
-              query.andWhere(`kapal.nama`, 'like', `%${sanitizedValue}%`);
-            } else if (key === 'tujuankapal_text') {
-              query.andWhere(`tujuankapal.nama`, 'like', `%${sanitizedValue}%`);
-            } else {
-              query.andWhere(`u.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
+      if (isLookUp) {
+        // Hasil lookup > 500 baris: jangan tarik semuanya, biarkan komponen
+        // LookUp beralih ke pencarian server-side.
+        if (total > 500) {
+          return {
+            data: [],
+            type: 'json',
+            total,
+            pagination: {
+              currentPage: 1,
+              totalPages: 0,
+              totalItems: total,
+              itemsPerPage: 0,
+            },
+          };
         }
+        limit = 0; // <= 500: kirim seluruh baris, difilter di client.
+      }
+
+      const query = this.baseQuery(trx).select(this.selectColumns(trx));
+      query.modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+      const orderCol = this.resolveSortColumn(sortBy);
+      query.orderBy(orderCol, sortDirection);
+      // Tiebreaker: tanpa urutan total, offset/limit bisa memulangkan baris
+      // yang sama di dua halaman berbeda saat grid menggeser window.
+      if (orderCol !== 'u.id') {
+        query.orderBy('u.id', 'asc');
       }
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        const offset =
+          typeof customOffset === 'number' && customOffset >= 0
+            ? customOffset
+            : (page - 1) * limit;
+        query.offset(offset).limit(limit);
       }
 
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (
-          sort?.sortBy === 'voyberangkat' ||
-          sort?.sortBy === 'tglberangkat'
-        ) {
-          query.orderBy(`p.${sort.sortBy}`, sort.sortDirection);
-        } else if (sort?.sortBy === 'pelayaran_text') {
-          query.orderBy('pel.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'kapal_text') {
-          query.orderBy('kapal.nama', sort.sortDirection);
-        } else if (sort?.sortBy === 'tujuankapal_text') {
-          query.orderBy('tujuankapal.nama', sort.sortDirection);
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
       const data = await query;
-      console.log('data', data);
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
           currentPage: Number(page),
-          totalPages: totalPages,
+          totalPages,
           totalItems: total,
           itemsPerPage: limit > 0 ? limit : total,
         },
       };
     } catch (error) {
       console.error('Error to findAll Bl Header', error);
-      throw new Error(error);
+      throw new InternalServerErrorException('Failed to fetch data');
     }
   }
 
@@ -412,6 +529,113 @@ export class BlHeaderService {
       throw new Error('Failed to fetch data bl header by id');
     }
   }
+
+  // ─── Export Excel (background job) ─────────────────────────────────────────
+
+  private readonly EXPORT_COLUMNS = [
+    'u.nobukti',
+    'u.shippinginstruction_nobukti',
+    'u.voyberangkat',
+    'u.pelayaran_nama',
+    'u.kapal_nama',
+    'u.tujuankapal_nama',
+    'u.modifiedby',
+  ];
+
+  private applyExportDateRange(
+    qb: any,
+    filters: Record<string, any> | undefined,
+  ): void {
+    if (!filters?.tglDari || !filters?.tglSampai) return;
+
+    qb.whereBetween('u.tglbukti', [
+      formatDateToSQL(String(filters.tglDari)),
+      formatDateToSQL(String(filters.tglSampai)),
+    ]);
+  }
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const sortBy = sort?.sortBy || 'nobukti';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const query = db(`${this.viewName} as u`)
+      .select([
+        ...this.EXPORT_COLUMNS,
+        db.raw("TO_CHAR(u.tglbukti, 'DD-MM-YYYY') as tglbukti"),
+        db.raw("TO_CHAR(u.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
+        db.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        db.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ])
+      .modify((qb: any) => this.applyExportDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search));
+
+    const orderCol = this.resolveSortColumn(sortBy);
+    query.orderBy(orderCol, sortDirection);
+    if (orderCol !== 'u.id') {
+      query.orderBy('u.id', 'asc');
+    }
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyExportDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN BL',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NO BUKTI',
+      'TGL BUKTI',
+      'NO BUKTI SI',
+      'VOY BERANGKAT',
+      'PELAYARAN',
+      'KAPAL',
+      'TGL BERANGKAT',
+      'TUJUAN KAPAL',
+      'MODIFIED BY',
+      'CREATED AT',
+      'UPDATED AT',
+    ],
+    columnWidths: [5, 25, 15, 30, 20, 25, 25, 15, 25, 20, 22, 22],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nobukti,
+      row.tglbukti,
+      row.shippinginstruction_nobukti,
+      row.voyberangkat,
+      row.pelayaran_nama,
+      row.kapal_nama,
+      row.tglberangkat,
+      row.tujuankapal_nama,
+      row.modifiedby,
+      row.created_at,
+      row.updated_at,
+    ],
+  };
 
   async update(id: string, data: any, trx: any) {
     try {
@@ -534,29 +758,12 @@ export class BlHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      // Lihat catatan yang sama di create(): posisi dihitung lewat COUNT,
+      // bukan dengan menarik seluruh hasil filter ke memori.
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex(
-        (item) => item.id === updatedData.id,
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        updatedData.id,
+        data,
       );
 
       return {
@@ -683,6 +890,27 @@ export class BlHeaderService {
     }
   }
 
+  private async hitungNominalRincianBiaya(
+    daftarBiaya: { id: any; nama?: string }[],
+    _trx: any,
+  ): Promise<Map<string, number>> {
+    const NOMINAL_SEMENTARA_PER_NAMA: Record<string, number> = {
+      'BIAYA TRUCKING MUAT': 1500000,
+      'OPERATIONAL PELABUHAN': 750000,
+      'DOKUMEN BL': 250000,
+      SEAL: 100000,
+    };
+    const NOMINAL_SEMENTARA_DEFAULT = 0;
+
+    return new Map(
+      daftarBiaya.map((biaya) => [
+        String(biaya.id),
+        NOMINAL_SEMENTARA_PER_NAMA[String(biaya.nama ?? '').toUpperCase()] ??
+          NOMINAL_SEMENTARA_DEFAULT,
+      ]),
+    );
+  }
+
   async processBlRincianBiaya(trx: any) {
     try {
       const getIdStatusYa = await trx
@@ -698,7 +926,18 @@ export class BlHeaderService {
         .select(['u.id', 'u.nama', 'u.keterangan', 'u.statusbiayabl'])
         .where('u.statusbiayabl', getIdStatusYa.id);
 
-      const data = await query;
+      const daftarBiaya = await query;
+      const nominalPerBiaya = await this.hitungNominalRincianBiaya(
+        daftarBiaya,
+        trx,
+      );
+
+      // `nominal` ikut dikirim supaya form BL tinggal memakainya apa adanya —
+      // tidak ada perhitungan yang diduplikasi di frontend.
+      const data = daftarBiaya.map((biaya: any) => ({
+        ...biaya,
+        nominal: nominalPerBiaya.get(String(biaya.id)) ?? 0,
+      }));
 
       return {
         data,

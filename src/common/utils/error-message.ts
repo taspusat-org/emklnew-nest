@@ -94,11 +94,6 @@ const RULES: Array<{ test: RegExp; build: (m: RegExpMatchArray) => string }> = [
 export const isTechnicalErrorMessage = (message: string): boolean =>
   TECHNICAL_SIGNALS.some((pattern) => pattern.test(message));
 
-/**
- * Terjemahkan pesan teknis (SQL, constraint, stack trace) jadi kalimat yang
- * bisa dimengerti user. Pesan yang memang ditulis untuk user — aturan bisnis
- * berbahasa Indonesia — dikembalikan apa adanya.
- */
 export const toSafeErrorMessage = (message: unknown): string => {
   if (typeof message !== 'string' || message.trim() === '')
     return GENERIC_ERROR_MESSAGE;

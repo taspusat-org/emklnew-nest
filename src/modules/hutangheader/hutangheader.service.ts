@@ -571,21 +571,6 @@ export class HutangheaderService {
     }
   }
 
-  /**
-   * Data untuk cetak bukti Hutang (LaporanHutang.mrt).
-   *
-   * Template-nya punya DUA datasource: `data` (header bukti) dan `detail`
-   * (rincian coa/nominal), jadi yang dikembalikan objek bernama — bukan array
-   * seperti laporan daftar. Kolom tambahan di header (judullaporan, usercetak,
-   * tglcetak, terbilang, judul) tidak ada di database; semuanya dipakai band
-   * header template dan dulu dirakit di browser sebelum cetak dipindah ke
-   * backend.
-   *
-   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
-   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi. findOne
-   * membaca tabel base + JOIN sendiri (bukan vhutangheader), sehingga tidak
-   * bergantung pada GUC periode yang hanya hidup di dalam transaksi.
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
@@ -967,14 +952,6 @@ export class HutangheaderService {
     }
   }
 
-  /**
-   * Query dasar export: filter, search, dan sort yang sama dengan findAll,
-   * TANPA paging dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -1012,7 +989,6 @@ export class HutangheaderService {
     return query;
   }
 
-  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -1028,7 +1004,6 @@ export class HutangheaderService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

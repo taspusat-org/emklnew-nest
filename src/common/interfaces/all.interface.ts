@@ -19,15 +19,6 @@ export interface FindAllParams {
   flag?: string;
 }
 
-/**
- * Opsi untuk create/update yang bisa dipanggil bersarang antar-modul.
- *
- * `withGridPosition` hanya boleh true pada modul yang BENAR-BENAR dituju user
- * (yang gridnya perlu memfokuskan baris hasil simpan). Saat kas gantung
- * memanggil pengeluaran, dan pengeluaran memanggil jurnal umum, dua modul
- * terakhir tidak punya grid yang menunggu — menghitung posisi di sana hanya
- * memboroskan query berat dan hasilnya pun dibuang pemanggilnya.
- */
 export interface WriteOptions {
   withGridPosition?: boolean;
 }

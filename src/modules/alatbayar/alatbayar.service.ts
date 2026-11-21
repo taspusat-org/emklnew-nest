@@ -242,11 +242,25 @@ export class AlatbayarService {
       const sortDirection =
         sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
-      const countResult = await trx(`${this.viewName} as ab`)
+      // Count dari tabel BASE (alatbayar), bukan view valatbayar. View hanya
+      // menambah kolom _text/_memo lewat LEFT JOIN ke parameter — LEFT JOIN tidak
+      // pernah mengubah jumlah baris, jadi count base == count view tapi tanpa
+      // overhead 4 JOIN (pada ~1jt baris: ~297ms -> ~119ms). applyFilters hanya
+      // mereferensikan kolom yang ada di tabel base (nama, keterangan, status*,
+      // created_at, updated_at, modifiedby) sehingga hasilnya identik.
+      const countResult = await trx(`${this.tableName} as ab`)
         .count('ab.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
+
+      // Lookup dengan hasil > 500 baris: JANGAN tarik semua baris. Path lookup
+      // tidak mengirim limit (limit=0) sehingga query mengambil SELURUH tabel —
+      // alatbayar ~1jt baris → serialisasi JSON melempar "RangeError: Invalid
+      // string length" (melebihi batas panjang string V8) → 500. Balas
+      // type:'json' tanpa data agar komponen LookUp beralih ke server-side
+      // search, konsisten dgn responseType path normal (>500 → 'json') dan guard
+      // di PengeluaranheaderService.findAll.
       if (isLookUp && total > 500) {
         return {
           data: [],
@@ -306,6 +320,11 @@ export class AlatbayarService {
       } else {
         query.orderBy(`ab.${sortBy}`, sortDirection);
       }
+      // Tiebreaker WAJIB: tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, dan ORDER BY yang nilainya seri (mis. sort STATUS AKTIF yang
+      // cuma punya 2 nilai) tak dijamin stabil antar query → satu baris bisa
+      // muncul di dua halaman ("two children with the same key" di grid).
+      query.orderBy('ab.id', 'asc');
 
       const offset =
         useCustomOffset === true && customOffset !== undefined
@@ -491,7 +510,6 @@ export class AlatbayarService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
   private readonly EXPORT_COLUMNS = [
     'ab.nama',
     'ab.keterangan',
@@ -501,14 +519,6 @@ export class AlatbayarService {
     'ab.text',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
-   * proses kehabisan heap.
-   */
   buildExportQuery(
     {
       search,
@@ -541,11 +551,6 @@ export class AlatbayarService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
-   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
-   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -615,13 +620,6 @@ export class AlatbayarService {
     ],
   };
 
-  /**
-   * Merakit workbook Excel dan mengembalikannya sebagai buffer.
-   *
-   * Hanya untuk export kecil (endpoint GET /alatbayar/export yang lama):
-   * seluruh data ditampung di memori. Export lewat background job memakai
-   * ExportJobService yang streaming.
-   */
   async buildExcelBuffer(data: any[]): Promise<Buffer> {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');

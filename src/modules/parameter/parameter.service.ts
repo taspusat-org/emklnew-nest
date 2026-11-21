@@ -26,7 +26,6 @@ export class ParameterService {
   private readonly logger = new Logger(ParameterService.name);
   private readonly tableName = 'parameter';
 
-  /** Kolom teks manusiawi yang di-uppercase sebelum disimpan. */
   private readonly upperCaseFields = [
     'grp',
     'subgrp',
@@ -458,9 +457,6 @@ export class ParameterService {
     }
   }
 
-  /**
-   * Generate unique cache key based on query parameters
-   */
   private generateCacheKey(params: any): string {
     const {
       search = '',
@@ -482,9 +478,6 @@ export class ParameterService {
     return `${this.tableName}:list:v2:${search}:${filterStr}:${sortStr}:${page}:${limit}:${isLookUp}:${exclude}:${notInStr}:${customOffset ?? ''}`;
   }
 
-  /**
-   * Clear all parameter cache
-   */
   private async clearParameterCache(): Promise<void> {
     try {
       const pattern = `${this.tableName}:list:*`;
@@ -860,14 +853,6 @@ export class ParameterService {
     return { success: true };
   }
 
-  /**
-   * Pra-cek sebelum dialog dibuka.
-   *
-   * EDIT mengambil lock baris seperti modul master lainnya. DELETE tidak punya
-   * satu tabel referensi untuk dicek: id parameter dipakai sebagai `statusaktif`
-   * (dan kolom sejenis) di hampir seluruh tabel, jadi tidak ada analog
-   * `checkUsed` bertabel-tunggal seperti groupbiayaextra.
-   */
   async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
     try {
       if (aksi === 'EDIT') {
@@ -889,7 +874,6 @@ export class ParameterService {
     }
   }
 
-  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom grid. */
   private readonly EXPORT_COLUMNS = [
     'p.grp',
     'p.subgrp',
@@ -899,14 +883,6 @@ export class ParameterService {
     'p.default',
   ];
 
-  /**
-   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
-   * dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -927,10 +903,6 @@ export class ParameterService {
       .orderBy(orderCol, sortDirection);
   }
 
-  /**
-   * Jumlah baris yang akan diekspor — dipakai untuk progres export yang
-   * sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -943,7 +915,6 @@ export class ParameterService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

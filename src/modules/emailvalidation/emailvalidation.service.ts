@@ -24,9 +24,6 @@ export interface EmailValidationResult {
 export class EmailvalidationService {
   constructor(private readonly httpService: HttpService) {}
 
-  /**
-   * Validasi syntax email menggunakan regex
-   */
   private validateSyntax(email: string): boolean {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const complexRegex =
@@ -35,9 +32,6 @@ export class EmailvalidationService {
     return emailRegex.test(email) && complexRegex.test(email);
   }
 
-  /**
-   * Check MX records untuk verifikasi domain
-   */
   private async checkMxRecords(
     domain: string,
   ): Promise<{ hasRecords: boolean; provider?: string }> {
@@ -64,9 +58,6 @@ export class EmailvalidationService {
     }
   }
 
-  /**
-   * Check apakah email dari free provider
-   */
   private isFreeEmailProvider(domain: string): boolean {
     const freeProviders = [
       'gmail.com',
@@ -89,9 +80,6 @@ export class EmailvalidationService {
     return freeProviders.includes(domain.toLowerCase());
   }
 
-  /**
-   * Check apakah disposable/temporary email
-   */
   private isDisposableEmail(domain: string): boolean {
     const disposableDomains = [
       'tempmail.com',
@@ -111,9 +99,6 @@ export class EmailvalidationService {
     return disposableDomains.includes(domain.toLowerCase());
   }
 
-  /**
-   * Check apakah role-based email
-   */
   private isRoleBasedEmail(email: string): boolean {
     const rolePrefixes = [
       'admin',
@@ -136,9 +121,6 @@ export class EmailvalidationService {
     return rolePrefixes.some((prefix) => localPart.includes(prefix));
   }
 
-  /**
-   * Suggest typo correction
-   */
   private suggestCorrection(email: string): string | undefined {
     const commonDomains = {
       'gmial.com': 'gmail.com',
@@ -159,9 +141,6 @@ export class EmailvalidationService {
     return undefined;
   }
 
-  /**
-   * Validasi menggunakan external API (gratis)
-   */
   private async validateWithExternalAPI(email: string): Promise<any> {
     try {
       // Menggunakan Abstract API (free tier: 100 requests/month)
@@ -180,9 +159,6 @@ export class EmailvalidationService {
     }
   }
 
-  /**
-   * Main validation function
-   */
   async validateEmail(email: string): Promise<EmailValidationResult> {
     email = email.trim().toLowerCase();
     const details: string[] = [];
@@ -289,9 +265,6 @@ export class EmailvalidationService {
     };
   }
 
-  /**
-   * Validate multiple emails (semicolon separated)
-   */
   async validateMultipleEmails(
     emailString: string,
   ): Promise<EmailValidationResult[]> {

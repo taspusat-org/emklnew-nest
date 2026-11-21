@@ -4,11 +4,6 @@ import * as ExcelJS from 'exceljs';
 import { ExportJobService } from './export-job.service';
 import { ReportJobStore } from './report-job.store';
 
-/**
- * Export Excel berjalan di background dan melapor lewat socket. Spec ini
- * memakai gateway palsu untuk menangkap event `report:progress`-nya, dan
- * sumber baris berupa Readable biasa — tanpa socket/DB sungguhan.
- */
 function makeHarness() {
   const store = new ReportJobStore();
   const emitted: any[] = [];
@@ -40,7 +35,6 @@ const sheet = {
   mapRow: (row: any, rowNumber: number) => [rowNumber, row.nama],
 };
 
-/** Menjalankan satu export sampai selesai lalu membuka file hasilnya. */
 async function runExport(sheetDef: any, rows: any[]) {
   const { service, store, finished } = makeHarness();
   const { jobId } = service.start({
@@ -134,12 +128,6 @@ describe('ExportJobService', () => {
     store.delete(jobId);
   });
 
-  /**
-   * Lebar kolom ditulis ExcelJS di elemen `<cols>` sebelum `<sheetData>`, dan
-   * hanya sekali — saat baris pertama di-flush. Dulu lebarnya diset SETELAH
-   * baris judul/header di-commit, jadi tidak pernah ikut tersimpan dan semua
-   * kolom keluar dengan lebar bawaan Excel.
-   */
   it('menyimpan lebar kolom mengikuti isi data terpanjang', async () => {
     const { worksheet, cleanup } = await runExport(sheet, [
       { nama: 'BCA' },

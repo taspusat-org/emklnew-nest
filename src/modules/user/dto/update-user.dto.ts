@@ -20,7 +20,6 @@ export const UpdateUserSchema = z
     menu: z.string().nullable().optional(),
     karyawan_id: z.string().nullable().optional(),
     namakaryawan: z.string().nullable().optional(),
-    /** User asal yang hak aksesnya (role + acl) disalin ke user ini. */
     userId: z.string().nullable().optional(),
     modifiedby: z.string().nullable().optional(),
   })

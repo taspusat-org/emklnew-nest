@@ -75,10 +75,6 @@ export const defaultConfig: CrudValidationConfig = {
   },
 };
 
-/**
- * Custom validation rules for specific modules
- * Use this to override default rules for specific modules
- */
 export const moduleSpecificRules: Record<
   string,
   Partial<CrudValidationConfig>
@@ -100,9 +96,6 @@ export const moduleSpecificRules: Record<
   },
 };
 
-/**
- * Expected response structure for CRUD operations
- */
 export interface CrudResponseExpectations {
   create: {
     shouldReturn: string[]; // e.g., ['newItem', 'pageNumber', 'itemIndex', 'fetchedPages']

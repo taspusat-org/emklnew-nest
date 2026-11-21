@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -96,15 +97,27 @@ export class BookingOrderanHeaderService {
 
       const getIdJenisOrderan = await trx
         .from(trx.raw(`parameter`))
-        .select('text')
+        .select('subgrp')
         .where('id', jenisorder_id)
         .first();
 
+      if (!getIdJenisOrderan?.subgrp) {
+        throw new NotFoundException(
+          `JENIS ORDER tidak ditemukan di parameter (jenisorder_id: ${jenisorder_id})`,
+        );
+      }
+
       const getStatusFormatFromOrderan = await trx
         .from(trx.raw(`jenisorder`))
-        .select('statusformat')
-        .where('id', getIdJenisOrderan?.text)
+        .select(['id', 'statusformat'])
+        .where('nama', getIdJenisOrderan.subgrp)
         .first();
+
+      if (!getStatusFormatFromOrderan?.statusformat) {
+        throw new NotFoundException(
+          `STATUS FORMAT tidak ditemukan di jenisorder (nama: ${getIdJenisOrderan.subgrp})`,
+        );
+      }
 
       const getFormatBookingOrderan = await trx
         .from(trx.raw(`parameter`))
@@ -152,7 +165,7 @@ export class BookingOrderanHeaderService {
           const headerData = {
             nobukti: nomorBukti,
             tglbukti: createData.tglbukti,
-            jenisorder_id: getIdJenisOrderan.text,
+            jenisorder_id: getStatusFormatFromOrderan.id,
             statusformat: getStatusFormatFromOrderan.statusformat,
             modifiedby: createData.modifiedby,
             updated_at: this.utilsService.getTime(),
@@ -223,7 +236,7 @@ export class BookingOrderanHeaderService {
           );
 
         headerData.nobukti = nomorBukti;
-        headerData.jenisorder_id = getIdJenisOrderan.text;
+        headerData.jenisorder_id = getStatusFormatFromOrderan.id;
         headerData.statusformat = getStatusFormatFromOrderan.statusformat;
         headerData.updated_at = this.utilsService.getTime();
         headerData.created_at = this.utilsService.getTime();
@@ -260,7 +273,7 @@ export class BookingOrderanHeaderService {
           trx,
         );
 
-        bookingOrderanData.bookingorderan_id = Number(newItem.id);
+        bookingOrderanData.bookingorderan_id = newItem.id;
         bookingOrderanData.nobukti = newItem.nobukti;
 
         const insertBookingOrderan = await serviceCreate.create(
@@ -289,38 +302,20 @@ export class BookingOrderanHeaderService {
       //   trx,
       // );
 
-      const { data, pagination } = await serviceFindAll.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
+      // Posisi kursor pasca-simpan dihitung boilerplate resolveGridPosition
+      // (COUNT + window), BUKAN dengan menarik seluruh daftar terfilter ke
+      // memori lalu findIndex. Versi lama memakai findAll({ limit: 0 }) —
+      // di 100rb baris itu berarti satu full scan tiap kali simpan — dan
+      // mengambil pageNumber dari pagination.currentPage, yaitu halaman yang
+      // SEDANG dibuka grid, bukan halaman tempat baris hasil simpan berada.
+      // Itulah sebabnya kursor melompat ke atas setelah simpan.
+      const posisi = await serviceFindAll.resolveGridPosition(
         trx,
-      );
-      console.log(sortBy, sortDirection, serviceFindAll, data);
-
-      let dataIndex = data.findIndex((item) => item.id === bookingOrderanId);
-      console.log('bookingOrderanId', bookingOrderanId, dataIndex);
-
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-
-      const pageNumber = pagination?.currentPage;
-      console.log('dataIndex', dataIndex, 'pageNumber', pageNumber);
-
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
+        bookingOrderanId,
+        { sortBy, sortDirection, limit, search, filters },
       );
 
-      return {
-        // dataBookingOrderan,
-        pageNumber,
-        dataIndex,
-      };
+      return { id: bookingOrderanId, ...posisi };
     } catch (error) {
       throw new Error(
         `Error creating booking orderan header: ${error.message}`,
@@ -601,17 +596,29 @@ export class BookingOrderanHeaderService {
 
       const getIdJenisOrderan = await trx
         .from(trx.raw(`parameter`))
-        .select('text')
+        .select('subgrp')
         .where('id', jenisorder_id)
         .first();
 
+      if (!getIdJenisOrderan?.subgrp) {
+        throw new NotFoundException(
+          `JENIS ORDER tidak ditemukan di parameter (jenisorder_id: ${jenisorder_id})`,
+        );
+      }
+
       const getStatusFormatFromOrderan = await trx
         .from(trx.raw(`jenisorder`))
-        .select('statusformat')
-        .where('id', getIdJenisOrderan?.text)
+        .select(['id', 'statusformat'])
+        .where('nama', getIdJenisOrderan.subgrp)
         .first();
 
-      headerData.jenisorder_id = getIdJenisOrderan.text;
+      if (!getStatusFormatFromOrderan?.statusformat) {
+        throw new NotFoundException(
+          `STATUS FORMAT tidak ditemukan di jenisorder (nama: ${getIdJenisOrderan.subgrp})`,
+        );
+      }
+
+      headerData.jenisorder_id = getStatusFormatFromOrderan.id;
       headerData.statusformat = getStatusFormatFromOrderan.statusformat;
       bookingOrderanData.nobukti = nobukti;
       bookingOrderanData.bookingorderan_id = id;
@@ -673,41 +680,23 @@ export class BookingOrderanHeaderService {
         trx,
       );
 
-      const { data: filteredData, pagination } = await serviceFindAll.findAll(
-        {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false,
-        },
+      // Posisi kursor pasca-simpan dihitung boilerplate resolveGridPosition
+      // (COUNT + window), BUKAN dengan menarik seluruh daftar terfilter ke
+      // memori lalu findIndex. Versi lama memakai findAll({ limit: 0 }) —
+      // di 100rb baris itu berarti satu full scan tiap kali simpan — dan
+      // mengambil pageNumber dari pagination.currentPage, yaitu halaman yang
+      // SEDANG dibuka grid, bukan halaman tempat baris hasil simpan berada.
+      // Itulah sebabnya kursor melompat ke atas setelah simpan.
+      const posisi = await serviceFindAll.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(updateBookingOrderan.id),
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-
-      const itemsPerPage = limit || 30;
-      const pageNumber = Math.floor(dataIndex / itemsPerPage) + 1;
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        String(updateBookingOrderan.id),
+        { sortBy, sortDirection, limit, search, filters },
       );
 
       return {
-        newItems: {
-          idBookingOrderan,
-          ...data,
-        },
-        pageNumber,
-        dataIndex,
+        newItems: { idBookingOrderan, ...data },
+        id: String(updateBookingOrderan.id),
+        ...posisi,
       };
     } catch (error) {
       if (error instanceof HttpException) {
@@ -762,7 +751,14 @@ export class BookingOrderanHeaderService {
           break;
       }
 
-      const result = await deleteService.delete(+id, trx, modifiedby);
+      // JANGAN `+id`. Id di sini string seperti
+      // '02-01A05616-3911-748A-9220-42430AE89CEC', jadi `+id` menghasilkan NaN,
+      // lockAndDestroy tidak menemukan baris apa pun, dan gagalnya baru muncul
+      // beberapa baris kemudian sebagai
+      //   "Undefined binding(s) ... Undefined column(s): [transaksi_id]".
+      // Sisa pola id integer dari SQL Server, sama seperti
+      // `Number(newItem.id)` yang sudah dibuang di create().
+      const result = await deleteService.delete(id, trx, modifiedby);
 
       const deletedData = await this.utilsService.lockAndDestroy(
         result.headerId,

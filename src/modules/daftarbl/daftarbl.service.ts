@@ -1,10 +1,12 @@
 import {
-  ConflictException,
-  HttpException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
+import { CreateDaftarblDto } from './dto/create-daftarbl.dto';
+import { UpdateDaftarblDto } from './dto/update-daftarbl.dto';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
 import {
@@ -14,54 +16,24 @@ import {
   uuidV7,
 } from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { dbMssql } from 'src/common/utils/db';
+import { RunningNumberService } from '../running-number/running-number.service';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
 import { Knex } from 'knex';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
 
 @Injectable()
 export class DaftarblService {
   private readonly logger = new Logger(DaftarblService.name);
-  // Nama tabel — dipakai untuk query SQL, redis key & logtrail namatabel.
-  // Frontend membaca redis `daftarbl-page-<n>`, jadi JANGAN diubah.
-  private readonly tableName = 'daftarbl';
   constructor(
-    // Inject wrapper RedisService (BUKAN raw 'REDIS_CLIENT'). Wrapper membungkus
-    // set/get/del dengan try/catch → cache bersifat best-effort: saat Redis mati,
-    // create/update tetap sukses (lanjut tanpa cache) alih-alih gagal 500 "Stream
-    // isn't writeable and enableOfflineQueue options is false". Raw client dengan
-    // enableOfflineQueue:false akan langsung reject saat koneksi putus.
-    private readonly redisService: RedisService,
+    @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
+    private readonly runningNumberService: RunningNumberService,
   ) {}
-
-  // Deteksi pelanggaran FOREIGN KEY MSSQL (error 547). daftarbl.statusaktif
-  // punya FK ke parameter, dan tabel transaksi punya FK ke daftarbl.id.
-  // Tanpa ini, FK violation jadi 500 generik tanpa pesan yang jelas.
-  private isForeignKeyError(error: any): boolean {
-    return (
-      error?.number === 547 ||
-      error?.originalError?.info?.number === 547 ||
-      /REFERENCE constraint|conflicted with the .*constraint/i.test(
-        error?.message ?? '',
-      )
-    );
-  }
-
-  // Data turunan (text/memo status aktif) diambil via JOIN ke `parameter` (`par`)
-  // pada statusaktif. Builder ini dipakai bersama oleh findAll, count, dan
-  // perhitungan posisi agar filter/sort konsisten.
-  private baseQuery(trx: any) {
-    return trx
-      .from(trx.raw(`${this.tableName} as jo`))
-      .leftJoin(
-        trx.raw('parameter as par'),
-        'jo.statusaktif',
-        'par.id',
-      );
-  }
+  private readonly tableName = 'daftarbl';
+  private readonly viewName = 'vdaftarbl';
 
   private applyFilters(
     qb: any,
@@ -76,19 +48,16 @@ export class DaftarblService {
     const dateFields = ['created_at', 'updated_at'];
 
     if (search && filters && Object.keys(filters).length > 0) {
-      const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
+      const sanitizedValue = String(search).trim();
       qb.where((query) => {
         searchFields.forEach((field) => {
-          if (dateFields.includes(field)) {
-            query.orWhereRaw("TO_CHAR(jo.??, 'DD-MM-YYYY HH24:MI:SS') like ?", [
+          if (['created_at', 'updated_at'].includes(field)) {
+            qb.orWhereRaw("to_char(jo.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
               field,
               `%${sanitizedValue}%`,
             ]);
-          } else if (field === 'statusaktif') {
-            // Cari berdasarkan teks status aktif (par.text), bukan id UUID.
-            query.orWhere('par.text', 'like', `%${sanitizedValue}%`);
           } else {
-            query.orWhere(`jo.${field}`, 'like', `%${sanitizedValue}%`);
+            query.orWhere(field, 'ilike', `%${sanitizedValue}%`);
           }
         });
       });
@@ -99,94 +68,57 @@ export class DaftarblService {
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
-      const sanitizedValue = String(rawValue).replace(/\[/g, '[[]');
+      const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("TO_CHAR(jo.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?", [
+        qb.andWhereRaw("to_char(jo.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
           key,
           `%${sanitizedValue}%`,
         ]);
-      } else if (key === 'statusaktif') {
-        // Filter status aktif memakai id parameter (exact match).
-        qb.andWhere('jo.statusaktif', sanitizedValue);
       } else {
-        qb.andWhere(`jo.${key}`, 'like', `%${sanitizedValue}%`);
+        // ✅ prefix jo. agar konsisten dengan alias view
+        qb.andWhere(`jo.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
 
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
-    // Hanya nama & keterangan yang di-uppercase. statusaktif adalah id parameter
-    // (varchar UUID) — JANGAN diubah-ubah casing-nya.
     return {
-      id: uuid ? uuid : dto.id, // id (uuidV7)
+      id: uuid ? uuid : dto.uuid, // id (uuidV7)
       nama: dto.nama ? dto.nama.toUpperCase() : null,
       keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
       statusaktif: dto.statusaktif,
+      info: dto.info ?? null,
       modifiedby: dto.modifiedby,
       created_at: dto.created_at || this.utilsService.getTime(),
       updated_at: dto.updated_at || this.utilsService.getTime(),
     };
   }
 
-  /**
-   * Mengembalikan kolom + arah urut yang BENAR untuk menghitung posisi baris,
-   * mereplikasi persis logika orderBy di findAll(). Untuk kolom status, grid
-   * menampilkan urutan berdasarkan kolom TEKS (par.text), bukan id (varchar
-   * UUID) — jadi posisi harus dihitung pakai kolom teks itu juga, kalau tidak
-   * fokus baris setelah simpan akan meleset. `col` = ref SQL untuk WHERE/ORDER,
-   * `valueKey` = nama field di baris hasil join untuk membaca nilainya.
-   */
   private resolvePositionOrder(
     sortBy: string,
     sortDirection: string,
-  ): { col: string; valueKey: string; dir: 'asc' | 'desc' } {
+  ): { col: string; dir: 'asc' | 'desc' } {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
     switch (sortBy) {
       case 'statusaktif':
-        // findAll: hardcode 'asc' pada par.text
-        return { col: 'par.text', valueKey: 'statusaktif_text', dir: 'asc' };
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on jo.text
       default:
-        return { col: `jo.${sortBy}`, valueKey: sortBy, dir };
+        return { col: sortBy, dir };
     }
   }
 
-  async create(createDaftarblDto: any, trx: any) {
+  async create(CreateDaftarblDto: any, trx: any) {
     try {
-      const {
-        sortBy = 'nama',
-        sortDirection = 'asc',
-        filters,
-        search,
-        page,
-        limit,
-      } = createDaftarblDto;
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateDaftarblDto;
 
       const uuid = await uuidV7(trx);
-
-      const insertData = this.buildInsertData(createDaftarblDto, uuid);
+      const insertData = this.buildInsertData(CreateDaftarblDto, uuid);
       await trx(this.tableName).insert(insertData);
-      // id varchar UUID (bukan auto-increment) → orderBy('id','desc').first()
-      // TIDAK mengembalikan baris baru. Ambil langsung by uuid yang baru
-      // di-generate & insert.
-      const newItem = await this.baseQuery(trx)
-        .select(
-          'jo.id as id',
-          'jo.nama',
-          'jo.keterangan',
-          'jo.statusaktif',
-          'jo.modifiedby',
-          trx.raw("TO_CHAR(jo.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(jo.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'par.memo as memo',
-          'par.text as text',
-          'par.text as statusaktif_text',
-        )
-        .where('jo.id', uuid)
-        .first();
+      const newItem = await trx(this.viewName).where('id', uuid).first();
 
-      const existingData = await this.baseQuery(trx)
-        .select('jo.*', 'par.text as statusaktif_text')
-        .where('jo.id', uuid)
+      const existingData = await trx(`${this.viewName} as jo`)
+        .where('id', newItem.id)
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
@@ -195,35 +127,20 @@ export class DaftarblService {
       let totalItems: number;
 
       // totalItems selalu dihitung dengan filter — fix bug utama
-      const totalRecords = await this.baseQuery(trx)
-        .count('jo.id as total')
+      const totalRecords = await trx(`${this.viewName} as jo`)
+        .count('id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
       totalItems = Number(totalRecords?.total ?? 0);
 
       if (existingData) {
-        // Hitung posisi memakai kolom & arah yang SAMA dengan urutan tampil grid
-        // (findAll). Untuk kolom status, bandingkan nilai TEKS dari baris hasil
-        // join, bukan id UUID — supaya fokus baris setelah simpan tepat.
-        const { col, valueKey, dir } = this.resolvePositionOrder(
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
         );
-        const resultposition = await this.baseQuery(trx)
+        const resultposition = await trx(`${this.viewName} as jo`)
           .count('* as posisi')
-          .where((qb) => {
-            // MSSQL ORDER BY ASC menaruh baris bernilai NULL paling ATAS, tetapi
-            // `col <= value` TIDAK ikut menghitung baris NULL → posisi baris baru
-            // undercount sebanyak jumlah baris NULL → pageNumber/itemIndex
-            // meleset → baris baru jatuh di luar window yang dimuat → fokus
-            // setelah simpan tidak mendarat di baris itu. Sertakan baris NULL
-            // pada hitungan ascending. (DESC: NULL di paling bawah → cukup `>=`.)
-            if (dir === 'desc') {
-              qb.where(col, '>=', existingData[valueKey]);
-            } else {
-              qb.where(col, '<=', existingData[valueKey]).orWhereNull(col);
-            }
-          })
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
           .modify((qb) => this.applyFilters(qb, filters, search))
           .first();
 
@@ -248,10 +165,7 @@ export class DaftarblService {
           search: search || '',
           filters: filters || {},
           pagination: { page: startPage, limit: totalDataNeeded, customOffset },
-          sort: {
-            sortBy,
-            sortDirection: String(sortDirection).toLowerCase() as 'asc' | 'desc',
-          },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
           useCustomOffset: true,
         },
@@ -295,55 +209,93 @@ export class DaftarblService {
         pagedData,
       };
     } catch (error) {
-      if (error instanceof HttpException) throw error;
-      if (this.isForeignKeyError(error)) {
-        throw new ConflictException('Status Aktif yang dipilih tidak valid.');
-      }
       throw new Error(`Error creating daftar bl: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, useCustomOffset }: FindAllParams,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
     trx: Knex.Transaction,
   ) {
     try {
       const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      const sortBy = sort?.sortBy || 'nama';
+      const sortBy = sort?.sortBy || 'nama'; // fix: was 'creditlimit'
       const sortDirection =
-        sort?.sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
       const safeFilters = filters || {};
-
-      // Count dengan filter yang sama (fix: dulu count seluruh tabel tanpa
-      // filter → totalPages salah saat filtering).
-      const countResult = await this.baseQuery(trx)
+      // Count dari tabel BASE (daftarbl), bukan view vdaftarbl. View hanya
+      // menambah kolom _text/_memo lewat LEFT JOIN ke parameter — LEFT JOIN tidak
+      // pernah mengubah jumlah baris, jadi count base == count view tapi tanpa
+      // overhead 4 JOIN (pada ~1jt baris: ~297ms -> ~119ms). applyFilters hanya
+      // mereferensikan kolom yang ada di tabel base (nama, keterangan, status*,
+      // created_at, updated_at, modifiedby) sehingga hasilnya identik.
+      const countResult = await trx(`${this.tableName} as jo`)
         .count('jo.id as total')
         .modify((qb) => this.applyFilters(qb, safeFilters, search))
         .first();
       const total = Number(countResult?.total ?? 0);
 
-      // Data + kolom turunan (text/memo status aktif)
-      const query = this.baseQuery(trx).select([
-        'jo.id as id',
+      // Lookup dengan hasil > 500 baris: JANGAN tarik semua baris. Path lookup
+      // tidak mengirim limit (limit=0) sehingga query mengambil SELURUH tabel —
+      // daftarbl ~1jt baris → serialisasi JSON melempar "RangeError: Invalid
+      // string length" (melebihi batas panjang string V8) → 500. Balas
+      // type:'json' tanpa data agar komponen LookUp beralih ke server-side
+      // search, konsisten dgn responseType path normal (>500 → 'json') dan guard
+      // di PengeluaranheaderService.findAll.
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
+      }
+
+      // Data dari view (mengandung _text, _memo, dll)
+      const query = trx(`${this.viewName} as jo`).select([
+        'jo.id',
+        'jo.uuid',
         'jo.nama',
         'jo.keterangan',
         'jo.statusaktif',
+        'jo.statusaktif_uuid',
+        'jo.text',
+        'jo.memo',
+        'jo.info',
         'jo.modifiedby',
-        trx.raw("TO_CHAR(jo.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-        trx.raw("TO_CHAR(jo.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-        'par.memo as memo',
-        'par.text as text',
-        'par.text as statusaktif_text',
+        trx.raw(
+          "to_char(jo.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(jo.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
       ]);
 
       query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
       if (sortBy === 'statusaktif') {
-        query.orderBy('par.text', 'asc');
+        query.orderBy('jo.text', 'asc');
       } else {
         query.orderBy(`jo.${sortBy}`, sortDirection);
       }
+      // Tiebreaker WAJIB: tiap halaman diambil lewat query LIMIT/OFFSET
+      // terpisah, dan ORDER BY yang nilainya seri (mis. sort STATUS AKTIF yang
+      // cuma punya 2 nilai) tak dijamin stabil antar query → satu baris bisa
+      // muncul di dua halaman ("two children with the same key" di grid).
+      query.orderBy('jo.id', 'asc');
 
       const offset =
         useCustomOffset === true && customOffset !== undefined
@@ -353,7 +305,6 @@ export class DaftarblService {
       if (limit > 0) {
         query.offset(offset).limit(limit);
       }
-
       const data = await query;
       const totalPages = Math.ceil(total / limit);
       const responseType = total > 500 ? 'json' : 'local';
@@ -375,71 +326,6 @@ export class DaftarblService {
     }
   }
 
-  async findAllByIds(ids: { id: string }[]) {
-    try {
-      const idList = ids.map((item) => item.id);
-      const tempData = `##temp_${Math.random().toString(36).substring(2, 15)}`;
-
-      const createTempTableQuery = `
-        CREATE TABLE ${tempData} (
-          id NVARCHAR(100)
-        );
-      `;
-      await dbMssql.raw(createTempTableQuery);
-
-      const insertTempTableQuery = `
-        INSERT INTO ${tempData} (id)
-        VALUES ${idList.map((id) => `('${id}')`).join(', ')};
-      `;
-      await dbMssql.raw(insertTempTableQuery);
-
-      const query = dbMssql(`${this.tableName} as jo`)
-        .select([
-          'jo.id as id',
-          'jo.nama',
-          'jo.keterangan',
-          'jo.statusaktif',
-          'jo.modifiedby',
-          dbMssql.raw(
-            "TO_CHAR(jo.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(jo.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-          'par.memo',
-          'par.text',
-        ])
-        .leftJoin('parameter as par', 'jo.statusaktif', 'par.id')
-        .join(dbMssql.raw(`${tempData} as temp`), 'jo.id', 'temp.id')
-        .orderBy('jo.nama', 'ASC');
-
-      const data = await query;
-
-      const dropTempTableQuery = `DROP TABLE ${tempData};`;
-      await dbMssql.raw(dropTempTableQuery);
-
-      return data;
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
-    }
-  }
-
-  async getById(id: string, trx: any) {
-    try {
-      const result = await trx(this.tableName).where('id', id).first();
-
-      if (!result) {
-        throw new Error('Data not found');
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error fetching data by id:', error);
-      throw new Error('Failed to fetch data by id');
-    }
-  }
-
   async update(id: string, data: any, trx: any) {
     try {
       const existedData = await trx(this.tableName).where('id', id).first();
@@ -448,22 +334,10 @@ export class DaftarblService {
         throw new Error('Daftar BL not found');
       }
 
-      const {
-        sortBy = 'nama',
-        sortDirection = 'asc',
-        filters,
-        search,
-        limit,
-      } = data;
-
-      // Bangun payload update — uppercase hanya nama & keterangan. JANGAN ikut
-      // menulis created_at (akan reset tanggal dibuat setiap edit).
-      const insertData: Record<string, any> = {
-        nama: data.nama ? data.nama.toUpperCase() : null,
-        keterangan: data.keterangan ? data.keterangan.toUpperCase() : null,
-        statusaktif: data.statusaktif,
-        modifiedby: data.modifiedby,
-      };
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
 
       const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
@@ -472,9 +346,16 @@ export class DaftarblService {
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const existingData = await this.baseQuery(trx)
-        .select('jo.*', 'par.text as statusaktif_text')
-        .where('jo.id', id)
+      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
+      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_uuid/
+      // _memo) yang tidak ada di tabel base; dipakai untuk acuan posisi dan
+      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
+      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
+      // dengan filter aktif.
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+
+      const existingData = await trx(`${this.viewName} as jo`)
+        .where('id', updatedItem.id)
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
@@ -482,32 +363,22 @@ export class DaftarblService {
       let posisi: number;
       let totalItems: number;
 
-      const totalRecords = await this.baseQuery(trx)
-        .count('jo.id as total')
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as jo`)
+        .count('id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
       totalItems = Number(totalRecords?.total ?? 0);
-
       if (existingData) {
-        const { col, valueKey, dir } = this.resolvePositionOrder(
+        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
+        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
           sortBy,
           sortDirection,
         );
-        const resultposition = await this.baseQuery(trx)
+        const resultposition = await trx(`${this.viewName} as jo`)
           .count('* as posisi')
-          .where((qb) => {
-            // MSSQL ORDER BY ASC menaruh baris bernilai NULL paling ATAS, tetapi
-            // `col <= value` TIDAK ikut menghitung baris NULL → posisi baris baru
-            // undercount sebanyak jumlah baris NULL → pageNumber/itemIndex
-            // meleset → baris baru jatuh di luar window yang dimuat → fokus
-            // setelah simpan tidak mendarat di baris itu. Sertakan baris NULL
-            // pada hitungan ascending. (DESC: NULL di paling bawah → cukup `>=`.)
-            if (dir === 'desc') {
-              qb.where(col, '>=', existingData[valueKey]);
-            } else {
-              qb.where(col, '<=', existingData[valueKey]).orWhereNull(col);
-            }
-          })
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
           .modify((qb) => this.applyFilters(qb, filters, search))
           .first();
 
@@ -532,10 +403,7 @@ export class DaftarblService {
           search: search || '',
           filters: filters || {},
           pagination: { page: startPage, limit: totalDataNeeded, customOffset },
-          sort: {
-            sortBy,
-            sortDirection: String(sortDirection).toLowerCase() as 'asc' | 'desc',
-          },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
           useCustomOffset: true,
         },
@@ -555,11 +423,11 @@ export class DaftarblService {
         {
           namatabel: this.tableName,
           postingdari: 'EDIT DAFTAR BL',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
@@ -569,22 +437,15 @@ export class DaftarblService {
         JSON.stringify(allFetchedData),
       );
       return {
-        updatedItem: {
-          id,
-          ...data,
-        },
+        updatedItem,
         itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
         fetchedPages,
         pagedData,
       };
     } catch (error) {
-      console.error('Error updating daftar bl:', error);
-      if (error instanceof HttpException) throw error;
-      if (this.isForeignKeyError(error)) {
-        throw new ConflictException('Status Aktif yang dipilih tidak valid.');
-      }
-      throw new Error('Failed to update daftar bl');
+      console.error('Error updating Daftar BL:', error);
+      throw new Error('Failed to update Daftar BL');
     }
   }
 
@@ -613,19 +474,73 @@ export class DaftarblService {
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
-      if (error instanceof HttpException) {
+      if (error instanceof NotFoundException) {
         throw error;
-      }
-      if (this.isForeignKeyError(error)) {
-        throw new ConflictException(
-          'Daftar BL tidak dapat dihapus karena sudah digunakan pada transaksi lain.',
-        );
       }
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
 
-  async exportToExcel(data: any[]) {
+  private readonly EXPORT_COLUMNS = ['jo.nama', 'jo.keterangan', 'jo.text'];
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as jo`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('jo.text', 'asc');
+    } else {
+      query.orderBy(`jo.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as jo`)
+      .count('jo.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN DAFTAR BL',
+      'Data Export',
+    ],
+    headers: ['NO.', 'NAMA', 'KETERANGAN', 'STATUS AKTIF'],
+    columnWidths: [5, 30, 25, 20],
+
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+      row.text,
+    ],
+  };
+
+  async buildExcelBuffer(data: any[]): Promise<Buffer> {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
@@ -658,7 +573,10 @@ export class DaftarblService {
         fgColor: { argb: 'FFFF00' },
       };
       cell.font = { bold: true, name: 'Tahoma', size: 10 };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.alignment = {
+        horizontal: index === 0 ? 'right' : 'center',
+        vertical: 'middle',
+      };
       cell.border = {
         top: { style: 'thin' },
         left: { style: 'thin' },
@@ -698,8 +616,20 @@ export class DaftarblService {
         col.width = maxLength + 2;
       });
 
+    const adjustCols = [5, 6, 7];
+    adjustCols.forEach((colIndex) => {
+      const col = worksheet.getColumn(colIndex);
+      const currentWidth = col.width ?? 20;
+      col.width = Math.max(10, currentWidth / 2);
+    });
+
     worksheet.getColumn(1).width = 6;
-    worksheet.getColumn(4).width = 20;
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  async exportToExcel(data: any[]) {
+    const buffer = await this.buildExcelBuffer(data);
 
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
@@ -710,7 +640,7 @@ export class DaftarblService {
       tempDir,
       `laporan_daftarbl_${Date.now()}.xlsx`,
     );
-    await workbook.xlsx.writeFile(tempFilePath);
+    await fs.promises.writeFile(tempFilePath, buffer);
 
     return tempFilePath;
   }

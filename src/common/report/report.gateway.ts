@@ -20,10 +20,6 @@ export interface ReportProgressPayload {
   error?: string;
 }
 
-/**
- * Channel progres render PDF. Client subscribe ke room ber-nama jobId lalu
- * menerima event `report:progress` sampai status `done`/`error`.
- */
 @Injectable()
 @WebSocketGateway({
   namespace: '/report',
@@ -54,14 +50,6 @@ export class ReportGateway
     this.logger.debug(`[disconnect] client=${client.id}`);
   }
 
-  /**
-   * Client mengirim event 'join' dengan jobId untuk masuk ke room-nya.
-   *
-   * Render Stimulsoft memblokir event loop, jadi client bisa saja sempat
-   * ping-timeout lalu reconnect di tengah proses. Karena client selalu
-   * mengirim 'join' lagi setiap `connect`, catch-up di bawah memastikan
-   * state akhir tetap sampai walau event aslinya terlewat.
-   */
   @SubscribeMessage('join')
   handleJoin(
     @MessageBody() jobId: string,

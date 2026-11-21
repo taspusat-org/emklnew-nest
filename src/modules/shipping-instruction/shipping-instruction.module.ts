@@ -8,6 +8,7 @@ import { LocksModule } from '../locks/locks.module';
 import { UtilsModule } from 'src/utils/utils.module';
 import { GlobalModule } from '../global/global.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
+import { ReportModule } from 'src/common/report/report.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { ShippingInstructionDetailModule } from '../shipping-instruction-detail/shipping-instruction-detail.module';
 import { ShippingInstructionDetailRincianModule } from '../shipping-instruction-detail-rincian/shipping-instruction-detail-rincian.module';
@@ -23,6 +24,7 @@ import { ShippingInstructionDetailRincianModule } from '../shipping-instruction-
     UtilsModule,
     GlobalModule,
     LogtrailModule,
+    ReportModule,
     RunningNumberModule,
     ShippingInstructionDetailModule,
     ShippingInstructionDetailRincianModule,

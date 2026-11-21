@@ -6,6 +6,7 @@ import { RedisModule } from 'src/common/redis/redis.module';
 import { LocksModule } from 'src/modules/locks/locks.module';
 import { GlobalModule } from 'src/modules/global/global.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
+import { ReportModule } from 'src/common/report/report.module';
 import { RunningNumberModule } from 'src/modules/running-number/running-number.module';
 import { JwtModule } from '@nestjs/jwt';
 import { AuthModule } from 'src/modules/auth/auth.module';
@@ -22,6 +23,7 @@ import { PanjarmuatandetailModule } from 'src/modules/panjarmuatandetail/panjarm
     LocksModule,
     GlobalModule,
     LogtrailModule,
+    ReportModule,
     RunningNumberModule,
     PanjarmuatandetailModule,
   ],

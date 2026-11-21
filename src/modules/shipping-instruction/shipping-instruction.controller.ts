@@ -33,11 +33,23 @@ import {
   FindAllParams,
   FindAllSchema,
 } from 'src/common/interfaces/all.interface';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportShippingInstructionDto,
+  ReportShippingInstructionSchema,
+} from './dto/report-shipping-instruction.dto';
+import {
+  ExportShippingInstructionDto,
+  ExportShippingInstructionSchema,
+} from './dto/export-shipping-instruction.dto';
 
 @Controller('shippinginstruction')
 export class ShippingInstructionController {
   constructor(
     private readonly shippingInstructionService: ShippingInstructionService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -233,6 +245,120 @@ export class ShippingInstructionController {
       console.error('Error checking validation:', error);
       throw new InternalServerErrorException('Failed to check validation');
     }
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportShippingInstructionSchema))
+    body: ReportShippingInstructionDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+    const cabang = req.user?.user?.cabang ?? '';
+    const pelabuhan = req.user?.user?.pelabuhan ?? '';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const trx = await dbMssql.transaction();
+        let result: any;
+        try {
+          result = await this.shippingInstructionService.findOne(
+            String(id),
+            trx,
+          );
+          await trx.commit();
+        } catch (error) {
+          await trx.rollback();
+          throw error;
+        }
+
+        const header = Array.isArray(result?.data?.header)
+          ? result.data.header
+          : [];
+        const detail = Array.isArray(result?.data?.detail)
+          ? result.data.detail
+          : [];
+
+        // Satu baris per rincian, kolom detail induknya ikut diulang —
+        // bentuk yang sama dengan yang dipakai template .mrt.
+        const detailRows = detail.flatMap((item: any) =>
+          (item.rincian || []).map((rincian: any) => ({
+            ...item,
+            rincian_id: rincian.id,
+            rincian_comodity: rincian.comodity,
+            rincian_keterangan: rincian.keterangan,
+            rincian_nocontainer: rincian.nocontainer,
+            rincian_noseal: rincian.noseal,
+            rincian_orderan_muatan: rincian.orderanmuatan_nobukti,
+            rincian_shipper_nama: rincian.shipper_nama,
+            rincian_shippinginstructiondetail_id:
+              rincian.shippinginstructiondetail_id,
+            rincian_shippinginstructiondetail_nobukti:
+              rincian.shippinginstructiondetail_nobukti,
+          })),
+        );
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return {
+          data: header.map((row: any) => ({
+            ...row,
+            judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+            usercetak: username,
+            tglcetak,
+            judul: 'EKSPEDISI MUATAN KAPAL LAUT',
+            judul2: 'SHIPPING INSTRUCTION',
+            cabang,
+            pelabuhan,
+          })),
+          detail: detailRows,
+        };
+      },
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportShippingInstructionSchema))
+    body: ExportShippingInstructionDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_shippinginstruction_${stamp}.xlsx`,
+      countRows: () =>
+        this.shippingInstructionService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.shippingInstructionService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.shippingInstructionService.exportSheet,
+    });
   }
 
   @Get('/export/:id')

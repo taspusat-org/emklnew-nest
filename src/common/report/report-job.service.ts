@@ -6,32 +6,12 @@ import { ReportGateway } from './report.gateway';
 import { ReportPdfService } from './report-pdf.service';
 
 export interface StartReportJobOptions {
-  /** Nama file template di folder "reports", mis. "LaporanGroupbiayaextra.mrt". */
   mrtName: string;
-  /**
-   * Pengambil data laporan. Dipanggil di background — modul pemanggil
-   * biasanya membungkus findAll()-nya sendiri di sini, lalu memetakan
-   * baris ke kolom yang dipakai template.
-   *
-   * Balikannya boleh berupa array (template satu datasource) atau objek
-   * `{ namaTabel: baris[] }` untuk template header+rincian seperti
-   * LaporanHutang.mrt yang membaca `Data.data` dan `Data.detail`. Pada bentuk
-   * objek, tabel PERTAMA dianggap tabel utama: kalau isinya kosong, job
-   * dihentikan dengan pesan "Data tidak tersedia" (tabel rincian yang kosong
-   * bukan alasan membatalkan cetak).
-   */
   loadData: () => Promise<any[] | Record<string, any[]>>;
-  /** Nama tabel di DataSet Stimulsoft. Default 'data' (dipakai template lama). */
   tableName?: string;
-  /** Nama file PDF hasil unduhan. Default: mrtName dengan ekstensi .pdf. */
   filename?: string;
 }
 
-/**
- * Menjalankan render laporan di background lalu melaporkan progresnya lewat
- * socket — polanya mengikuti processJobFromQuery di service reportapi:
- * ambil data → render PDF → simpan buffer → emit `done` dengan downloadUrl.
- */
 @Injectable()
 export class ReportJobService {
   private readonly logger = new Logger(ReportJobService.name);
@@ -42,10 +22,6 @@ export class ReportJobService {
     private readonly reportPdf: ReportPdfService,
   ) {}
 
-  /**
-   * Mendaftarkan job baru dan langsung mengembalikan jobId — proses render
-   * sengaja TIDAK di-await supaya request HTTP-nya balas seketika.
-   */
   start(options: StartReportJobOptions): { jobId: string } {
     const jobId = randomUUID();
     const filename =
@@ -64,12 +40,6 @@ export class ReportJobService {
     return { jobId };
   }
 
-  /**
-   * Ticker yang menaikkan percent secara halus mendekati cap tiap 400ms.
-   * Durasi query maupun render tidak bisa diketahui di depan, jadi progres
-   * yang ditampilkan adalah perkiraan yang selalu mendekat tapi tidak pernah
-   * melewati cap — milestone aslinya yang menggeser angka ke tahap berikutnya.
-   */
   private startProgressTicker(
     jobId: string,
     step: string,

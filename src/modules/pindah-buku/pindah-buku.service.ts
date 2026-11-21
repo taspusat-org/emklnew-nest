@@ -136,7 +136,6 @@ export class PindahBukuService {
     return 0;
   }
 
-  /** Parameter format nomor bukti + memo yang jadi `postingdari` jurnalnya. */
   private async getFormatPindahBuku(trx: any) {
     const memoExpr = '(CASE WHEN memo IS JSON THEN memo::jsonb END)';
     const parameter = await trx('parameter')
@@ -163,10 +162,6 @@ export class PindahBukuService {
     return parameter;
   }
 
-  /**
-   * Coa jurnal diambil dari bank-nya, bukan dari payload: uang MASUK ke
-   * bankke (debet) dan KELUAR dari bankdari (kredit).
-   */
   private async resolveCoa(trx: any, bankkeId: any, bankdariId: any) {
     const [debet, kredit] = await Promise.all([
       trx('bank').select('coa').where('id', bankkeId).first(),
@@ -187,7 +182,6 @@ export class PindahBukuService {
     return { coadebet: debet.coa, coakredit: kredit.coa };
   }
 
-  /** Jurnal dua baris: debet di bank tujuan, kredit di bank asal. */
   private buildJurnalPayload(row: any, parameter: any) {
     const tglbukti = formatDateToSQL(String(row.tglbukti));
 
@@ -884,12 +878,6 @@ export class PindahBukuService {
     }
   }
 
-  /**
-   * Pindah buku tidak punya tabel rincian: satu bukti = satu baris. Baris
-   * "rincian" yang dicetak/diekspor dirakit dari kolom pembayaran di header
-   * (alat bayar, warkat, jatuh tempo, nominal) — bentuk yang sama dengan
-   * tabel rincian modul header/detail lain.
-   */
   private buildBuktiDetails(header: any) {
     return [
       {
@@ -903,13 +891,6 @@ export class PindahBukuService {
     ];
   }
 
-  /**
-   * Data untuk cetak bukti pindah buku di background. LaporanPindahBuku.mrt
-   * mencetak SELURUH isinya dari datasource `data`: satu bukti = satu baris,
-   * jadi alat bayar/warkat/nominal ikut di header. `detail` tetap dikirim
-   * karena template mendeklarasikannya (sekarang tanpa kolom, tanpa band) —
-   * begitu rincian ditambahkan di designer, datanya sudah tersedia.
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
@@ -954,11 +935,6 @@ export class PindahBukuService {
     };
   }
 
-  /**
-   * Data master satu bukti untuk blok info di atas tabel rincian. Dipakai juga
-   * untuk memberi nama file, jadi diambil SEBELUM job export dimulai supaya
-   * id yang tidak ada langsung balas 404, bukan gagal di tengah job.
-   */
   async loadExportBuktiHeader(id: string, db: any) {
     const header = await this.baseQuery(db)
       .select([
@@ -984,11 +960,6 @@ export class PindahBukuService {
     return header;
   }
 
-  /**
-   * Rincian satu bukti. Dikembalikan sebagai query (bukan array) supaya
-   * ExportJobService bisa men-stream-nya lewat cursor, sama seperti modul
-   * header/detail lain — di sini isinya selalu satu baris.
-   */
   buildExportBuktiQuery(nobukti: string, db: any) {
     return db(`${this.viewName} as u`)
       .select([
@@ -1003,7 +974,6 @@ export class PindahBukuService {
       .orderBy('u.id', 'asc');
   }
 
-  /** Jumlah baris rincian — dipakai untuk progres export yang nyata. */
   async countExportBuktiRows(nobukti: string, db: any): Promise<number> {
     const result = await db(`${this.viewName} as u`)
       .count('u.id as total')
@@ -1013,7 +983,6 @@ export class PindahBukuService {
     return Number(result?.total ?? 0);
   }
 
-  /** Sheet export per transaksi: blok master di atas, rincian + TOTAL di bawah. */
   buildExportBuktiSheet(header: any): ExportSheetDefinition {
     return {
       sheetName: 'Pindah Buku',

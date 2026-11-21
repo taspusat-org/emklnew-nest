@@ -1108,16 +1108,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     }
   }
 
-  /**
-   * Data untuk LaporanPengeluaran.mrt: `data` (satu baris header + kolom
-   * tambahan judul/usercetak/tglcetak/terbilang) dan `detail` (rincian coa).
-   * Sebelumnya dirakit di browser sebelum cetak dipindah ke backend.
-   *
-   * `db` boleh berupa instance knex tanpa transaksi: ini murni pembacaan dan
-   * job-nya berumur panjang, jadi tidak ada gunanya menahan koneksi. findOne
-   * membaca tabel base + JOIN sendiri (bukan vpengeluaranheader), sehingga
-   * tidak bergantung pada GUC periode yang hanya hidup di dalam transaksi.
-   */
   async loadReportData(
     id: string,
     { username, judullaporan }: { username: string; judullaporan?: string },
@@ -1168,15 +1158,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     };
   }
 
-  /**
-   * Filter periode/bank untuk jalur TANPA transaksi (export background).
-   *
-   * findAll menurunkan tglDari/tglSampai/bank_id ke view lewat GUC
-   * (`set_config(..., true)`) yang umurnya seumur transaksi. Export tidak
-   * dibungkus transaksi, jadi GUC-nya tidak pernah ter-set dan view akan
-   * memulangkan SELURUH periode. Di sini ketiganya dipasang sebagai predikat
-   * biasa supaya hasil export sama dengan yang terlihat di grid.
-   */
   private applyPeriodFilters(
     qb: any,
     filters: Record<string, any>,
@@ -1200,14 +1181,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     }
   }
 
-  /**
-   * Query dasar export: filter, search, dan sort yang sama dengan findAll,
-   * TANPA paging dan hanya kolom yang dipakai file Excel.
-   *
-   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
-   * seluruh baris ke sebuah array lebih dulu adalah yang membuat proses
-   * kehabisan heap saat datanya banyak.
-   */
   buildExportQuery(
     {
       search,
@@ -1249,7 +1222,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     return query;
   }
 
-  /** Jumlah baris yang akan diekspor — dipakai untuk progres export yang nyata. */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -1265,7 +1237,6 @@ export class PengeluaranheaderService implements OnModuleInit {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export daftar — dipakai jalur background (streaming). */
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [

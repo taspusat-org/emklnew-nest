@@ -35,6 +35,16 @@ import {
 } from 'src/common/interfaces/all.interface';
 import { BookingOrderanMuatanService } from './bookingorderanmuatan.service';
 import { OrderanHeaderService } from '../orderan-header/orderan-header.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import {
+  ReportBookingOrderanDto,
+  ReportBookingOrderanSchema,
+} from './dto/report-booking-orderan.dto';
+import {
+  ExportBookingOrderanDto,
+  ExportBookingOrderanSchema,
+} from './dto/export-booking-orderan.dto';
 
 @Controller('bookingorderanheader')
 export class BookingOrderanHeaderController {
@@ -42,6 +52,8 @@ export class BookingOrderanHeaderController {
     private readonly bookingOrderanHeaderService: BookingOrderanHeaderService,
     private readonly bookingOrderanMuatanService: BookingOrderanMuatanService,
     private readonly orderanHeaderService: OrderanHeaderService,
+    private readonly reportJobService: ReportJobService,
+    private readonly exportJobService: ExportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -89,6 +101,9 @@ export class BookingOrderanHeaderController {
   //@BOOKINGORDERANMUATAN
   @UsePipes(new ZodValidationPipe(FindAllSchema))
   async findAll(@Query() query: any) {
+    // customOffset WAJIB ikut di-destructure. Sisa query masuk ke `...filters`
+    // dan diperlakukan sebagai filter kolom — kalau tidak dikeluarkan di sini,
+    // grid akan memfilter kolom bernama "customOffset" yang tidak ada.
     const {
       search,
       page,
@@ -97,6 +112,7 @@ export class BookingOrderanHeaderController {
       sortDirection,
       isLookUp,
       jenisOrderan,
+      customOffset,
       ...filters
     } = query;
     let service: any;
@@ -106,9 +122,16 @@ export class BookingOrderanHeaderController {
       sortDirection: sortDirection || 'asc',
     };
 
+    const offsetAngka = Number(customOffset);
     const pagination = {
       page: page || 1,
       limit: limit === 0 || !limit ? undefined : limit,
+      customOffset:
+        customOffset !== undefined &&
+        Number.isFinite(offsetAngka) &&
+        offsetAngka >= 0
+          ? offsetAngka
+          : undefined,
     };
 
     const params = {
@@ -296,6 +319,101 @@ export class BookingOrderanHeaderController {
       console.error('Error in findOne booking orderan muatan:', error);
       throw error; // Re-throw the error to be handled by the global exception filter
     }
+  }
+
+  /**
+   * Cetak laporan dijalankan di BACKEND (background job + socket), sama seperti
+   * shipping-instruction. Sebelumnya modul ini merender Stimulsoft DI BROWSER
+   * dan bahkan memuat template milik modul lain
+   * (LaporanPengeluaranKasEmklHeader.mrt) lalu membuka /reports/pengeluaranemklheader.
+   */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportBookingOrderanSchema))
+    body: ReportBookingOrderanDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+    const cabang = req.user?.user?.cabang ?? '';
+    const pelabuhan = req.user?.user?.pelabuhan ?? '';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        const trx = await dbMssql.transaction();
+        let result: any;
+        try {
+          result = await this.bookingOrderanMuatanService.findOne(
+            String(id),
+            trx,
+          );
+          await trx.commit();
+        } catch (error) {
+          await trx.rollback();
+          throw error;
+        }
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return {
+          data: rows.map((row: any) => ({
+            ...row,
+            judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+            usercetak: username,
+            tglcetak,
+            judul: 'EKSPEDISI MUATAN KAPAL LAUT',
+            judul2: 'BOOKING ORDERAN MUATAN',
+            cabang,
+            pelabuhan,
+          })),
+        };
+      },
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBookingOrderanSchema))
+    body: ExportBookingOrderanDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nobukti',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_bookingorderanmuatan_${stamp}.xlsx`,
+      countRows: () =>
+        this.bookingOrderanMuatanService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.bookingOrderanMuatanService
+          .buildExportQuery(queryParams, dbMssql)
+          .stream(),
+      sheet: this.bookingOrderanMuatanService.exportSheet,
+    });
   }
 
   @Post('check-validation')

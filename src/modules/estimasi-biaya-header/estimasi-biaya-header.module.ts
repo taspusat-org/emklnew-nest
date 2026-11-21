@@ -10,6 +10,7 @@ import { UtilsModule } from 'src/utils/utils.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { EstimasiBiayaDetailBiayaModule } from '../estimasi-biaya-detail-biaya/estimasi-biaya-detail-biaya.module';
 import { EstimasiBiayaDetailInvoiceModule } from '../estimasi-biaya-detail-invoice/estimasi-biaya-detail-invoice.module';
+import { ReportModule } from 'src/common/report/report.module';
 
 @Module({
   controllers: [EstimasiBiayaHeaderController],
@@ -24,6 +25,8 @@ import { EstimasiBiayaDetailInvoiceModule } from '../estimasi-biaya-detail-invoi
     LogtrailModule,
     EstimasiBiayaDetailBiayaModule,
     EstimasiBiayaDetailInvoiceModule,
+    // Menyediakan ExportJobService (export Excel background + socket progres).
+    ReportModule,
   ],
 })
 export class EstimasiBiayaHeaderModule {}
