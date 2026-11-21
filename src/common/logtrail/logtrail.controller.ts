@@ -52,17 +52,7 @@ export class LogtrailController {
       pagination,
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
     };
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.logtrailService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error;
-    }
+    return this.logtrailService.findAll(params, dbMssql);
   }
   @Get(':id/header')
   async processHeader(

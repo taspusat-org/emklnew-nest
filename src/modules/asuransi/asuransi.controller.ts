@@ -116,17 +116,7 @@ export class AsuransiController {
       isLookUp: isLookUp === 'true',
     };
 
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.asuransiService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error;
-    }
+    return this.asuransiService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { parseDDMMYYYY } from 'src/utils/utils.service';
 import { z } from 'zod';
 
-export const CreateOffdaySchema = z.object({
+export const CreateHariliburSchema = z.object({
   tgl: z.preprocess(
     (arg) => {
       if (typeof arg === 'string') {
@@ -19,4 +19,4 @@ export const CreateOffdaySchema = z.object({
   modifiedby: z.string().nullable().optional(),
   statusaktif: z.string().nullable().optional(),
 });
-export type CreateOffdayDto = z.infer<typeof CreateOffdaySchema>;
+export type CreateHariliburDto = z.infer<typeof CreateHariliburSchema>;
