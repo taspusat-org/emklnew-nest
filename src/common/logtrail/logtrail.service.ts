@@ -60,7 +60,7 @@ export class LogtrailService {
       } else if (key === 'text' || key === 'memo') {
         qb.andWhere(`vl.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhere(`va.${key}`, 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere(`vl.${key}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }

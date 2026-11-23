@@ -197,6 +197,7 @@ export class AsuransiController {
 
   @UseGuards(AuthGuard)
   @Post('report')
+  //@ASURANSI
   async report(
     @Body(new ZodValidationPipe(ReportAsuransiSchema))
     body: ReportAsuransiDto,
@@ -204,42 +205,23 @@ export class AsuransiController {
   ) {
     const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
       body;
-
     const username = req.user?.user?.username ?? 'unknown';
 
     return this.reportJobService.start({
       mrtName,
-      loadData: async () => {
-        const result = await this.asuransiService.findAll(
+      loadData: () =>
+        this.asuransiService.loadReportData(
           {
             search,
             filters: (filters ?? {}) as Record<string, string | number>,
-            pagination: { page: 1, limit: 0 },
             sort: {
               sortBy: sortBy || 'nama',
               sortDirection: sortDirection || 'asc',
             },
-            isLookUp: false,
           },
+          { username, judullaporan },
           dbMssql,
-        );
-
-        const rows = Array.isArray(result?.data) ? result.data : [];
-
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const tglcetak =
-          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-
-        return rows.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'Laporan Asuransi',
-          usercetak: username,
-          tglcetak,
-          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
-        }));
-      },
+        ),
     });
   }
 

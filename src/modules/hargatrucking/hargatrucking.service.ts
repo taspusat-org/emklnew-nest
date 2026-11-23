@@ -567,11 +567,6 @@ export class HargatruckingService {
     return query;
   }
 
-  /**
-   * Jumlah baris yang akan diekspor. Dihitung dari tabel BASE (bukan view):
-   * LEFT JOIN di view tidak pernah menambah baris, jadi hasilnya sama tapi
-   * tanpa overhead join. Dipakai untuk progres export yang sebenarnya.
-   */
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
@@ -584,7 +579,28 @@ export class HargatruckingService {
     return Number(result?.total ?? 0);
   }
 
-  /** Definisi sheet export — dipakai jalur background (streaming). */
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Harga Trucking',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
@@ -602,17 +618,16 @@ export class HargatruckingService {
       'NOMINAL',
       'STATUS AKTIF',
     ],
-    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
     columnWidths: [6, 20, 20, 50, 20, 20, 20, 15],
     columnFormats: [
-      null, // NO. — default sudah rata kanan
+      null, // NO.
       null, // TUJUAN KAPAL
       null, // EMKL
-      { wrapText: true }, // KETERANGAN — teks panjang dibungkus
+      { wrapText: true }, // KETERANGAN
       null, // CONTAINER
       null, // JENIS ORDERAN
       { numFmt: EXCEL_FORMAT.RUPIAH }, // NOMINAL,
-      { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
+      { align: 'center' as const }, // STATUS AKTIF
     ],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
