@@ -854,6 +854,86 @@ export class BlHeaderService {
     }
   }
 
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    trx: any,
+  ): Promise<Record<string, any[]>> {
+    const result = await this.findOne(id, trx);
+    const header = Array.isArray(result?.data) ? result.data : [];
+
+    if (!header.length) {
+      return { data: [], detail: [], detail_rincian: [] };
+    }
+
+    // limit 0 = ambil semua; cetakan butuh seluruh detail satu BL.
+    const params: any = {
+      search: undefined,
+      filters: {},
+      pagination: { page: 1, limit: 0 },
+      sort: { sortBy: 'id', sortDirection: 'asc' },
+    };
+
+    const detailRes = await this.blDetailService.findAll(id, trx, params);
+    const details = detailRes?.data ?? [];
+
+    // relationId: kunci yang dipakai template .mrt untuk menyambungkan
+    // detail_rincian ke detail induknya.
+    const rincianRows: any[] = [];
+    for (const detail of details) {
+      const rincianRes = await this.blDetailRincianService.findAll(
+        String(detail.id),
+        trx,
+        params,
+      );
+      for (const rincian of rincianRes?.data ?? []) {
+        rincianRows.push({ ...rincian, relationId: detail.id });
+      }
+    }
+
+    // Satu baris per rincian, kolom detail induknya ikut diulang — bentuk
+    // yang sama dengan ShippingInstruction dan yang diharapkan
+    // LaporanBL.mrt. Detail tanpa rincian tetap ikut satu baris supaya
+    // tidak hilang dari cetakan.
+    const detailRows = details.flatMap((item: any) => {
+      const milik = rincianRows.filter((r) => r.relationId === item.id);
+      if (!milik.length) return [item];
+
+      return milik.map((rincian: any) => ({
+        ...item,
+        rincian_id: rincian.id,
+        rincian_comodity: rincian.comodity,
+        rincian_keterangan: rincian.keterangan,
+        rincian_nocontainer: rincian.nocontainer,
+        rincian_noseal: rincian.noseal,
+        rincian_orderan_muatan: rincian.orderanmuatan_nobukti,
+        rincian_shipper_nama: rincian.shipper_nama,
+        rincian_shippinginstructiondetail_id:
+          rincian.shippinginstructiondetail_id,
+        rincian_shippinginstructiondetail_nobukti:
+          rincian.shippinginstructiondetail_nobukti,
+      }));
+    });
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      data: header.map((row: any) => ({
+        ...row,
+        judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        usercetak: username,
+        tglcetak,
+        judul: 'BILL OF LADING',
+      })),
+      detail: detailRows,
+      detail_rincian: rincianRows,
+    };
+  }
+
   async processBl(schedule_id: number, trx: any) {
     try {
       const query = trx
