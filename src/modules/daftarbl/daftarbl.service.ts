@@ -509,6 +509,28 @@ export class DaftarblService {
     return query;
   }
 
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Daftar BL',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
