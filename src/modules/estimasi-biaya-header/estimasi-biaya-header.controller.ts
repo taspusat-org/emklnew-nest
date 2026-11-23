@@ -34,6 +34,11 @@ import {
   UpdateEstimasiBiayaHeaderSchema,
 } from './dto/create-estimasi-biaya-header.dto';
 import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import {
+  ReportEstimasiBiayaHeaderDto,
+  ReportEstimasiBiayaHeaderSchema,
+} from './dto/report-estimasi-biaya-header.dto';
 import {
   ExportEstimasiBiayaHeaderDto,
   ExportEstimasiBiayaHeaderSchema,
@@ -44,9 +49,33 @@ export class EstimasiBiayaHeaderController {
   constructor(
     private readonly estimasiBiayaHeaderService: EstimasiBiayaHeaderService,
     private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
+  /** Cetak LaporanEstimasiBiaya.mrt di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportEstimasiBiayaHeaderSchema))
+    body: ReportEstimasiBiayaHeaderDto,
+    @Req() req,
+  ) {
+    const { mrtName, id, judullaporan } = body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.estimasiBiayaHeaderService.loadReportData(
+          id,
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
   @Post('export')
   async exportBackground(
     @Body(new ZodValidationPipe(ExportEstimasiBiayaHeaderSchema))

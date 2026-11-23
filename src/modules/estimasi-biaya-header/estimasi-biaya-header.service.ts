@@ -443,6 +443,43 @@ export class EstimasiBiayaHeaderService {
     return query;
   }
 
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data } = await this.findOne(id, db);
+    const headerRows = data?.header ?? [];
+
+    if (!headerRows.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    // Header digabung ke SETIAP baris detail biaya: itulah bentuk yang
+    // LaporanEstimasiBiaya.mrt harapkan di dataset `data`.
+    return {
+      data: (data.detailbiaya ?? []).map((item: any) => ({
+        ...header,
+        header_nominal: header.nominal,
+        judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        usercetak: username,
+        tglcetak,
+        judul: 'ESTIMASI BIAYA',
+        ...item,
+        detailbiaya_nominal: item.nominal,
+      })),
+      detail: data.detailinvoice ?? [],
+    };
+  }
+
   async countExportRows(
     { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
     db: any,
