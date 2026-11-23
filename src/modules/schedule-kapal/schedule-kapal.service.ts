@@ -42,7 +42,18 @@ export class ScheduleKapalService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
+    // 'join' & 'notIn' adalah PARAMETER KONTROL, bukan kolom. Keduanya ikut
+    // masuk ke `filters` karena controller menampung sisa query dengan
+    // `...filters`. Tanpa dikecualikan, query mencoba `vsk."join" ilike ...`
+    // dan gagal 42703 → API balas 500.
+    const excludeSearchKeys = [
+      'statusaktif',
+      'text',
+      'memo',
+      'icon',
+      'join',
+      'notIn',
+    ];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -72,6 +83,7 @@ export class ScheduleKapalService {
     }
 
     Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (key === 'join' || key === 'notIn') return;
       if (rawValue === null || rawValue === undefined || rawValue === '')
         return;
 
@@ -339,92 +351,17 @@ export class ScheduleKapalService {
           // Loop semua key di notIn object
           for (const [key, values] of Object.entries(notInObj)) {
             if (Array.isArray(values) && values.length > 0) {
-              query.whereNotIn(`u.${key}`, values);
+              // Alias WAJIB vsk: query ini membaca view `vschedulekapal as
+              // vsk` dan tidak punya tabel beralias u. Memakai u.${key} bikin
+              // Postgres melempar 42P01 (missing FROM-clause entry for table
+              // "u") -> endpoint 500 -> lookup schedule di FormBlHeader selalu
+              // kosong begitu sudah ada satu BL (notIn tidak pernah kosong).
+              query.whereNotIn(`vsk.${key}`, values);
             }
           }
         }
       }
 
-      const excludeSearchKeys = [
-        'tglDari',
-        'tglSampai',
-        'statusaktif_nama',
-        'statusaktif',
-        // 'join' & 'notIn' adalah PARAMETER KONTROL, bukan kolom. Keduanya ikut
-        // masuk ke `filters` karena controller menampung sisa query dengan
-        // `...filters`. Blok filter di atas sudah melewatinya, tapi blok search
-        // ini belum — akibatnya begitu lookup mengirim `search` (mis. saat mode
-        // EDIT me-resolve nilai yang sedang tampil), query mencoba
-        // `u."join" ilike ...` dan gagal 42703 → API balas 500.
-        'join',
-        'notIn',
-      ];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-      if (search) {
-        const sanitized = String(search).trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'jenisorderan_nama') {
-              qb.orWhere(`a.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'kapal_nama') {
-              qb.orWhere(`b.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'pelayaran_nama') {
-              qb.orWhere(`c.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'tujuankapal_nama') {
-              qb.orWhere(`d.nama`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'asalkapal_nama') {
-              qb.orWhere(`e.keterangan`, 'ilike', `%${sanitized}%`);
-            } else if (field === 'created_at' || field === 'updated_at') {
-              qb.orWhereRaw(
-                `TO_CHAR(u.${field}, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?`,
-                [`%${sanitized}%`],
-              );
-            } else {
-              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value);
-
-          if (key === 'join' || key === 'notIn') {
-            continue;
-          }
-
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                "TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
-                [key, `%${sanitizedValue}%`],
-              );
-            } else if (key === 'statusaktif_nama' || key === 'memo') {
-              query.andWhere(`p.text`, '=', sanitizedValue);
-            } else if (key === 'jenisorderan_nama') {
-              query.andWhere(`a.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'kapal_nama') {
-              query.andWhere(`b.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'pelayaran_nama') {
-              query.andWhere(`c.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'tujuankapal_nama') {
-              query.andWhere(`d.nama`, 'ilike', `%${sanitizedValue}%`);
-            } else if (key === 'asalkapal_nama') {
-              query.andWhere(`e.keterangan`, 'ilike', `%${sanitizedValue}%`);
-            } else {
-              if (key === 'tglberangkat') {
-                query.andWhere('u.tglberangkat', value);
-              } else {
-                query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
-              }
-            }
-          }
-        }
-      }
       const offset =
         useCustomOffset === true && customOffset !== undefined
           ? customOffset
