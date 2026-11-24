@@ -104,8 +104,8 @@ export class AsuransiService {
     return {
       id: uuid ? uuid : dto.uuid,
       nama: dto.nama ? dto.nama.toUpperCase() : null,
-      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null, // Wajib isi
-      contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null, // Wajib isi
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null,
       alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
       kota: dto.kota ? dto.kota.toUpperCase() : null,
       kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
@@ -141,7 +141,7 @@ export class AsuransiService {
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
     switch (sortBy) {
       case 'statusaktif':
-        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on va.nama
+        return { col: 'text', dir: 'asc' }; 
       case 'statusbank':
         return { col: 'statusbank_text', dir };
       case 'statusdefault':
@@ -169,11 +169,9 @@ export class AsuransiService {
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
-      // 3. Hitung posisi & total dengan filter yang sama
       let posisi: number;
       let totalItems: number;
 
-      // totalItems selalu dihitung dengan filter — fix bug utama
       const totalRecords = await trx(`${this.viewName} as va`)
         .count('id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
@@ -196,7 +194,6 @@ export class AsuransiService {
         posisi = 1;
       }
 
-      // 4. Pagination
       const pageNumber = Math.ceil(posisi / limit);
       const totalPages = Math.ceil(totalItems / limit);
       const fetchedPages = getFetchedPages(pageNumber, totalPages);
@@ -206,7 +203,6 @@ export class AsuransiService {
       const customOffset = (startPage - 1) * limit;
       const totalDataNeeded = (endPage - startPage + 1) * limit;
 
-      // 5. Fetch sekali, split di memory
       const result = await this.findAll(
         {
           search: search || '',
@@ -229,7 +225,6 @@ export class AsuransiService {
 
       const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
 
-      // 6. Side-effects
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -298,7 +293,6 @@ export class AsuransiService {
         };
       }
 
-      // SELECT disesuaikan DENGAN SCHEMA ASURANSI yang sebenarnya
       const query = trx(`${this.viewName} as va`).select([
         'va.id',
         'va.nama',
@@ -409,11 +403,9 @@ export class AsuransiService {
         .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
-      // 3. Hitung posisi & total dengan filter yang sama
       let posisi: number;
       let totalItems: number;
 
-      // totalItems selalu dihitung dengan filter — fix bug utama
       const totalRecords = await trx(`${this.viewName} as va`)
         .count('id as total')
         .modify((qb) => this.applyFilters(qb, filters, search))
@@ -435,7 +427,6 @@ export class AsuransiService {
         posisi = 1;
       }
 
-      // 4. Pagination
       const pageNumber = Math.ceil(posisi / limit);
       const totalPages = Math.ceil(totalItems / limit);
       const fetchedPages = getFetchedPages(pageNumber, totalPages);
@@ -445,7 +436,6 @@ export class AsuransiService {
       const customOffset = (startPage - 1) * limit;
       const totalDataNeeded = (endPage - startPage + 1) * limit;
 
-      // 5. Fetch sekali, split di memory
       const result = await this.findAll(
         {
           search: search || '',
@@ -599,6 +589,28 @@ export class AsuransiService {
     return Number(result?.total ?? 0);
   }
 
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Asuransi',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
   readonly exportSheet = {
     sheetName: 'Data Export',
     titleLines: [
@@ -637,9 +649,9 @@ export class AsuransiService {
       15, 15, 15, 15, 15,
     ],
     columnFormats: [
-      null, // NO. — default sudah rata kanan
+      null, // NO.
       null, // NAMA
-      { wrapText: true }, // KETERANGAN — teks panjang dibungkus
+      { wrapText: true }, // KETERANGAN
       null, // CONTACT PERSON
       null, // ALAMAT
       null, // KOTA
@@ -660,7 +672,7 @@ export class AsuransiService {
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 1
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 2
       { numFmt: EXCEL_FORMAT.RUPIAH }, // MATERAI 3
-      { align: 'center' as const }, // STATUS AKTIF ... — teks ditengah
+      { align: 'center' as const }, // STATUS AKTIF
     ],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,

@@ -5,6 +5,8 @@ export const UpdateTujuankapalSchema = z
   .object({
     id: z.string().optional(),
     nama: z.string().trim(),
+    kode: z.string().trim(),
+    cabang_id: z.string().nullable().optional(),
     keterangan: z.string(),
     statusaktif: z.string()
       .min(1, { message: 'Status Aktif Wajib Diisi' }),

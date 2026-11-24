@@ -207,6 +207,7 @@ export class HariliburController {
 
   @UseGuards(AuthGuard)
   @Post('report')
+  //@HARI-LIBUR
   async report(
     @Body(new ZodValidationPipe(ReportHariliburSchema))
     body: ReportHariliburDto,
@@ -214,42 +215,23 @@ export class HariliburController {
   ) {
     const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
       body;
-
     const username = req.user?.user?.username ?? 'unknown';
 
     return this.reportJobService.start({
       mrtName,
-      loadData: async () => {
-        const result = await this.hariliburService.findAll(
+      loadData: () =>
+        this.hariliburService.loadReportData(
           {
             search,
             filters: (filters ?? {}) as Record<string, string | number>,
-            pagination: { page: 1, limit: 0 },
             sort: {
               sortBy: sortBy || 'nama',
               sortDirection: sortDirection || 'asc',
             },
-            isLookUp: false,
           },
+          { username, judullaporan },
           dbMssql,
-        );
-
-        const rows = Array.isArray(result?.data) ? result.data : [];
-
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const tglcetak =
-          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-
-        return rows.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'Laporan Harilibur',
-          usercetak: username,
-          tglcetak,
-          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
-        }));
-      },
+        ),
     });
   }
 
@@ -277,7 +259,7 @@ export class HariliburController {
     };
 
     return this.exportJobService.start({
-      filename: `laporan_harilibur_${stamp}.xlsx`,
+      filename: `laporan_hari_libur_${stamp}.xlsx`,
       countRows: () =>
         this.hariliburService.countExportRows(queryParams, dbMssql),
       streamRows: () =>

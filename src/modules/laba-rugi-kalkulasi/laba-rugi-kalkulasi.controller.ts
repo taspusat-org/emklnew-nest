@@ -235,6 +235,7 @@ export class LabaRugiKalkulasiController {
 
   @UseGuards(AuthGuard)
   @Post('report')
+  //@LABA-RUGI-KALKULASI
   async report(
     @Body(new ZodValidationPipe(ReportLabaRugiKalkulasiSchema))
     body: ReportLabaRugiKalkulasiDto,
@@ -246,37 +247,19 @@ export class LabaRugiKalkulasiController {
 
     return this.reportJobService.start({
       mrtName,
-      loadData: async () => {
-        const result = await this.labaRugiKalkulasiService.findAll(
+      loadData: () =>
+        this.labaRugiKalkulasiService.loadReportData(
           {
             search,
             filters: (filters ?? {}) as Record<string, string | number>,
-            pagination: { page: 1, limit: 0 },
             sort: {
               sortBy: sortBy || 'nama',
               sortDirection: sortDirection || 'asc',
             },
-            isLookUp: false,
           },
+          { username, judullaporan },
           dbMssql,
-        );
-
-        const rows = Array.isArray(result?.data) ? result.data : [];
-
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const tglcetak =
-          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-
-        return rows.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'Laporan Laba Rugi Kalkulasi',
-          usercetak: username,
-          tglcetak,
-          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
-        }));
-      },
+        ),
     });
   }
 
@@ -298,7 +281,7 @@ export class LabaRugiKalkulasiController {
       search,
       filters: (filters ?? {}) as Record<string, string | number>,
       sort: {
-        sortBy: sortBy || 'periode',
+        sortBy: sortBy || 'nama',
         sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
       },
     };
@@ -308,9 +291,7 @@ export class LabaRugiKalkulasiController {
       countRows: () =>
         this.labaRugiKalkulasiService.countExportRows(queryParams, dbMssql),
       streamRows: () =>
-        this.labaRugiKalkulasiService
-          .buildExportQuery(queryParams, dbMssql)
-          .stream(),
+        this.labaRugiKalkulasiService.buildExportQuery(queryParams, dbMssql).stream(),
       sheet: this.labaRugiKalkulasiService.exportSheet,
     });
   }

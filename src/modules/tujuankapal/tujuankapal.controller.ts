@@ -37,10 +37,18 @@ import { Response } from 'express';
 import * as fs from 'fs';
 import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-validation.pipe';
 import { isRecordExist } from 'src/utils/utils.service';
+import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
+import { ReportTujuankapalDto, ReportTujuankapalSchema } from './dto/report-tujuankapal.dto';
+import { ExportTujuankapalDto, ExportTujuankapalSchema } from './dto/export-tujuankapal.dto';
 
 @Controller('tujuankapal')
 export class TujuankapalController {
-  constructor(private readonly tujuankapalService: TujuankapalService) {}
+  constructor(
+    private readonly tujuankapalService: TujuankapalService,
+    private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
+  ) {}
 
   @UseGuards(AuthGuard)
   @Post()
@@ -58,7 +66,6 @@ export class TujuankapalController {
       data.modifiedby = req.user?.user?.username || 'unknown';
 
       const result = await this.tujuankapalService.create(data, trx);
-
       await trx.commit();
       return result;
     } catch (error) {
@@ -105,16 +112,7 @@ export class TujuankapalController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.tujuankapalService.findAll(params, trx);
-      trx.commit();
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error fetching all Tujuan Kapal:', error);
-      throw new InternalServerErrorException('Failed to fetch Tujuan Kapal');
-    }
+    return this.tujuankapalService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)
@@ -136,8 +134,32 @@ export class TujuankapalController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error updating Tujuan Kapal in controller:', error);
-      throw new Error('Failed to update Tujuan Kapal');
+      console.error('Error updating tujuan kapal in controller:', error);
+
+      if (error instanceof HttpException) throw error;
+
+      const lockTimeout =
+        error?.number === 1222 ||
+        error?.originalError?.info?.number === 1222 ||
+        /lock request time out/i.test(error?.message ?? '');
+
+      if (lockTimeout) {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.CONFLICT,
+            message: 'Data sedang diproses transaksi lain, silakan coba lagi.',
+          },
+          HttpStatus.CONFLICT,
+        );
+      }
+
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: 'Failed to Update tujuan kapal',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -161,19 +183,79 @@ export class TujuankapalController {
       return result;
     } catch (error) {
       await trx.rollback();
-      console.error('Error deleting container in controller:', error);
+      console.error('Error deleting tujuan kapal in controller:', error);
 
       if (error instanceof HttpException) {
         throw error;
       }
 
-      throw new InternalServerErrorException('Failed to delete container');
+      throw new InternalServerErrorException('Failed to delete tujuan kapal');
     }
   }
-  @Post('report-byselect')
-  async findAllByIds(@Body() ids: { id: string }[]) {
-    return this.tujuankapalService.findAllByIds(ids);
+
+  @UseGuards(AuthGuard)
+  @Post('report')
+  //@TUJUANKAPAL
+  async report(
+    @Body(new ZodValidationPipe(ReportTujuankapalSchema))
+    body: ReportTujuankapalDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        this.tujuankapalService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
   }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportTujuankapalSchema))
+    body: ExportTujuankapalDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_tujuan_kapal_${stamp}.xlsx`,
+      countRows: () =>
+        this.tujuankapalService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.tujuankapalService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.tujuankapalService.exportSheet,
+    });
+  }
+
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {
     try {
@@ -193,64 +275,13 @@ export class TujuankapalController {
       );
       res.setHeader(
         'Content-Disposition',
-        'attachment; filename="laporan_tujuankapal.xlsx"',
+        'attachment; filename="laporan_tujuan_kapal.xlsx"',
       );
 
       fileStream.pipe(res);
     } catch (error) {
       console.error('Error exporting to Excel:', error);
       res.status(500).send('Failed to export file');
-    }
-  }
-
-  @Post('/export-byselect')
-  async exportToExcelBySelect(
-    @Body() ids: { id: string }[],
-    @Res() res: Response,
-  ) {
-    try {
-      const data = await this.tujuankapalService.findAllByIds(ids);
-
-      if (!Array.isArray(data)) {
-        throw new Error('Data is not an array or is undefined.');
-      }
-
-      const tempFilePath = await this.tujuankapalService.exportToExcel(data);
-
-      const fileStream = fs.createReadStream(tempFilePath);
-
-      res.setHeader(
-        'Content-Type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="laporan_tujuankapal.xlsx"',
-      );
-
-      fileStream.pipe(res);
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      res.status(500).send('Failed to export file');
-    }
-  }
-
-  @Get(':id')
-  async findOne(@Param('id') id: string) {
-    const trx = await dbMssql.transaction();
-    try {
-      const result = await this.tujuankapalService.getById(id, trx);
-      if (!result) {
-        throw new Error('Data not found');
-      }
-
-      await trx.commit();
-      return result;
-    } catch (error) {
-      console.error('Error fetching data by id:', error);
-
-      await trx.rollback();
-      throw new Error('Failed to fetch data by id');
     }
   }
 }
