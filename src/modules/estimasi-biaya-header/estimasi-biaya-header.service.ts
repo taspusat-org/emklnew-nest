@@ -154,27 +154,10 @@ export class EstimasiBiayaHeaderService {
         trx,
       );
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        newItem.id,
+        data,
       );
 
       return {
@@ -387,6 +370,93 @@ export class EstimasiBiayaHeaderService {
     });
   }
 
+  private resolveSortColumn(sortBy: string): string {
+    // Harus sejalan dengan applySort(): kolom relasi diurutkan lewat nama.
+    const alias = this.SEARCH_ALIAS[sortBy];
+    if (alias) return alias;
+
+    // applySort mengurutkan statusppn_text lewat isi MEMO (JSON). Untuk
+    // hitung posisi dipakai nama statusnya — teks yang sama dengan yang
+    // dilihat pemakai, dan bisa dibandingkan dengan >= / <=.
+    if (sortBy === 'statusppn_text') return 'u.statusppn_nama';
+
+    // Fallback wajib: create/update memanggil ini dengan payload yang
+    // kadang tidak membawa sortBy, dan `u.undefined` bikin query gagal.
+    return `u.${sortBy || 'nobukti'}`;
+  }
+
+  /**
+   * Posisi 1-based baris `id` pada urutan grid — dihitung lewat COUNT,
+   * bukan dengan menarik seluruh baris hasil filter ke memori lalu
+   * findIndex.
+   */
+  private async resolvePosition(
+    trx: any,
+    id: string,
+    filters: Record<string, any> | undefined,
+    search: string | undefined,
+    sortBy: string,
+    sortDirection: string,
+  ): Promise<number> {
+    const orderCol = this.resolveSortColumn(sortBy);
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+    const existingData = await trx(`${this.viewName} as u`)
+      .select({ posval: orderCol })
+      .where('u.id', id)
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+    if (!existingData || existingData.posval === null) return 1;
+
+    const resultposition = await trx(`${this.viewName} as u`)
+      .count('* as posisi')
+      .where(orderCol, dir === 'desc' ? '>=' : '<=', existingData.posval)
+      .modify((qb: any) => this.applyDateRange(qb, filters))
+      .modify((qb: any) => this.applyFilters(qb, filters, search))
+      .first();
+
+    const posisi = Number(resultposition?.posisi ?? 0);
+    return posisi > 0 ? posisi : 1;
+  }
+
+  /**
+   * Halaman + index baris hasil simpan, untuk memposisikan ulang kursor
+   * grid. `dataIndex` adalah index ABSOLUT 0-based di seluruh daftar
+   * terfilter — kontrak yang sama dengan GridEstimasiBiayaHeader.
+   *
+   * Kegagalan di sini TIDAK boleh menggagalkan simpan yang sudah berhasil —
+   * ini cuma soal posisi kursor.
+   */
+  private async resolveGridPosition(
+    trx: any,
+    id: string,
+    data: any,
+  ): Promise<{ pageNumber: number; dataIndex: number }> {
+    const limit = Number(data?.limit) > 0 ? Number(data.limit) : 50;
+    try {
+      const posisi = await this.resolvePosition(
+        trx,
+        id,
+        data?.filters,
+        data?.search,
+        data?.sortBy,
+        data?.sortDirection,
+      );
+
+      return {
+        pageNumber: Math.ceil(posisi / limit),
+        dataIndex: posisi - 1,
+      };
+    } catch (error) {
+      console.error(
+        `Simpan estimasi biaya header ${id} berhasil, tetapi posisi grid pasca-simpan gagal dihitung:`,
+        error?.message,
+      );
+      return { pageNumber: 1, dataIndex: 0 };
+    }
+  }
+
   private applySort(query: any, sortBy?: string, sortDirection?: string): void {
     if (!sortBy) return;
     const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
@@ -441,6 +511,43 @@ export class EstimasiBiayaHeaderService {
     query.orderBy('u.id', 'asc');
 
     return query;
+  }
+
+  async loadReportData(
+    id: string,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ): Promise<Record<string, any[]>> {
+    const { data } = await this.findOne(id, db);
+    const headerRows = data?.header ?? [];
+
+    if (!headerRows.length) {
+      return { data: [], detail: [] };
+    }
+
+    const header = headerRows[0];
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    // Header digabung ke SETIAP baris detail biaya: itulah bentuk yang
+    // LaporanEstimasiBiaya.mrt harapkan di dataset `data`.
+    return {
+      data: (data.detailbiaya ?? []).map((item: any) => ({
+        ...header,
+        header_nominal: header.nominal,
+        judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
+        usercetak: username,
+        tglcetak,
+        judul: 'ESTIMASI BIAYA',
+        ...item,
+        detailbiaya_nominal: item.nominal,
+      })),
+      detail: data.detailinvoice ?? [],
+    };
   }
 
   async countExportRows(
@@ -650,29 +757,10 @@ export class EstimasiBiayaHeaderService {
         await this.detailInvoiceService.create(detailsInvoicePayload, id, trx);
       }
 
-      const { data: filteredItems } = await this.findAll(
-        {
-          search: data.search,
-          filters: data.filters,
-          pagination: { page: data.page, limit: 0 },
-          sort: { sortBy: data.sortBy, sortDirection: data.sortDirection },
-          isLookUp: false,
-        },
+      const { pageNumber, dataIndex } = await this.resolveGridPosition(
         trx,
-      );
-
-      let dataIndex = filteredItems.findIndex(
-        (item) => String(item.id) === String(id),
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
-      const pageNumber = Math.floor(dataIndex / data.limit) + 1;
-      const endIndex = pageNumber * data.limit;
-      const limitedItems = filteredItems.slice(0, endIndex); // Ambil data hingga halaman yang mencakup item baru
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
+        String(id),
+        data,
       );
 
       return {

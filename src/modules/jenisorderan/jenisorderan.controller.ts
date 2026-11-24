@@ -37,15 +37,21 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 import { Response } from 'express';
 import * as fs from 'fs';
 import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
 import {
   ExportJenisOrderanDto,
   ExportJenisOrderanSchema,
 } from './dto/export-jenisorderan.dto';
+import {
+  ReportJenisOrderanDto,
+  ReportJenisOrderanSchema,
+} from './dto/report-jenisorderan.dto';
 @Controller('jenisorderan')
 export class JenisOrderanController {
   constructor(
     private readonly jenisorderanService: JenisOrderanService,
     private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -200,6 +206,37 @@ export class JenisOrderanController {
   }
 
   @UseGuards(AuthGuard)
+  /** Cetak Laporan Jenis Orderan di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportJenisOrderanSchema))
+    body: ReportJenisOrderanDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.jenisorderanService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
   @Post('export')
   async exportBackground(
     @Body(new ZodValidationPipe(ExportJenisOrderanSchema))

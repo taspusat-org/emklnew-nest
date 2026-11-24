@@ -31,12 +31,18 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 import { Response } from 'express';
 import * as fs from 'fs';
 import { ExportJobService } from 'src/common/report/export-job.service';
+import { ReportJobService } from 'src/common/report/report-job.service';
 import { ExportDivisiDto, ExportDivisiSchema } from './dto/export-divisi.dto';
+import {
+  ReportDivisiDto,
+  ReportDivisiSchema,
+} from './dto/report-divisi.dto';
 @Controller('divisi')
 export class DivisiController {
   constructor(
     private readonly divisiService: DivisiService,
     private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -188,6 +194,37 @@ export class DivisiController {
   }
 
   @UseGuards(AuthGuard)
+  /** Cetak Laporan Divisi di background; PDF diambil di GET /report/download/:jobId. */
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportDivisiSchema))
+    body: ReportDivisiDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      // Tanpa transaksi: pembacaan murni, dan job render bisa lama.
+      loadData: () =>
+        this.divisiService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
+            },
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
   @Post('export')
   async exportBackground(
     @Body(new ZodValidationPipe(ExportDivisiSchema))

@@ -271,31 +271,18 @@ export class BlHeaderController {
       mrtName,
       loadData: async () => {
         const trx = await dbMssql.transaction();
-        let result: any;
         try {
-          result = await this.blHeaderService.findOne(String(id), trx);
+          const hasil = await this.blHeaderService.loadReportData(
+            String(id),
+            { username, judullaporan },
+            trx,
+          );
           await trx.commit();
+          return hasil;
         } catch (error) {
           await trx.rollback();
           throw error;
         }
-
-        const rows = Array.isArray(result?.data) ? result.data : [];
-
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const tglcetak =
-          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-
-        // Kolom tambahan di bawah dipakai header template .mrt.
-        return rows.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'PT. TRANSPORINDO AGUNG SEJAHTERA',
-          usercetak: username,
-          tglcetak,
-          judul: 'BILL OF LADING',
-        }));
       },
     });
   }
