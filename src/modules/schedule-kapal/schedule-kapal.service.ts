@@ -22,6 +22,19 @@ import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { Knex } from 'knex';
 
+// Lookup (BL, Shipping Instruction) memakai nama kolom *_nama, sedangkan
+// view vschedulekapal menyimpannya sebagai *_text. Peta ini dipakai saat
+// filter/sort supaya `vsk.kapal_nama` tidak melempar 42703.
+const KOLOM_VIEW: Record<string, string> = {
+  kapal_nama: 'kapal_text',
+  pelayaran_nama: 'pelayaran_text',
+  tujuankapal_nama: 'tujuankapal_text',
+  asalkapal_nama: 'asalkapal_text',
+  jenisorderan_nama: 'jenisorder_text',
+};
+
+const kolomView = (key: string): string => KOLOM_VIEW[key] ?? key;
+
 @Injectable()
 export class ScheduleKapalService {
   private readonly tableName: string = 'schedulekapal';
@@ -73,10 +86,14 @@ export class ScheduleKapalService {
           if (dateFields.includes(field)) {
             query.orWhereRaw(
               "TO_CHAR(vsk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?",
-              [field, `%${sanitizedValue}%`],
+              [kolomView(field), `%${sanitizedValue}%`],
             );
           } else {
-            query.orWhere(`vsk.${field}`, 'ilike', `%${sanitizedValue}%`);
+            query.orWhere(
+              `vsk.${kolomView(field)}`,
+              'ilike',
+              `%${sanitizedValue}%`,
+            );
           }
         });
       });
@@ -90,13 +107,13 @@ export class ScheduleKapalService {
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
         qb.andWhereRaw("TO_CHAR(vsk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-          key,
+          kolomView(key),
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'text' || key === 'memo') {
         qb.andWhere(`vsk.statusaktif_${key}`, '=', sanitizedValue);
       } else {
-        qb.andWhere(`vsk.${key}`, 'ilike', `%${sanitizedValue}%`);
+        qb.andWhere(`vsk.${kolomView(key)}`, 'ilike', `%${sanitizedValue}%`);
       }
     });
   }
@@ -312,6 +329,12 @@ export class ScheduleKapalService {
         'vsk.tujuankapal_text',
         'vsk.asalkapal_id',
         'vsk.asalkapal_text',
+        // Alias untuk lookup; grid schedule kapal tetap memakai *_text di atas.
+        'vsk.kapal_text as kapal_nama',
+        'vsk.pelayaran_text as pelayaran_nama',
+        'vsk.tujuankapal_text as tujuankapal_nama',
+        'vsk.asalkapal_text as asalkapal_nama',
+        'vsk.jenisorder_text as jenisorderan_nama',
         trx.raw("to_char(vsk.tglberangkat, 'DD-MM-YYYY') as tglberangkat"),
         trx.raw("to_char(vsk.tgltiba, 'DD-MM-YYYY') as tgltiba"),
         trx.raw(
@@ -338,7 +361,7 @@ export class ScheduleKapalService {
       if (sortBy === 'statusaktif') {
         query.orderBy('vsk.text', sortDirection);
       } else {
-        query.orderBy(`vsk.${sortBy}`, sortDirection);
+        query.orderBy(`vsk.${kolomView(sortBy)}`, sortDirection);
       }
 
       if (filters?.notIn) {
