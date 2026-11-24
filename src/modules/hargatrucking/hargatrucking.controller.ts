@@ -120,18 +120,7 @@ export class HargatruckingController {
       sort: sortParams as { sortBy: string; sortDirection: 'asc' | 'desc' },
       isLookUp: isLookUp === 'true',
     };
-    const trx = await dbMssql.transaction();
-
-    try {
-      const result = await this.hargatruckingService.findAll(params, trx);
-      trx.commit();
-
-      return result;
-    } catch (error) {
-      trx.rollback();
-      console.error('Error in findAll:', error);
-      throw error; // Re-throw the error to be handled by the global exception filter
-    }
+    return this.hargatruckingService.findAll(params, dbMssql);
   }
 
   @UseGuards(AuthGuard)

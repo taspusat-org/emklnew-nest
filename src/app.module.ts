@@ -22,7 +22,7 @@ import { LogtrailModule } from './common/logtrail/logtrail.module';
 import { MenuModule } from './modules/menu/menu.module';
 import { RoleModule } from './modules/role/role.module';
 import { UserModule } from './modules/user/user.module';
-import { OffdaysModule } from './modules/offdays/offdays.module';
+import { HariliburModule } from './modules/harilibur/harilibur.module';
 import { RoleaclModule } from './modules/roleacl/roleacl.module';
 import { UseraclModule } from './modules/useracl/useracl.module';
 import { UserroleModule } from './modules/userrole/userrole.module';
@@ -170,7 +170,7 @@ import { AsuransiModule } from './modules/asuransi/asuransi.module';
     MenuModule,
     RoleModule,
     UserModule,
-    OffdaysModule,
+    HariliburModule,
     RoleaclModule,
     UseraclModule,
     KnexModule,
@@ -296,14 +296,14 @@ export class AppModule implements NestModule {
     consumer
       .apply(AuthMiddleware)
       .exclude(
-        // 'offdays',
+        // 'Harilibur',
         { path: 'bot/(.*)', method: RequestMethod.ALL },
         { path: 'email-validation/(.*)', method: RequestMethod.ALL },
         { path: 'shipper/(.*)', method: RequestMethod.ALL },
         { path: 'shipper', method: RequestMethod.ALL },
         'auth/*', // Exclude all routes under the 'auth' path
         'menu/*', // Exclude all routes under the 'menu' path
-        // 'offdays/*', // Exclude all routes under the 'offdays' path
+        // 'Harilibur/*', // Exclude all routes under the 'Harilibur' path
         'redis/*', // Exclude all routes under the 'redis' path
         'uploads/*', // Exclude all routes under the 'uploads' path
         'sse/*', // Exclude all routes under the 'sse' path
