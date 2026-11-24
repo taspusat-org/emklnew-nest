@@ -199,85 +199,67 @@ export class BankController {
   }
 
   @UseGuards(AuthGuard)
-    @Post('report')
-    async report(
-      @Body(new ZodValidationPipe(ReportBankSchema))
-      body: ReportBankDto,
-      @Req() req,
-    ) {
-      const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
-        body;
-  
-      const username = req.user?.user?.username ?? 'unknown';
-  
-      return this.reportJobService.start({
-        mrtName,
-        loadData: async () => {
-          const result = await this.bankService.findAll(
-            {
-              search,
-              filters: (filters ?? {}) as Record<string, string | number>,
-              pagination: { page: 1, limit: 0 },
-              sort: {
-                sortBy: sortBy || 'nama',
-                sortDirection: sortDirection || 'asc',
-              },
-              isLookUp: false,
+  @Post('report')
+  //@BANK
+  async report(
+    @Body(new ZodValidationPipe(ReportBankSchema))
+    body: ReportBankDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: () =>
+        this.bankService.loadReportData(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            sort: {
+              sortBy: sortBy || 'nama',
+              sortDirection: sortDirection || 'asc',
             },
-            dbMssql,
-          );
-  
-          const rows = Array.isArray(result?.data) ? result.data : [];
-  
-          const now = new Date();
-          const pad = (n: number) => String(n).padStart(2, '0');
-          const tglcetak =
-            `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-            `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-  
-          return rows.map((row: any) => ({
-            ...row,
-            judullaporan: judullaporan ?? 'Laporan Bank',
-            usercetak: username,
-            tglcetak,
-            judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
-          }));
-        },
-      });
-    }
-  
-    @UseGuards(AuthGuard)
-    @Post('export')
-    async exportBackground(
-      @Body(new ZodValidationPipe(ExportBankSchema))
-      body: ExportBankDto,
-    ) {
-      const { search, filters, sortBy, sortDirection } = body;
-  
-      const now = new Date();
-      const pad = (n: number) => String(n).padStart(2, '0');
-      const stamp =
-        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-        `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-  
-      const queryParams = {
-        search,
-        filters: (filters ?? {}) as Record<string, string | number>,
-        sort: {
-          sortBy: sortBy || 'nama',
-          sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
-        },
-      };
-  
-      return this.exportJobService.start({
-        filename: `laporan_bank_${stamp}.xlsx`,
-        countRows: () =>
-          this.bankService.countExportRows(queryParams, dbMssql),
-        streamRows: () =>
-          this.bankService.buildExportQuery(queryParams, dbMssql).stream(),
-        sheet: this.bankService.exportSheet,
-      });
-    }
+          },
+          { username, judullaporan },
+          dbMssql,
+        ),
+    });
+  }
+
+  @UseGuards(AuthGuard)
+  @Post('export')
+  async exportBackground(
+    @Body(new ZodValidationPipe(ExportBankSchema))
+    body: ExportBankDto,
+  ) {
+    const { search, filters, sortBy, sortDirection } = body;
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+    const queryParams = {
+      search,
+      filters: (filters ?? {}) as Record<string, string | number>,
+      sort: {
+        sortBy: sortBy || 'nama',
+        sortDirection: (sortDirection || 'asc') as 'asc' | 'desc',
+      },
+    };
+
+    return this.exportJobService.start({
+      filename: `laporan_bank_${stamp}.xlsx`,
+      countRows: () =>
+        this.bankService.countExportRows(queryParams, dbMssql),
+      streamRows: () =>
+        this.bankService.buildExportQuery(queryParams, dbMssql).stream(),
+      sheet: this.bankService.exportSheet,
+    });
+  }
 
   @Get('/export')
   async exportToExcel(@Query() params: any, @Res() res: Response) {

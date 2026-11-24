@@ -209,6 +209,7 @@ export class HargatruckingController {
 
   @UseGuards(AuthGuard)
   @Post('report')
+  //@HARGA-TRUCKING
   async report(
     @Body(new ZodValidationPipe(ReportHargatruckingSchema))
     body: ReportHargatruckingDto,
@@ -216,49 +217,23 @@ export class HargatruckingController {
   ) {
     const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
       body;
-
     const username = req.user?.user?.username ?? 'unknown';
 
     return this.reportJobService.start({
       mrtName,
-      loadData: async () => {
-        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
-        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
-        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
-        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
-        // karena hanya memakai API baca (from/raw/count).
-        const result = await this.hargatruckingService.findAll(
+      loadData: () =>
+        this.hargatruckingService.loadReportData(
           {
             search,
             filters: (filters ?? {}) as Record<string, string | number>,
-            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
-            pagination: { page: 1, limit: 0 },
             sort: {
-              sortBy: sortBy || 'emkl_text',
+              sortBy: sortBy || 'nama',
               sortDirection: sortDirection || 'asc',
             },
-            isLookUp: false,
           },
+          { username, judullaporan },
           dbMssql,
-        );
-
-        const rows = Array.isArray(result?.data) ? result.data : [];
-
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const tglcetak =
-          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
-          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-
-        // Kolom tambahan di bawah dipakai header template .mrt.
-        return rows.map((row: any) => ({
-          ...row,
-          judullaporan: judullaporan ?? 'Laporan Harga Trucking',
-          usercetak: username,
-          tglcetak,
-          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
-        }));
-      },
+        ),
     });
   }
 
@@ -290,9 +265,7 @@ export class HargatruckingController {
       countRows: () =>
         this.hargatruckingService.countExportRows(queryParams, dbMssql),
       streamRows: () =>
-        this.hargatruckingService
-          .buildExportQuery(queryParams, dbMssql)
-          .stream(),
+        this.hargatruckingService.buildExportQuery(queryParams, dbMssql).stream(),
       sheet: this.hargatruckingService.exportSheet,
     });
   }

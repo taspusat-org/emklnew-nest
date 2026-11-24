@@ -56,7 +56,18 @@ export class LabaRugiKalkulasiService {
     filters: Record<string, any>,
     search?: string,
   ): void {
-    const excludeSearchKeys = ['statusaktif', 'text', 'memo', 'icon'];
+    const excludeSearchKeys = [
+      'statusfinalkomisimarketing',
+      'statusfinalkomisimarketing_text',
+      'statusfinalkomisimarketing_memo',
+      'statusfinalbonustriwulan',
+      'statusfinalbonustriwulan_text',
+      'statusfinalbonustriwulan_memo',
+      'statusaktif',
+      'text',
+      'memo',
+      'icon',
+    ];
 
     const searchFields = Object.keys(filters || {}).filter(
       (k) => !excludeSearchKeys.includes(k),
@@ -88,12 +99,22 @@ export class LabaRugiKalkulasiService {
 
       const sanitizedValue = String(rawValue);
       if (dateFields.includes(key)) {
-        qb.andWhereRaw("TO_CHAR(vlrk.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
+        qb.andWhereRaw(`CAST(vlrk.?? AS TEXT) ILIKE ?`, [
           key,
           `%${sanitizedValue}%`,
         ]);
       } else if (key === 'text' || key === 'memo') {
         qb.andWhere(`vlrk.statusaktif_${key}`, '=', sanitizedValue);
+      } else if (
+        key === 'statusfinalkomisimarketing' ||
+        key === 'statusfinalkomisimarketing_text'
+      ) {
+        qb.andWhere(`vlrk.statusfinalkomisimarketing`, '=', sanitizedValue);
+      } else if (
+        key === 'statusfinalbonustriwulan' ||
+        key === 'statusfinalbonustriwulan_text'
+      ) {
+        qb.andWhere(`vlrk.statusfinalbonustriwulan`, '=', sanitizedValue);
       } else {
         qb.andWhere(
           `CAST(vlrk.${key} AS TEXT)`,
@@ -606,6 +627,28 @@ export class LabaRugiKalkulasiService {
       .first();
 
     return Number(result?.total ?? 0);
+  }
+
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Laba Rugi Kalkulasi',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
   }
 
   readonly exportSheet = {

@@ -15,6 +15,14 @@ export const CreateTujuankapalSchema = z.object({
         message: 'Tujuan kapal dengan dengan nama ini sudah ada',
       },
     ),
+  kode: z
+    .string()
+    .trim()
+    .min(1, { message: 'Kode Wajib Diisi' })
+    .max(100),
+  cabang_id: z
+    .string()
+    .nullable().optional(),
   keterangan: z.string(),
   statusaktif: z.string()
     .min(1, { message: 'Status Aktif Wajib Diisi' }),

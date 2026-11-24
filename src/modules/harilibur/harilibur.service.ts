@@ -22,6 +22,7 @@ import * as path from 'path';
 import { Workbook } from 'exceljs';
 import { RunningNumberService } from '../running-number/running-number.service';
 import { Knex } from 'knex';
+
 @Injectable()
 export class HariliburService {
   private readonly logger = new Logger(HariliburService.name);
@@ -521,6 +522,28 @@ export class HariliburService {
       .first();
 
     return Number(result?.total ?? 0);
+  }
+
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Hari Libur',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
   }
 
   readonly exportSheet = {

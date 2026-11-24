@@ -3,81 +3,189 @@ import {
   Injectable,
   InternalServerErrorException,
   HttpException,
+  Logger,
 } from '@nestjs/common';
 
 import { dbMssql } from 'src/common/utils/db';
 import { RedisService } from 'src/common/redis/redis.service';
-import { withUuidV7, UtilsService  } from 'src/utils/utils.service';
+import {
+  withUuidV7,
+  UtilsService,
+  uuidV7,
+  calculateItemIndex,
+  getFetchedPages,
+} from 'src/utils/utils.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
 import { FindAllParams } from 'src/common/interfaces/all.interface';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
+import { RunningNumberService } from '../running-number/running-number.service';
+import { Knex } from 'knex';
 
 @Injectable()
 export class TujuankapalService {
-  private readonly tableName = 'tujuankapal';
+  private readonly logger = new Logger(TujuankapalService.name);
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
   ) {}
+  private readonly tableName = 'tujuankapal';
+  private readonly viewName = 'vtujuankapal';
 
-  async create(createTujuankapalDto: any, trx: any) {
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys: string[] = [];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
+
+    if (search && filters && Object.keys(filters).length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            query.orWhereRaw(
+              "to_char(vtk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?",
+              [field, `%${sanitizedValue}%`],
+            );
+          } else {
+            query.orWhere(`vtk.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
+      });
+    }
+
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
+
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("to_char(vtk.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else {
+        // ✅ prefix vtk. agar konsisten dengan alias view
+        qb.andWhere(`vtk.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.uuid, // id (uuidV7)
+      nama: dto.nama ? dto.nama.toUpperCase() : null,
+      kode: dto.kode ? dto.kode.toUpperCase() : null,
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      cabang_id: dto.cabang_id ? dto.cabang_id : null,
+      statusaktif: dto.statusaktif,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'text', dir: 'asc' }; // findAll: hardcode 'asc' on vtk.text
+      case 'statusbank':
+        return { col: 'statusbank_text', dir };
+      case 'statusdefault':
+        return { col: 'statusdefault_text', dir };
+      case 'statuslangsungcair':
+        return { col: 'statuslangsungcair_text', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateTujuankapalDto: any, trx: any) {
     try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        nama,
-        kode,
-        cabang_id,
-        keterangan,
-        statusaktif,
-        modifiedby,
-        created_at,
-        updated_at,
-        info,
-      } = createTujuankapalDto;
-      const insertData = {
-        nama: nama ? nama.toUpperCase() : null,
-        kode: kode ? kode.toUpperCase() : null,
-        keterangan: keterangan ? keterangan.toUpperCase() : null,
-        cabang_id: cabang_id,
-        statusaktif: statusaktif,
-        modifiedby: modifiedby,
-        created_at: created_at || this.utilsService.getTime(),
-        updated_at: updated_at || this.utilsService.getTime(),
-      };
-      // Insert the new item
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
-      const newItem = insertedItems[0]; // Get the inserted item
-      const { data, pagination } = await this.findAll(
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateTujuankapalDto;
+
+      const uuid = await uuidV7(trx);
+      const insertData = this.buildInsertData(CreateTujuankapalDto, uuid);
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as vtk`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      let posisi: number;
+      let totalItems: number;
+
+      const totalRecords = await trx(`${this.viewName} as vtk`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vtk`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
-      let itemIndex = data.findIndex((item) => item.id === newItem.id);
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
-      // Optionally, you can find the page number or other info if needed
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
-      );
+
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
+
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
+
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -90,290 +198,235 @@ export class TujuankapalService {
         },
         trx,
       );
+
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      throw new Error(`Error creating container: ${error.message}`);
+      throw new Error(`Error creating tujuan kapal: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
-    trx: any,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: Knex.Transaction,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      page = page ?? 1;
-      limit = limit ?? 0;
-
-      if (isLookUp) {
-        const acoCountResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const acoCount = acoCountResult?.total || 0;
-
-        if (Number(acoCount) > 500) {
-          return { data: { type: 'json' } };
-        } else {
-          limit = 0;
-        }
+      const sortBy = sort?.sortBy || 'nama';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
+      const countResult = await trx(`${this.viewName} as vtk`)
+        .count('vtk.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
-        .select([
-          'u.id as id',
-          'u.nama',
-          'u.kode',
-          'u.keterangan',
-          'u.cabang_id',
-          'c.nama as namacabang',
-          'u.statusaktif',
-          'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text',
-        ])
-        .leftJoin(
-          trx.raw('cabang as c'),
-          'u.cabang_id',
-          'c.id',
-        )
-        .leftJoin(
-          trx.raw('parameter as p'),
-          'u.statusaktif',
-          'p.id',
-        );
+      const query = trx(`${this.viewName} as vtk`).select([
+        'vtk.id',
+        'vtk.nama',
+        'vtk.kode',
+        'vtk.keterangan',
+        'vtk.cabang_id',
+        'vtk.cabang_nama',
+        'vtk.statusaktif',
+        'vtk.text',
+        'vtk.memo',
+        'vtk.info',
+        'vtk.modifiedby',
+        trx.raw(
+          "to_char(vtk.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
+        ),
+        trx.raw(
+          "to_char(vtk.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
+        ),
+      ]);
+
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      if (sortBy === 'statusaktif') {
+        query.orderBy('vtk.text', 'asc');
+      } else if (sortBy === 'statusbank') {
+        query.orderBy('vtk.statusbank_text', sortDirection);
+      } else if (sortBy === 'statusdefault') {
+        query.orderBy('vtk.statusdefault_text', sortDirection);
+      } else if (sortBy === 'statuslangsungcair') {
+        query.orderBy('vtk.statuslangsungcair_text', sortDirection);
+      } else {
+        query.orderBy(`vtk.${sortBy}`, sortDirection);
+      }
+
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
-      const excludeSearchKeys = ['statusaktif', 'text', 'icon'];
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
-      if (search) {
-        const sanitized = String(search).trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (field === 'namacabang') {
-              qb.orWhere('c.nama', 'ilike', `%${sanitized}%`);
-            } else if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-                field,
-                `%${sanitized}%`,
-              ]);
-            } else {
-              qb.orWhere(`u.${field}`, 'ilike', `%${sanitized}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value);
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'text' || key === 'memo') {
-              query.andWhere(`p.${key}`, '=', sanitizedValue);
-            } else if (key === 'cabang_id') {
-              if (
-                sanitizedValue === 'null' ||
-                sanitizedValue === 'NULL' ||
-                sanitizedValue === null
-              ) {
-                query.andWhereRaw(`u.cabang_id IS NULL`);
-              } else {
-                query.andWhere(`u.cabang_id`, '=', sanitizedValue);
-              }
-            } else {
-              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
-
       const data = await query;
-
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
-    }
-  }
-
-  async findAllByIds(ids: { id: string }[]) {
-    try {
-      const idList = ids.map((item) => item.id);
-
-      const query = dbMssql(`${this.tableName} as m`)
-        .select([
-          'm.id as id',
-          'm.nama',
-          'm.keterangan',
-          'm.cabang_id',
-          'm.statusaktif',
-          'm.modifiedby',
-          dbMssql.raw(
-            "TO_CHAR(m.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          dbMssql.raw(
-            "TO_CHAR(m.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-        ])
-        .whereIn('m.id', idList)
-        .orderBy('m.nama', 'ASC');
-
-      const data = await query;
-
-
-      return data;
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
-    }
-  }
-
-  async getById(id: string, trx: any) {
-    try {
-      const result = await trx(this.tableName).where('id', id).first();
-
-      if (!result) {
-        throw new Error('Data not found');
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error fetching data by id:', error);
-      throw new Error('Failed to fetch data by id');
+      this.logger.error('Error fetching tujuan kapal data', error?.stack);
+      throw new InternalServerErrorException(
+        'Failed to fetch tujuan kapal data',
+      );
     }
   }
 
   async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName).where('id', id).first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        throw new Error('Tujuan Kapal not found');
+      if (!existedData) {
+        throw new Error('Tujuan kapal not found');
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        namacabang,
-        id: SkipId,
-        statusaktif_nama,
-        ...insertData
-      } = data;
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      ['kode', 'nama', 'keterangan'].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
 
       if (hasChanges) {
         insertData.updated_at = this.utilsService.getTime();
         await trx(this.tableName).where('id', id).update(insertData);
       }
 
-      const { data: filteredData, pagination } = await this.findAll(
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+      const existingData = await trx(`${this.viewName} as vtk`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      let posisi: number;
+      let totalItems: number;
+
+      const totalRecords = await trx(`${this.viewName} as vtk`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as vtk`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      // Cari index item yang baru saja diupdate
-      let itemIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(id),
-      );
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      const itemsPerPage = limit || 10; // Default 10 items per page, atau yang dikirimkan dari frontend
-      const pageNumber = Math.floor(itemIndex / itemsPerPage) + 1;
-
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT TUJUAN KAPAL',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
       return {
-        updatedItem: {
-          id,
-          ...data,
-        },
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      console.error('Error updating Tujuan Kapal:', error);
-      throw new Error('Failed to update Tujuan Kapal');
+      console.error('Error updating tujuan kapal:', error);
+      throw new Error('Failed to update tujuan kapal');
     }
   }
 
@@ -408,6 +461,108 @@ export class TujuankapalService {
       throw new InternalServerErrorException('Failed to delete data');
     }
   }
+
+  private readonly EXPORT_COLUMNS = [
+    'vtk.nama',
+    'vtk.kode',
+    'vtk.keterangan',
+    'vtk.cabang_nama',
+    'vtk.text',
+  ];
+
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as vtk`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statusaktif') {
+      query.orderBy('vtk.text', 'asc');
+    } else if (sortBy === 'statusbank') {
+      query.orderBy('vtk.statusbank_text', sortDirection);
+    } else if (sortBy === 'statusdefault') {
+      query.orderBy('vtk.statusdefault_text', sortDirection);
+    } else if (sortBy === 'statuslangsungcair') {
+      query.orderBy('vtk.statuslangsungcair_text', sortDirection);
+    } else {
+      query.orderBy(`vtk.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.tableName} as vtk`)
+      .count('vtk.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Tujuan Kapal',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN TUJUAN KAPAL',
+      'Data Export',
+    ],
+    headers: ['NO.', 'NAMA', 'KODE', 'KETERANGAN', 'CABANG', 'STATUS AKTIF'],
+    columnWidths: [5, 15, 10, 50, 10, 15],
+    columnFormats: [
+      null, // NO.
+      null, // NAMA
+      null, // KODE
+      { wrapText: true }, // KETERANGAN
+      null, // CABANG
+      { align: 'center' as const }, // STATUS AKTIF
+    ],
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.kode,
+      row.keterangan,
+      row.cabang_nama,
+      row.text,
+    ],
+  };
 
   async exportToExcel(data: any[]) {
     const workbook = new Workbook();
