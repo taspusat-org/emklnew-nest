@@ -1,5 +1,4 @@
 import {
-  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -19,7 +18,10 @@ import {
 import { RedisService } from 'src/common/redis/redis.service';
 import { GlobalService } from '../global/global.service';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
+import {
+  FindAllParams,
+  WriteOptions,
+} from 'src/common/interfaces/all.interface';
 import { Knex } from 'knex';
 
 // Lookup (BL, Shipping Instruction) memakai nama kolom *_nama, sedangkan
@@ -42,7 +44,6 @@ export class ScheduleKapalService {
   private readonly logger = new Logger(ScheduleKapalService.name);
 
   constructor(
-    @Inject('REDIS_CLIENT')
     private readonly utilService: UtilsService,
     // private readonly locksService:
     private readonly redisService: RedisService,
@@ -168,7 +169,12 @@ export class ScheduleKapalService {
     }
   }
 
-  async create(CreateSchedulekapalDto: any, trx: any) {
+  async create(
+    CreateSchedulekapalDto: any,
+    trx: any,
+    options: WriteOptions = {},
+  ) {
+    const { withGridPosition = true } = options;
     try {
       const { sortBy, sortDirection, filters, search, page, limit, info } =
         CreateSchedulekapalDto;
@@ -178,6 +184,24 @@ export class ScheduleKapalService {
       const insertData = this.buildInsertData(CreateSchedulekapalDto, uuid);
       await trx(this.tableName).insert(insertData);
       const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      await this.logTrailService.create(
+        {
+          namatabel: this.tableName,
+          postingdari: 'ADD SCHEDULE KAPAL',
+          idtrans: newItem.id,
+          nobuktitrans: newItem.id,
+          aksi: 'ADD',
+          datajson: JSON.stringify(newItem),
+          modifiedby: newItem.modifiedby,
+        },
+        trx,
+      );
+
+      // Pemanggil bersarang (schedule detail) tidak membawa parameter grid.
+      if (!withGridPosition) {
+        return { newItem };
+      }
 
       const existingData = await trx(`${this.viewName} as vsk`)
         .where('id', newItem.id)
@@ -243,20 +267,6 @@ export class ScheduleKapalService {
       });
 
       const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
-
-      // 6. Side-effects
-      await this.logTrailService.create(
-        {
-          texttabel: this.tableName,
-          postingdari: 'ADD SCHEDULE KAPAL',
-          idtrans: newItem.id,
-          nobuktitrans: newItem.id,
-          aksi: 'ADD',
-          datajson: JSON.stringify(newItem),
-          modifiedby: newItem.modifiedby,
-        },
-        trx,
-      );
 
       await this.redisService.set(
         `${this.tableName}-page-${pageNumber}`,

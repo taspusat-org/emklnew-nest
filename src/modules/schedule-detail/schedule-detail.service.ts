@@ -172,9 +172,10 @@ export class ScheduleDetailService {
         modifiedby,
       },
       trx,
+      { withGridPosition: false },
     );
 
-    return inserted.newData.id;
+    return inserted.newItem.id;
   }
 
   /**
