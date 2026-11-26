@@ -1,7 +1,8 @@
 import { Knex } from 'knex';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
-dotenv.config();
+// knex CLI pindah cwd ke src/, jadi .env dicari relatif ke file ini
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const knexConfig: { [key: string]: Knex.Config } = {
   development: {
@@ -24,7 +25,7 @@ const knexConfig: { [key: string]: Knex.Config } = {
     migrations: {
       tableName: 'knex_migrations',
       // Set an absolute path to the migrations folder
-      directory: './migrations',
+      directory: path.resolve(__dirname, '../migrations'),
     },
   },
   medanEmkl: {

@@ -148,6 +148,7 @@ export class ConsigneeController {
       return result;
     } catch (error) {
       trx.rollback();
+      if (error instanceof HttpException) throw error;
       console.error('Error deleting packinglistheader:', error);
       throw new Error(`Error deleting packinglistheader: ${error.message}`);
     }

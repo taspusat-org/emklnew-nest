@@ -2,12 +2,12 @@ import { z } from 'zod';
 import { isRecordExistCI } from 'src/utils/utils.service';
 import { zodNumberField } from 'src/utils/field-helpers';
 export const CreateEmklSchema = z.object({
-  // statusrelasi menyimpan id statusrelasi (varchar UUID), bukan angka. Jangan z.number()
+  // statusrelasi menyimpan parameter.id (varchar), bukan angka. Jangan z.number()
   // — frontend mengirim id string sehingga z.number() menolaknya.
   statusrelasi: z.string().nullable().optional(),
   statusrelasi_text: z.string().nullable().optional(),
 
-  // relasi_id menyimpan id relasi (varchar UUID), bukan angka. Jangan z.number()
+  // relasi_id menyimpan relasi.id (varchar), bukan angka. Jangan z.number()
   // — frontend mengirim id string sehingga z.number() menolaknya.
   relasi_id: z.string().nullable().optional(),
   relasi_id_text: z.string().nullable().optional(),
@@ -33,24 +33,21 @@ export const CreateEmklSchema = z.object({
     .nullable()
     .optional(),
   alamat: z.string().trim().nullable().optional(),
-  coagiro: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAGIRO MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coapiutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAPIUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coahutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAHUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+
+  // coagiro menyimpan akunpusat.coa (varchar), bukan angka. Jangan z.number()
+  // — frontend mengirim id string sehingga z.number() menolaknya.
+  coagiro: z.string().nullable().optional(),
+  coagiro_text: z.string().nullable().optional(),
+
+  // coapiutang menyimpan akunpusat.coa (varchar), bukan angka. Jangan z.number()
+  // — frontend mengirim id string sehingga z.number() menolaknya.
+  coapiutang: z.string().nullable().optional(),
+  coapiutang_text: z.string().nullable().optional(),
+
+  // coahutang menyimpan akunpusat.coa (varchar), bukan angka. Jangan z.number()
+  // — frontend mengirim id string sehingga z.number() menolaknya.
+  coahutang: z.string().nullable().optional(),
+  coahutang_text: z.string().nullable().optional(),
   kota: z
     .string()
     .trim()
@@ -97,12 +94,12 @@ export const CreateEmklSchema = z.object({
   namapajak: z.string().trim().nullable().optional(),
   alamatpajak: z.string().trim().nullable().optional(),
 
-  // statustrado menyimpan id parameter (varchar UUID), bukan angka. Jangan z.number()
+  // statustrado menyimpan id parameter (varchar), bukan angka. Jangan z.number()
   // — frontend mengirim id string sehingga z.number() menolaknya.
   statustrado: z.string().nullable().optional(),
   statustrado_text: z.string().nullable().optional(),
 
-  // statusaktif menyimpan id parameter (varchar UUID), bukan angka. Jangan z.number()
+  // statusaktif menyimpan id parameter (varchar), bukan angka. Jangan z.number()
   // — frontend mengirim id string sehingga z.number() menolaknya.
   statusaktif: z.string().nullable().optional(),
   statusaktif_text: z.string().nullable().optional(),

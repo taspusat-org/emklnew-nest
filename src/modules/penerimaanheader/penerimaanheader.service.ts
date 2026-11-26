@@ -1108,16 +1108,18 @@ export class PenerimaanheaderService implements OnModuleInit {
   }
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilsService.lockAndDestroy(
-        id,
-        this.tableName,
-        'id',
-        trx,
-      );
+      // Detail dulu: FK penerimaandetail -> header menolak header yang masih
+      // punya detail.
       const deletedDataDetail = await this.utilsService.lockAndDestroy(
         id,
         'penerimaandetail',
         'penerimaan_id',
+        trx,
+      );
+      const deletedData = await this.utilsService.lockAndDestroy(
+        id,
+        this.tableName,
+        'id',
         trx,
       );
 

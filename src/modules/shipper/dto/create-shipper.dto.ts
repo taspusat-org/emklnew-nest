@@ -2,15 +2,6 @@ import { z } from 'zod';
 import { isRecordExistCI } from 'src/utils/utils.service';
 import { zodDateField, zodNumberField } from 'src/utils/field-helpers';
 export const CreateShipperSchema = z.object({
-  // statusrelasi menyimpan id parameter (varchar UUID), bukan angka. Jangan z.number()
-  // — frontend mengirim id string sehingga z.number() menolaknya.
-  statusrelasi: z.string().nullable().optional(),
-  statusrelasi_text: z.string().nullable().optional(),
-
-  // relasi_id menyimpan id relasi (varchar UUID), bukan angka. Jangan z.number()
-  // — frontend mengirim id string sehingga z.number() menolaknya.
-  relasi_id: z.string().nullable().optional(),
-  relasi_id_text: z.string().nullable().optional(),
   nama: z
     .string()
     .trim()
@@ -45,24 +36,12 @@ export const CreateShipperSchema = z.object({
     .max(250, { message: 'ALAMAT MAKSIMAL 250 KARAKTER' })
     .nullable()
     .optional(),
-  coa: z
-    .string()
-    .trim()
-    .max(100, { message: 'COA MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coapiutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAPIUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coahutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAHUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+  coa: z.string().nullable().optional(),
+  coa_text: z.string().nullable().optional(),
+  coapiutang: z.string().nullable().optional(),
+  coapiutang_text: z.string().nullable().optional(),
+  coahutang: z.string().nullable().optional(),
+  coahutang_text: z.string().nullable().optional(),
   kota: z
     .string()
     .trim()
@@ -111,12 +90,8 @@ export const CreateShipperSchema = z.object({
     .max(30, { message: 'NPWP MAKSIMAL 30 KARAKTER' })
     .nullable()
     .optional(),
-  coagiro: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAGIRO MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+  coagiro: z.string().nullable().optional(),
+  coagiro_text: z.string().nullable().optional(),
   ppn: zodNumberField('PPN', { required: false }),
   titipke: z
     .string()

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   HttpException,
@@ -885,16 +886,32 @@ export class HutangheaderService {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilsService.lockAndDestroy(
-        id,
+      // hutangdetail milik form ini dan ikut dihapus di bawah; tabel lain yang
+      // mereferensikan hutangheader harus menahan penghapusan.
+      const usedBy = await this.utilsService.findFirstReference(
         this.tableName,
-        'id',
+        id,
         trx,
+        ['hutangdetail'],
       );
+      if (usedBy) {
+        throw new BadRequestException(
+          'HUTANG TIDAK DAPAT DIHAPUS KARENA MASIH DIGUNAKAN PADA DATA LAIN.',
+        );
+      }
+
+      // Detail dulu: FK hutangdetail -> hutangheader menolak header yang
+      // masih punya detail.
       const deletedDataDetail = await this.utilsService.lockAndDestroy(
         id,
         'hutangdetail',
         'hutang_id',
+        trx,
+      );
+      const deletedData = await this.utilsService.lockAndDestroy(
+        id,
+        this.tableName,
+        'id',
         trx,
       );
       await this.statuspendukungService.remove(id, modifiedby, trx);
@@ -911,6 +928,17 @@ export class HutangheaderService {
         },
         trx,
       );
+
+      // Jurnal dibuat saat hutang disimpan dan dikunci lewat nobukti; tanpa ini
+      // jurnalnya jadi yatim.
+      if (deletedData && deletedData !== true) {
+        const jurnal = await trx('jurnalumumheader')
+          .where('nobukti', deletedData.nobukti)
+          .first();
+        if (jurnal) {
+          await this.JurnalumumheaderService.delete(jurnal.id, trx, modifiedby);
+        }
+      }
 
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {

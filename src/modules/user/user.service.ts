@@ -31,6 +31,7 @@ export class UserService {
   private readonly viewName = 'vusers';
   /** Password awal user baru — user mengganti sendiri setelah login pertama. */
   private readonly DEFAULT_PASSWORD = '12345678';
+  private readonly USER_CHILD_TABLES = ['useracl', 'userrole'];
 
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
@@ -56,6 +57,8 @@ export class UserService {
       'u.username',
       'u.name',
       'u.email',
+      'u.karyawan_id',
+      'u.karyawan_nama as namakaryawan',
       'u.statusaktif',
       'u.modifiedby',
       trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
@@ -68,15 +71,14 @@ export class UserService {
   /**
    * Kolom `vusers` yang boleh dipakai filter/search, dipetakan dari nama key
    * yang dikirim grid. Key di luar daftar ini DIABAIKAN, bukan diteruskan
-   * sebagai `u.<key>`: grid masih mengirim `namakaryawan` (kolomnya tidak ada
-   * di tabel `users` maupun view) pada setiap request, dan meneruskannya
-   * membuat seluruh grid gagal dengan "column does not exist" begitu search
-   * global diisi.
+   * sebagai `u.<key>`: key yang tidak ada di view membuat seluruh grid gagal
+   * dengan "column does not exist" begitu search global diisi.
    */
   private readonly FILTER_COLUMNS: Record<string, string> = {
     username: 'u.username',
     name: 'u.name',
     email: 'u.email',
+    namakaryawan: 'u.karyawan_nama',
     statusaktif: 'u.statusaktif',
     modifiedby: 'u.modifiedby',
     created_at: 'u.created_at',
@@ -156,9 +158,10 @@ export class UserService {
   private buildInsertData(dto: any, uuid?: string): Record<string, any> {
     return {
       id: uuid ? uuid : dto.id,
-      username: dto.username ? String(dto.username).trim() : null,
+      username: dto.username ? String(dto.username).trim().toUpperCase() : null,
       name: dto.name ? String(dto.name).toUpperCase() : null,
-      email: dto.email ?? null,
+      email: dto.email.toUpperCase() ?? null,
+      karyawan_id: dto.karyawan_id || null,
       statusaktif: dto.statusaktif,
       modifiedby: dto.modifiedby,
       created_at: dto.created_at || this.utilsService.getTime(),
@@ -172,9 +175,8 @@ export class UserService {
    * TEKS parameter (statusaktif_text), bukan id UUID-nya. Kalau tidak sama,
    * fokus baris setelah simpan akan meleset.
    *
-   * Kolom di luar view (mis. `namakaryawan` yang masih jadi kolom grid) jatuh
-   * ke `username` — sama seperti applyFilters, sort ke kolom yang tidak ada
-   * akan menggagalkan seluruh query.
+   * Kolom di luar FILTER_COLUMNS jatuh ke `username` — sama seperti
+   * applyFilters, sort ke kolom yang tidak ada akan menggagalkan seluruh query.
    */
   private resolvePositionOrder(
     sortBy: string,
@@ -680,6 +682,11 @@ export class UserService {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
+      // FK ke users bertipe NO ACTION: baris turunannya harus dihapus lebih dulu.
+      for (const table of this.USER_CHILD_TABLES) {
+        await trx(table).where('user_id', id).delete();
+      }
+
       const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
@@ -718,6 +725,7 @@ export class UserService {
     'u.username',
     'u.name',
     'u.email',
+    'u.karyawan_nama as namakaryawan',
     'u.statusaktif_text as text',
   ];
 
@@ -774,15 +782,21 @@ export class UserService {
       'LAPORAN USER',
       'Data Export',
     ],
-    // Kolom NAMA KARYAWAN dihapus: `users` tidak menyimpan relasi karyawan,
-    // jadi kolomnya selalu kosong di file hasil export.
-    headers: ['NO.', 'USERNAME', 'NAMA', 'EMAIL', 'STATUS AKTIF'],
-    columnWidths: [5, 25, 30, 30, 20],
+    headers: [
+      'NO.',
+      'USERNAME',
+      'NAMA',
+      'EMAIL',
+      'NAMA KARYAWAN',
+      'STATUS AKTIF',
+    ],
+    columnWidths: [5, 25, 30, 30, 30, 20],
     mapRow: (row: any, rowNumber: number) => [
       rowNumber,
       row.username,
       row.name,
       row.email,
+      row.namakaryawan,
       row.text,
     ],
   };
@@ -791,9 +805,9 @@ export class UserService {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    worksheet.mergeCells('A1:E1');
-    worksheet.mergeCells('A2:E2');
-    worksheet.mergeCells('A3:E3');
+    worksheet.mergeCells('A1:F1');
+    worksheet.mergeCells('A2:F2');
+    worksheet.mergeCells('A3:F3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN USER';
     worksheet.getCell('A3').value = 'Data Export';

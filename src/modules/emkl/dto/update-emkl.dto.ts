@@ -21,24 +21,12 @@ export const UpdateEmklSchema = z.object({
     .nullable()
     .optional(),
   alamat: z.string().trim().nullable().optional(),
-  coagiro: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAGIRO MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coapiutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAPIUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coahutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAHUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+  coagiro: z.string().nullable().optional(),
+  coagiro_text: z.string().nullable().optional(),
+  coapiutang: z.string().nullable().optional(),
+  coapiutang_text: z.string().nullable().optional(),
+  coahutang: z.string().nullable().optional(),
+  coahutang_text: z.string().nullable().optional(),
   kota: z
     .string()
     .trim()

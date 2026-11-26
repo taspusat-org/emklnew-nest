@@ -25,6 +25,7 @@ import * as path from 'path';
 import { Workbook, Column } from 'exceljs';
 import { Knex } from 'knex';
 import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
+import { RelasiService } from '../relasi/relasi.service';
 
 @Injectable()
 export class ShipperService {
@@ -34,6 +35,7 @@ export class ShipperService {
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
     private readonly runningNumberService: RunningNumberService,
+    private readonly relasiService: RelasiService,
   ) {}
   private readonly tableName = 'shipper';
   private readonly viewName = 'vshipper';
@@ -126,9 +128,9 @@ export class ShipperService {
       keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
       contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null,
       alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
-      coa: dto.coa ? dto.coa.toUpperCase() : null,
-      coapiutang: dto.coapiutang ? dto.coapiutang.toUpperCase() : null,
-      coahutang: dto.coahutang ? dto.coahutang.toUpperCase() : null,
+      coa: dto.coa || null,
+      coapiutang: dto.coapiutang || null,
+      coahutang: dto.coahutang || null,
       kota: dto.kota ? dto.kota.toUpperCase() : null,
       kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
       telp: dto.telp ? dto.telp.toUpperCase() : null,
@@ -139,7 +141,7 @@ export class ShipperService {
       creditterm: toNumber(dto.creditterm),
       credittermplus: toNumber(dto.credittermplus),
       npwp: dto.npwp ? dto.npwp.toUpperCase() : null,
-      coagiro: dto.coagiro ? dto.coagiro.toUpperCase() : null,
+      coagiro: dto.coagiro || null,
       ppn: toNumber(dto.ppn),
       titipke: dto.titipke ? dto.titipke.toUpperCase() : null,
       ppnbatalmuat: toNumber(dto.ppnbatalmuat),
@@ -212,14 +214,55 @@ export class ShipperService {
         return { col: sortBy, dir };
     }
   }
+  private buildRelasiData(dto: any, statusrelasi: string): Record<string, any> {
+    return {
+      statusrelasi,
+      nama: dto.nama || null,
+      coagiro: dto.coagiro || null,
+      coapiutang: dto.coapiutang || null,
+      coahutang: dto.coahutang || null,
+      alamat: dto.alamat || null,
+      npwp: dto.npwp || null,
+      namapajak: dto.namapajak || null,
+      alamatpajak: dto.alamatfakturpajak || null,
+      statusaktif: dto.statusaktif || null,
+      modifiedby: dto.modifiedby,
+    };
+  }
+  private async getStatusRelasiId(trx: any): Promise<string> {
+    const statusRelasi = await trx('parameter')
+      .select('id')
+      .where('grp', 'STATUS RELASI')
+      .whereRaw('upper(trim(text)) = ?', ['SHIPPER'])
+      .first();
 
+    if (!statusRelasi) {
+      throw new BadRequestException([
+        {
+          path: ['relasi_id'],
+          message: "Parameter STATUS RELASI 'SHIPPER' belum ada",
+        },
+      ]);
+    }
+    return statusRelasi.id;
+  }
   async create(CreateShipperDto: any, trx: any) {
     try {
       const { sortBy, sortDirection, filters, search, page, limit, info } =
         CreateShipperDto;
 
       const uuid = await uuidV7(trx);
+
+      const relasi = await this.relasiService.create(
+        this.buildRelasiData(
+          CreateShipperDto,
+          await this.getStatusRelasiId(trx),
+        ),
+        trx,
+      );
       const insertData = this.buildInsertData(CreateShipperDto, uuid);
+      insertData.relasi_id = relasi.id;
+
       await trx(this.tableName).insert(insertData);
       const newItem = await trx(this.viewName).where('id', uuid).first();
 
@@ -368,8 +411,11 @@ export class ShipperService {
         'u.contactperson',
         'u.alamat',
         'u.coa',
+        'u.coa_text',
         'u.coapiutang',
+        'u.coapiutang_text',
         'u.coahutang',
+        'u.coahutang_text',
         'u.kota',
         'u.kodepos',
         'u.telp',
@@ -381,6 +427,7 @@ export class ShipperService {
         'u.credittermplus',
         'u.npwp',
         'u.coagiro',
+        'u.coagiro_text',
         'u.ppn',
         'u.titipke',
         'u.ppnbatalmuat',
@@ -651,9 +698,9 @@ export class ShipperService {
     'u.keterangan',
     'u.contactperson',
     'u.alamat',
-    'u.coa',
-    'u.coapiutang',
-    'u.coahutang',
+    'u.coa_text',
+    'u.coapiutang_text',
+    'u.coahutang_text',
     'u.kota',
     'u.kodepos',
     'u.telp',
@@ -664,7 +711,7 @@ export class ShipperService {
     'u.creditterm',
     'u.credittermplus',
     'u.npwp',
-    'u.coagiro',
+    'u.coagiro_text',
     'u.ppn',
     'u.titipke',
     'u.ppnbatalmuat',
@@ -941,9 +988,9 @@ export class ShipperService {
       row.keterangan,
       row.contactperson,
       row.alamat,
-      row.coa,
-      row.coapiutang,
-      row.coahutang,
+      row.coa_text,
+      row.coapiutang_text,
+      row.coahutang_text,
       row.kota,
       row.kodepos,
       row.telp,
@@ -960,7 +1007,7 @@ export class ShipperService {
         ? null
         : Number(row.credittermplus),
       row.npwp,
-      row.coagiro,
+      row.coagiro_text,
       row.ppn === null || row.ppn === undefined ? null : Number(row.ppn),
       row.titipke,
       row.ppnbatalmuat === null || row.ppnbatalmuat === undefined
@@ -1145,9 +1192,9 @@ export class ShipperService {
         row.keterangan,
         row.contactperson,
         row.alamat,
-        row.coa,
-        row.coapiutang,
-        row.coahutang,
+        row.coa_text,
+        row.coapiutang_text,
+        row.coahutang_text,
         row.kota,
         row.kodepos,
         row.telp,
@@ -1158,7 +1205,7 @@ export class ShipperService {
         row.creditterm,
         row.credittermplus,
         row.npwp,
-        row.coagiro,
+        row.coagiro_text,
         row.ppn,
         row.titipke,
         row.ppnbatalmuat,

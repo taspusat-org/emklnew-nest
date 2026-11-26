@@ -38,7 +38,7 @@ export interface Menu {
   title: string;
   url: string;
   icon: string;
-  isActive: boolean;
+  statusaktif: string;
   order: number;
   parentId: number | null;
   items: Menu[];

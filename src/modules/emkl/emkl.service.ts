@@ -1,133 +1,219 @@
 import {
+  BadRequestException,
   Inject,
   Injectable,
   InternalServerErrorException,
+  Logger,
   HttpException,
 } from '@nestjs/common';
 import { CreateEmklDto } from './dto/create-emkl.dto';
+import { UpdateEmklDto } from './dto/update-emkl.dto';
+import { FindAllParams } from 'src/common/interfaces/all.interface';
 import { RedisService } from 'src/common/redis/redis.service';
-import { withUuidV7, UtilsService } from 'src/utils/utils.service';
+import {
+  calculateItemIndex,
+  getFetchedPages,
+  UtilsService,
+  uuidV7,
+} from 'src/utils/utils.service';
+import { toNumber } from 'src/utils/field-helpers';
 import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { RelasiService } from '../relasi/relasi.service';
+import { RunningNumberService } from '../running-number/running-number.service';
 import * as fs from 'fs';
 import * as path from 'path';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { LocksService } from '../locks/locks.service';
-import { Workbook } from 'exceljs';
-import { toNumber } from 'src/utils/field-helpers';
+import { Workbook, Column } from 'exceljs';
+import { Knex } from 'knex';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
 
 @Injectable()
 export class EmklService {
-  private readonly tableName = 'emkl';
+  private readonly logger = new Logger(EmklService.name);
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
     private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
-    private readonly relasiService: RelasiService,
-    private readonly locksService: LocksService,
+    private readonly runningNumberService: RunningNumberService,
   ) {}
-  async create(createEmklDto: any, trx: any) {
-    try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statustrado_text,
-        statusaktif_text,
-        relasi_text,
-        id,
-        ...insertData
-      } = createEmklDto;
-      insertData.updated_at = this.utilsService.getTime();
-      insertData.created_at = this.utilsService.getTime();
-      // Form mengirim "2,221.00"; kolom numeric menolak koma ribuan.
-      if ('top' in insertData) insertData.top = toNumber(insertData.top);
+  private readonly tableName = 'emkl';
+  private readonly viewName = 'vemkl';
 
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      [
-        'nama',
-        'contactperson',
-        'alamat',
-        'kota',
-        'kodepos',
-        'notelp',
-        'email',
-        'fax',
-        'alamatweb',
-        'npwp',
-        'namapajak',
-        'alamatpajak',
-      ].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys: string[] = [];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
+    const numberFields = ['top'];
+
+    if (search && filters && Object.keys(filters).length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            // pakai query, bukan qb — statement yang ditambahkan ke qb saat
+            // callback grup dievaluasi tidak ikut ter-compile (hilang diam-diam)
+            query.orWhereRaw("to_char(u.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (numberFields.includes(field)) {
+            query.orWhereRaw('u.??::text ilike ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhere(`u.${field}`, 'ilike', `%${sanitizedValue}%`);
+          }
+        });
       });
+    }
 
-      const insertedItems = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
 
-      const statusRelasi = await trx('parameter')
-        .select('*')
-        .where('grp', 'STATUS RELASI')
-        .where('text', 'EMKL')
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("to_char(u.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (numberFields.includes(key)) {
+        qb.andWhereRaw('u.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+      } else {
+        // ✅ prefix u. agar konsisten dengan alias view
+        qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.uuid, // id (uuidV7)
+      statusrelasi: dto.statusrelasi || null,
+      relasi_id: dto.relasi_id || null,
+      nama: dto.nama ? dto.nama.toUpperCase() : null,
+      contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null,
+      alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
+      coagiro: dto.coagiro || null,
+      coapiutang: dto.coapiutang || null,
+      coahutang: dto.coahutang || null,
+      kota: dto.kota ? dto.kota.toUpperCase() : null,
+      kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
+      notelp: dto.notelp ? dto.notelp.toUpperCase() : null,
+      email: dto.email ? dto.email.toUpperCase() : null,
+      fax: dto.fax ? dto.fax.toUpperCase() : null,
+      alamatweb: dto.alamatweb ? dto.alamatweb.toUpperCase() : null,
+      top: toNumber(dto.top),
+      npwp: dto.npwp ? dto.npwp.toUpperCase() : null,
+      namapajak: dto.namapajak ? dto.namapajak.toUpperCase() : null,
+      alamatpajak: dto.alamatpajak ? dto.alamatpajak.toUpperCase() : null,
+      statustrado: dto.statustrado || null,
+      statusaktif: dto.statusaktif || null,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statustrado':
+        return { col: 'statustrado_text', dir };
+      case 'statusaktif':
+        return { col: 'statusaktif_text', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateEmklDto: any, trx: any) {
+    try {
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateEmklDto;
+
+      const uuid = await uuidV7(trx);
+      const insertData = this.buildInsertData(CreateEmklDto, uuid);
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as u`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
-      const relasi = {
-        nama: insertData.nama,
-        statusrelasi: statusRelasi.id,
-        coagiro: insertData.coagiro,
-        coapiutang: insertData.coapiutang,
-        coahutang: insertData.coahutang,
-        alamat: insertData.alamat,
-        npwp: insertData.npwp,
-        namapajak: insertData.namapajak,
-        alamatpajak: insertData.alamatpajak,
-        statusaktif: insertData.statusaktif,
-        modifiedby: insertData.modifiedby,
-      };
-      const dataRelasi = await this.relasiService.create(relasi, trx);
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
 
-      const newItem = insertedItems[0];
-      await trx(this.tableName)
-        .update({
-          relasi_id: dataRelasi.id,
-        })
-        .where('id', newItem.id)
-        .returning('*');
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as u`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
 
-      const { data, pagination } = await this.findAll(
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as u`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
-      let itemIndex = data.findIndex(
-        (item) => String(item.id) === String(newItem.id),
-      );
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
 
-      const pageNumber = Math.floor(itemIndex / limit) + 1;
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
-      );
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
 
+      // 6. Side-effects
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
@@ -141,363 +227,273 @@ export class EmklService {
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      throw new Error(`Error creating EMKL: ${error.message}`);
+      throw new Error(`Error creating emkl: ${error.message}`);
     }
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
-    trx: any,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: Knex.Transaction,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      if (isLookUp) {
-        const emklCountResult = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const emklCount = emklCountResult?.total || 0;
-        if (Number(emklCount) > 500) {
-          return { data: { type: 'json' } };
-        } else {
-          limit = 0;
-        }
+      const sortBy = sort?.sortBy || 'nama';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
+      const countResult = await trx(`${this.viewName} as u`)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      const query = trx(`${this.tableName} as emkl`)
-        .select([
-          'emkl.id as id',
-          'emkl.relasi_id as relasi_id',
+      // Data dari view (mengandung _text, _memo, dll)
+      const query = trx(`${this.viewName} as u`).select([
+        'u.id',
+        'u.statusrelasi',
+        'u.statusrelasi_text',
+        'u.relasi_id',
+        'u.relasi_id_text',
+        'u.nama',
+        'u.contactperson',
+        'u.alamat',
+        'u.coagiro',
+        'u.coagiro_text',
+        'u.coapiutang',
+        'u.coapiutang_text',
+        'u.coahutang',
+        'u.coahutang_text',
+        'u.kota',
+        'u.kodepos',
+        'u.notelp',
+        'u.email',
+        'u.fax',
+        'u.alamatweb',
+        'u.top',
+        'u.npwp',
+        'u.namapajak',
+        'u.alamatpajak',
+        'u.statustrado',
+        'u.statustrado_text',
+        'u.statustrado_memo',
+        'u.statusaktif',
+        'u.statusaktif_text',
+        'u.statusaktif_memo',
+        'u.info',
+        'u.modifiedby',
+        trx.raw("to_char(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        trx.raw("to_char(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ]);
 
-          'emkl.nama',
-          'emkl.contactperson',
-          'emkl.alamat',
-          'emkl.coagiro',
-          'emkl.coapiutang',
-          'emkl.coahutang',
-          'emkl.kota',
-          'emkl.kodepos',
-          'emkl.notelp',
-          'emkl.email',
-          'emkl.fax',
-          'emkl.alamatweb',
-          'emkl.top',
-          'emkl.npwp',
-          'emkl.namapajak',
-          'emkl.alamatpajak',
-          'emkl.statustrado',
-          'emkl.statusaktif',
-          'emkl.modifiedby',
-          trx.raw(
-            "TO_CHAR(emkl.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at",
-          ),
-          trx.raw(
-            "TO_CHAR(emkl.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at",
-          ),
-          'statusaktif.memo as statusaktif_memo',
-          'statusaktif.text as statusaktif_text',
-          'statustrado.memo as statustrado_memo',
-          'statustrado.text as statustrado_text',
-          'relasi.nama as relasi_text',
-          'coagiro.keterangancoa as coagiro_ket',
-          'coapiutang.keterangancoa as coapiutang_ket',
-          'coahutang.keterangancoa as coahutang_ket',
-        ])
-        .leftJoin('akunpusat as coagiro', 'emkl.coagiro', 'coagiro.coa')
-        .leftJoin(
-          'akunpusat as coapiutang',
-          'emkl.coapiutang',
-          'coapiutang.coa',
-        )
-        .leftJoin('akunpusat as coahutang', 'emkl.coahutang', 'coahutang.coa')
-        .leftJoin(
-          'parameter as statustrado',
-          'emkl.statustrado',
-          'statustrado.id',
-        )
-        .leftJoin('relasi as relasi', 'emkl.relasi_id', 'relasi.id')
-        .leftJoin(
-          'parameter as statusaktif',
-          'emkl.statusaktif',
-          'statusaktif.id',
-        );
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
 
-      const excludeSearchKeys = ['statustrado', 'statusaktif'];
+      if (sortBy === 'statustrado') {
+        query.orderBy('u.statustrado_text', sortDirection);
+      } else if (sortBy === 'statusaktif') {
+        query.orderBy('u.statusaktif_text', sortDirection);
+      } else {
+        query.orderBy(`u.${sortBy}`, sortDirection);
+      }
 
-      const searchFields = Object.keys(filters || {}).filter(
-        (k) => !excludeSearchKeys.includes(k),
-      );
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
-
-      if (search) {
-        const sanitizedValue = String(search).replace(/\[/g, '[[]').trim();
-
-        query.where((qb) => {
-          searchFields.forEach((field) => {
-            if (['created_at', 'updated_at'].includes(field)) {
-              qb.orWhereRaw(
-                "TO_CHAR(emkl.??, 'DD-MM-YYYY HH24:MI:SS') like ?",
-                [field, `%${sanitizedValue}%`],
-              );
-            } else if (field === 'statusaktif_memo') {
-              qb.orWhere('statusaktif.memo', 'like', `%${sanitizedValue}%`);
-            } else if (field === 'statusaktif_text') {
-              qb.orWhere('statusaktif.text', 'like', `%${sanitizedValue}%`);
-            } else if (field === 'statustrado_memo') {
-              qb.orWhere('statustrado.memo', 'like', `%${sanitizedValue}%`);
-            } else if (field === 'statustrado_text') {
-              qb.orWhere('statustrado.text', 'like', `%${sanitizedValue}%`);
-            } else if (field === 'coagiro_ket') {
-              qb.orWhere(
-                'coagiro.keterangancoa',
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (field === 'coapiutang_ket') {
-              qb.orWhere(
-                'coapiutang.keterangancoa',
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (field === 'coahutang_ket') {
-              qb.orWhere(
-                'coahutang.keterangancoa',
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else {
-              qb.orWhere(`emkl.${field}`, 'like', `%${sanitizedValue}%`);
-            }
-          });
-        });
-      }
-
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value).replace(/\[/g, '[[]');
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw(
-                "TO_CHAR(emkl.??, 'DD-MM-YYYY HH24:MI:SS') LIKE ?",
-                [key, `%${sanitizedValue}%`],
-              );
-            } else if (key === 'statusaktif_text') {
-              query.andWhere(`statusaktif.text`, '=', sanitizedValue);
-            } else if (key === 'statustrado_text') {
-              query.andWhere(`statustrado.text`, '=', sanitizedValue);
-            } else if (key === 'coagiro_ket') {
-              query.andWhere(
-                `coagiro.keterangancoa`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'coahutang_ket') {
-              query.andWhere(
-                `coahutang.keterangancoa`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'coapiutang_ket') {
-              query.andWhere(
-                `coapiutang.keterangancoa`,
-                'like',
-                `%${sanitizedValue}%`,
-              );
-            } else {
-              query.andWhere(`emkl.${key}`, 'like', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        query.orderBy(sort.sortBy, sort.sortDirection);
-      }
-
       const data = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
-          currentPage: page,
-          totalPages: totalPages,
+          currentPage: Number(page),
+          totalPages,
           totalItems: total,
           itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error fetching data:', error);
-      throw new Error('Failed to fetch data');
+      this.logger.error('Error fetching emkl data', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch emkl data');
     }
   }
 
-  async getById(id: string, trx: any) {
+  async update(id: string, data: any, trx: any) {
     try {
-      const result = await trx(this.tableName).where('id', id).first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!result) {
-        throw new Error('Data not found');
-      }
-
-      return result;
-    } catch (error) {
-      console.error('Error fetching data by id:', error);
-      throw new Error('Failed to fetch data by id');
-    }
-  }
-
-  async update(dataId: string, data: any, trx: any) {
-    try {
-      const existingData = await trx(this.tableName)
-        .where('id', dataId)
-        .first();
-
-      if (!existingData) {
+      if (!existedData) {
         throw new Error('Emkl not found');
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        statustrado_text,
-        statusaktif_text,
-        coagiro_ket,
-        coahutang_ket,
-        relasi_text,
-        coapiutang_ket,
-        id,
-        ...insertData
-      } = data;
-      if ('top' in insertData) insertData.top = toNumber(insertData.top);
-      // Uppercase HANYA kolom teks manusiawi di bawah. Sisanya (id, *_id,
-      // status*, dan kolom FK lain) adalah identifier: mayoritas id master
-      // kini uuid v7 HURUF KECIL, jadi blanket uppercase menulis id yang
-      // tidak ada. Tanpa FK, Postgres menerimanya diam-diam sehingga lookup
-      // tampil kosong dan perubahan terlihat "tidak tersimpan" — lihat
-      // pengeluaranheader.service.ts.
-      [
-        'nama',
-        'contactperson',
-        'alamat',
-        'kota',
-        'kodepos',
-        'notelp',
-        'email',
-        'fax',
-        'alamatweb',
-        'npwp',
-        'namapajak',
-        'alamatpajak',
-      ].forEach((field) => {
-        if (typeof insertData[field] === 'string') {
-          insertData[field] = insertData[field].toUpperCase();
-        }
-      });
-      const hasChanges = this.utilsService.hasChanges(insertData, existingData);
-      if (hasChanges) {
-        insertData.updated_at = this.utilsService.getTime();
-        await trx(this.tableName).where('id', dataId).update(insertData);
+      // Cek unik di DALAM transaksi (lihat NOTE di update-emkl.dto.ts).
+      const duplicateNama =
+        data.nama &&
+        (await trx(this.tableName)
+          .whereRaw('lower(trim(??)) = lower(trim(?))', ['nama', data.nama])
+          .whereNot('id', id)
+          .first());
+      if (duplicateNama) {
+        throw new BadRequestException([
+          { path: ['nama'], message: 'Emkl dengan nama ini sudah ada' },
+        ]);
       }
 
-      const { data: filteredData, pagination } = await this.findAll(
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
+
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
+
+      if (hasChanges) {
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
+      }
+
+      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
+      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_memo)
+      // yang tidak ada di tabel base; dipakai untuk acuan posisi dan
+      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
+      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
+      // dengan filter aktif.
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+
+      const existingData = await trx(`${this.viewName} as u`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as u`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
+        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as u`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
-          isLookUp: false, // Set based on your requirement (e.g., lookup flag)
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
+          isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      // Cari index item yang baru saja diupdate
-      let itemIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(dataId),
-      );
-      if (itemIndex === -1) {
-        itemIndex = 0;
-      }
-      const statusRelasi = await trx('parameter')
-        .select('*')
-        .where('grp', 'STATUS RELASI')
-        .where('text', 'EMKL')
-        .first();
-      const relasi = {
-        nama: insertData.nama,
-        statusrelasi: statusRelasi.id,
-        coagiro: insertData.coagiro,
-        coapiutang: insertData.coapiutang,
-        coahutang: insertData.coahutang,
-        alamat: insertData.alamat,
-        npwp: insertData.npwp,
-        namapajak: insertData.namapajak,
-        alamatpajak: insertData.alamatpajak,
-        statusaktif: insertData.statusaktif,
-        modifiedby: insertData.modifiedby,
-      };
-      const dataRelasi = await this.relasiService.update(
-        existingData.relasi_id,
-        relasi,
-        trx,
-      );
-      const itemsPerPage = limit || 10; // Default 10 items per page, atau yang dikirimkan dari frontend
-      const pageNumber = Math.floor(itemIndex / itemsPerPage) + 1;
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      // Ambil data hingga halaman yang mencakup item yang baru diperbarui
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT EMKL',
-          idtrans: dataId,
-          nobuktitrans: dataId,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
       return {
-        updatedItem: {
-          dataId,
-          ...data,
-        },
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        itemIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
-      console.error('Error updating emkl:', error);
-      throw new Error('Failed to update emkl');
+      console.error('Error updating Emkl:', error);
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      throw new Error('Failed to update Emkl');
     }
   }
 
@@ -523,12 +519,6 @@ export class EmklService {
         trx,
       );
 
-      const dataRelasi = await this.relasiService.delete(
-        deletedData.relasi_id,
-        trx,
-        modifiedby,
-      );
-
       return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
       console.error('Error deleting data:', error);
@@ -539,53 +529,247 @@ export class EmklService {
     }
   }
 
-  async exportToExcel(data: any[]) {
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
+  private readonly EXPORT_COLUMNS = [
+    'u.statusrelasi_text',
+    'u.relasi_id_text',
+    'u.nama',
+    'u.contactperson',
+    'u.alamat',
+    'u.coagiro_text',
+    'u.coapiutang_text',
+    'u.coahutang_text',
+    'u.kota',
+    'u.kodepos',
+    'u.notelp',
+    'u.email',
+    'u.fax',
+    'u.alamatweb',
+    'u.top',
+    'u.npwp',
+    'u.namapajak',
+    'u.alamatpajak',
+    'u.statustrado_text',
+    'u.statusaktif_text',
+  ];
+
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
+   * proses kehabisan heap.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+    const query = db(`${this.viewName} as u`)
+      .select(this.EXPORT_COLUMNS)
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
+
+    if (sortBy === 'statustrado') {
+      query.orderBy('u.statustrado_text', sortDirection);
+    } else if (sortBy === 'statusaktif') {
+      query.orderBy('u.statusaktif_text', sortDirection);
+    } else {
+      query.orderBy(`u.${sortBy}`, sortDirection);
+    }
+
+    return query;
+  }
+
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari VIEW karena filter grid
+   * memakai kolom teks lookup (`*_text`) yang tidak ada di tabel base.
+   * Dipakai untuk progres export yang sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /**
+   * Data LaporanEmkl.mrt: baris yang lolos filter & sort grid. Memakai
+   * query export karena kolom yang dibaca template sama dengan EXPORT_COLUMNS.
+   */
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Emkl',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN EMKL',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'STATUSRELASI',
+      'RELASI',
+      'NAMA',
+      'CONTACTPERSON',
+      'ALAMAT',
+      'COAGIRO',
+      'COAPIUTANG',
+      'COAHUTANG',
+      'KOTA',
+      'KODEPOS',
+      'NOTELP',
+      'EMAIL',
+      'FAX',
+      'ALAMATWEB',
+      'TOP',
+      'NPWP',
+      'NAMAPAJAK',
+      'ALAMATPAJAK',
+      'STATUSTRADO',
+      'STATUSAKTIF',
+    ],
+    columnWidths: [
+      5, 20, 20, 25, 30, 25, 20, 20, 20, 30, 30, 30, 30, 30, 30, 20, 30, 25, 25,
+      20, 20,
+    ],
+    columnFormats: [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      { numFmt: EXCEL_FORMAT.ANGKA_DESIMAL },
+      null,
+      null,
+      null,
+      null,
+      null,
+    ],
+
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.statusrelasi_text,
+      row.relasi_id_text,
+      row.nama,
+      row.contactperson,
+      row.alamat,
+      row.coagiro_text,
+      row.coapiutang_text,
+      row.coahutang_text,
+      row.kota,
+      row.kodepos,
+      row.notelp,
+      row.email,
+      row.fax,
+      row.alamatweb,
+      row.top === null || row.top === undefined ? null : Number(row.top),
+      row.npwp,
+      row.namapajak,
+      row.alamatpajak,
+      row.statustrado_text,
+      row.statusaktif_text,
+    ],
+  };
+
+  /**
+   * Merakit workbook Excel dan mengembalikannya sebagai buffer.
+   *
+   * Hanya untuk export kecil (endpoint GET /emkl/export yang lama):
+   * seluruh data ditampung di memori. Export lewat background job memakai
+   * ExportJobService yang streaming.
+   */
+  async buildExcelBuffer(data: any[]): Promise<Buffer> {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    worksheet.mergeCells('A1:I1');
-    worksheet.mergeCells('A2:I2');
-    worksheet.mergeCells('A3:I3');
+    worksheet.mergeCells('A1:U1');
+    worksheet.mergeCells('A2:U2');
+    worksheet.mergeCells('A3:U3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN EMKL';
     worksheet.getCell('A3').value = 'Data Export';
-    worksheet.getCell('A1').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A2').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A3').alignment = {
-      horizontal: 'center',
-      vertical: 'middle',
-    };
-    worksheet.getCell('A1').font = { size: 14, bold: true };
-    worksheet.getCell('A2').font = { bold: true };
-    worksheet.getCell('A3').font = { bold: true };
+    ['A1', 'A2', 'A3'].forEach((cellKey, i) => {
+      worksheet.getCell(cellKey).alignment = {
+        horizontal: 'center',
+        vertical: 'middle',
+      };
+      worksheet.getCell(cellKey).font = {
+        name: 'Tahoma',
+        size: i === 0 ? 14 : 10,
+        bold: true,
+      };
+    });
 
     const headers = [
       'NO.',
+      'STATUSRELASI',
+      'RELASI',
       'NAMA',
-      'CONTACT PERSON',
+      'CONTACTPERSON',
       'ALAMAT',
+      'COAGIRO',
+      'COAPIUTANG',
+      'COAHUTANG',
       'KOTA',
-      'KODE POS',
-      'NO TELP',
+      'KODEPOS',
+      'NOTELP',
       'EMAIL',
       'FAX',
-      'ALAMAT WEB',
+      'ALAMATWEB',
       'TOP',
       'NPWP',
-      'NAMA PAJAK',
-      'ALAMAT PAJAK',
-      'COA GIRO',
-      'COA PIUTANG',
-      'COA HUTANG',
-      'STATUS TRADO',
-      'STATUS AKTIF',
+      'NAMAPAJAK',
+      'ALAMATPAJAK',
+      'STATUSTRADO',
+      'STATUSAKTIF',
     ];
+
     headers.forEach((header, index) => {
       const cell = worksheet.getCell(5, index + 1);
       cell.value = header;
@@ -595,7 +779,10 @@ export class EmklService {
         fgColor: { argb: 'FFFF00' },
       };
       cell.font = { bold: true, name: 'Tahoma', size: 10 };
-      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.alignment = {
+        horizontal: index === 0 ? 'right' : 'center',
+        vertical: 'middle',
+      };
       cell.border = {
         top: { style: 'thin' },
         left: { style: 'thin' },
@@ -603,65 +790,74 @@ export class EmklService {
         right: { style: 'thin' },
       };
     });
+
     data.forEach((row, rowIndex) => {
       const currentRow = rowIndex + 6;
-
-      worksheet.getCell(currentRow, 1).value = rowIndex + 1;
-      worksheet.getCell(currentRow, 2).value = row.nama;
-      worksheet.getCell(currentRow, 3).value = row.contactperson;
-      worksheet.getCell(currentRow, 4).value = row.alamat;
-      worksheet.getCell(currentRow, 5).value = row.kota;
-      worksheet.getCell(currentRow, 6).value = row.kodepos;
-      worksheet.getCell(currentRow, 7).value = row.notelp;
-      worksheet.getCell(currentRow, 8).value = row.email;
-      worksheet.getCell(currentRow, 9).value = row.fax;
-      worksheet.getCell(currentRow, 10).value = row.alamatweb;
-      worksheet.getCell(currentRow, 11).value = row.top;
-      worksheet.getCell(currentRow, 12).value = row.npwp;
-      worksheet.getCell(currentRow, 13).value = row.namapajak;
-      worksheet.getCell(currentRow, 14).value = row.alamatpajak;
-      worksheet.getCell(currentRow, 15).value = row.coagiro_ket;
-      worksheet.getCell(currentRow, 16).value = row.coapiutang_ket;
-      worksheet.getCell(currentRow, 17).value = row.coahutang_ket;
-      worksheet.getCell(currentRow, 18).value = row.statustrado_text;
-      worksheet.getCell(currentRow, 19).value = row.statusaktif_text;
-
-      for (let col = 1; col <= headers.length; col++) {
-        const cell = worksheet.getCell(currentRow, col);
-        if (col == 11) {
-          worksheet.getCell(currentRow, col).alignment = {
-            horizontal: 'right',
-          };
-        }
+      const rowValues = [
+        rowIndex + 1,
+        row.statusrelasi_text,
+        row.relasi_id_text,
+        row.nama,
+        row.contactperson,
+        row.alamat,
+        row.coagiro_text,
+        row.coapiutang_text,
+        row.coahutang_text,
+        row.kota,
+        row.kodepos,
+        row.notelp,
+        row.email,
+        row.fax,
+        row.alamatweb,
+        row.top,
+        row.npwp,
+        row.namapajak,
+        row.alamatpajak,
+        row.statustrado_text,
+        row.statusaktif_text,
+      ];
+      rowValues.forEach((value, colIndex) => {
+        const cell = worksheet.getCell(currentRow, colIndex + 1);
+        cell.value = value ?? '';
         cell.font = { name: 'Tahoma', size: 10 };
+        cell.alignment = {
+          horizontal: colIndex === 0 ? 'right' : 'left',
+          vertical: 'middle',
+        };
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
           bottom: { style: 'thin' },
           right: { style: 'thin' },
         };
-      }
+      });
     });
 
-    worksheet.getColumn(1).width = 10;
-    worksheet.getColumn(2).width = 30;
-    worksheet.getColumn(3).width = 20;
-    worksheet.getColumn(4).width = 30;
-    worksheet.getColumn(5).width = 30;
-    worksheet.getColumn(6).width = 15;
-    worksheet.getColumn(7).width = 30;
-    worksheet.getColumn(8).width = 30;
-    worksheet.getColumn(9).width = 30;
-    worksheet.getColumn(10).width = 30;
-    worksheet.getColumn(11).width = 15;
-    worksheet.getColumn(12).width = 30;
-    worksheet.getColumn(13).width = 30;
-    worksheet.getColumn(14).width = 30;
-    worksheet.getColumn(15).width = 30;
-    worksheet.getColumn(16).width = 30;
-    worksheet.getColumn(17).width = 30;
-    worksheet.getColumn(18).width = 30;
-    worksheet.getColumn(19).width = 30;
+    worksheet.columns
+      .filter((c): c is Column => !!c)
+      .forEach((col) => {
+        let maxLength = 0;
+        col.eachCell({ includeEmpty: true }, (cell) => {
+          const cellValue = cell.value ? cell.value.toString() : '';
+          maxLength = Math.max(maxLength, cellValue.length);
+        });
+        col.width = maxLength + 2;
+      });
+
+    const adjustCols: number[] = [20, 21];
+    adjustCols.forEach((colIndex) => {
+      const col = worksheet.getColumn(colIndex);
+      const currentWidth = col.width ?? 20;
+      col.width = Math.max(10, currentWidth / 2);
+    });
+
+    worksheet.getColumn(1).width = 6;
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  async exportToExcel(data: any[]) {
+    const buffer = await this.buildExcelBuffer(data);
 
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
@@ -670,58 +866,10 @@ export class EmklService {
 
     const tempFilePath = path.resolve(
       tempDir,
-      `laporan_emkl${Date.now()}.xlsx`,
+      `laporan_emkl_${Date.now()}.xlsx`,
     );
-    await workbook.xlsx.writeFile(tempFilePath);
+    await fs.promises.writeFile(tempFilePath, buffer);
 
     return tempFilePath;
-  }
-
-  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
-    try {
-      if (aksi === 'EDIT') {
-        const forceEdit = await this.locksService.forceEdit(
-          this.tableName,
-          value,
-          editedby,
-          trx,
-        );
-
-        return forceEdit;
-      } else if (aksi === 'DELETE') {
-        const emklData = await trx(this.tableName).where('id', value).first();
-        if (!emklData) {
-          return { status: 'success', message: 'Data aman untuk dihapus.' };
-        }
-
-        // Cek emkl.id dipakai transaksi (hargatrucking, orderanmuatan, dll) ATAU
-        // relasinya dipakai transaksi. Untuk relasi, kecualikan tabel `emkl`
-        // (self-reference yang ikut terhapus saat delete).
-        let used = await this.utilsService.findFirstReference(
-          this.tableName,
-          value,
-          trx,
-        );
-        if (!used && emklData.relasi_id) {
-          used = await this.utilsService.findFirstReference(
-            'relasi',
-            emklData.relasi_id,
-            trx,
-            [this.tableName],
-          );
-        }
-        if (used) {
-          return {
-            status: 'failed',
-            message: `Data tidak dapat dihapus karena masih digunakan pada tabel ${used.ref_table}.`,
-          };
-        }
-
-        return { status: 'success', message: 'Data aman untuk dihapus.' };
-      }
-    } catch (error) {
-      console.error('Error di checkValidasi:', error);
-      throw new InternalServerErrorException('Failed to check validation');
-    }
   }
 }

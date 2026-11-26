@@ -1,5 +1,6 @@
 import {
   Controller,
+  HttpException,
   Get,
   Post,
   Body,
@@ -161,6 +162,7 @@ export class PengeluaranheaderController {
       return result;
     } catch (error) {
       trx.rollback();
+      if (error instanceof HttpException) throw error;
       console.error('Error deleting pengeluaran:', error);
       throw new Error(`Error deleting pengeluaran: ${error.message}`);
     }
