@@ -172,6 +172,7 @@ export class HutangheaderController {
       return result;
     } catch (error) {
       trx.rollback();
+      if (error instanceof HttpException) throw error;
       console.error('Error deleting hutang:', error);
       throw new Error(`Error deleting hutang: ${error.message}`);
     }

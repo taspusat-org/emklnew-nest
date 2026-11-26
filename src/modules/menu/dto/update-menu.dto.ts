@@ -11,7 +11,6 @@ export const UpdateMenuSchema = z.object({
   aco_id: z.string().nullable().optional(),
   acos_nama: z.string().nullable().optional(),
   icon: z.string().nullable().optional(), // Optional
-  isActive: z.number().nullable().optional(), // Optional
   parentId: z.string().nullable().optional(), // Optional
   parent_nama: z.string().nullable().optional(),
   statusaktif: z

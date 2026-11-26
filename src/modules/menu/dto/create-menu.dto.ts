@@ -11,7 +11,6 @@ export const CreateMenuSchema = z.object({
   aco_id: z.string().nullable().optional(),
   acos_nama: z.string().nullable().optional(),
   icon: z.string().nullable().optional(),
-  isActive: z.number().nullable().optional(),
   parentId: z.string().nullable().optional(),
   parent_nama: z.string().nullable().optional(),
   statusaktif: z.string().min(1, { message: 'Status Aktif Wajib Diisi' }),

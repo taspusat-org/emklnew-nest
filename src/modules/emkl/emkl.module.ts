@@ -7,17 +7,14 @@ import { AuthModule } from '../auth/auth.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { ReportModule } from 'src/common/report/report.module';
-import { RelasiModule } from '../relasi/relasi.module';
-import { LocksModule } from '../locks/locks.module';
 @Module({
   imports: [
     UtilsModule,
     RedisModule,
-    RelasiModule,
     AuthModule,
     LogtrailModule,
     RunningNumberModule,
-    LocksModule,
+    // Menyediakan ExportJobService (export Excel background + socket progres).
     ReportModule,
   ],
   controllers: [EmklController],

@@ -1,156 +1,300 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { Column, Workbook } from 'exceljs';
-import { LocksService } from '../locks/locks.service';
-import { GlobalService } from '../global/global.service';
-import { RelasiService } from '../relasi/relasi.service';
-import { RedisService } from 'src/common/redis/redis.service';
-import { FindAllParams } from 'src/common/interfaces/all.interface';
-import { LogtrailService } from 'src/common/logtrail/logtrail.service';
-import { withUuidV7, formatDateToSQL, UtilsService  } from 'src/utils/utils.service';
 import {
-  HttpException,
-  HttpStatus,
+  BadRequestException,
   Inject,
   Injectable,
   InternalServerErrorException,
+  Logger,
+  HttpException,
 } from '@nestjs/common';
+import { CreateSupplierDto } from './dto/create-supplier.dto';
+import { UpdateSupplierDto } from './dto/update-supplier.dto';
+import { FindAllParams } from 'src/common/interfaces/all.interface';
+import { RedisService } from 'src/common/redis/redis.service';
+import {
+  calculateItemIndex,
+  formatDateToSQL,
+  getFetchedPages,
+  UtilsService,
+  uuidV7,
+} from 'src/utils/utils.service';
+import { toNumber } from 'src/utils/field-helpers';
+import { LogtrailService } from 'src/common/logtrail/logtrail.service';
+import { RunningNumberService } from '../running-number/running-number.service';
+import { RelasiService } from '../relasi/relasi.service';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Workbook, Column } from 'exceljs';
+import { Knex } from 'knex';
+import { EXCEL_FORMAT } from 'src/common/report/export-job.service';
 
 @Injectable()
 export class SupplierService {
-  private readonly tableName = 'supplier';
-
-  // Uppercase HANYA kolom teks manusiawi. relasi_id/coa*/statusaktif dan id
-  // adalah identifier: mayoritas id master kini uuid v7 HURUF KECIL, jadi
-  // blanket uppercase menulis id yang tidak ada. Tanpa FK, Postgres
-  // menerimanya diam-diam sehingga lookup tampil kosong dan perubahan terlihat
-  // "tidak tersimpan" — lihat pengeluaranheader.service.ts.
-  private readonly uppercaseFields = [
-    'nama',
-    'keterangan',
-    'contactperson',
-    'ktp',
-    'alamat',
-    'kota',
-    'kodepos',
-    'telp',
-    'email',
-    'fax',
-    'web',
-    'npwp',
-    'alamatfakturpajak',
-    'namapajak',
-    'noskb',
-    'nosk',
-  ];
-
+  private readonly logger = new Logger(SupplierService.name);
   constructor(
     @Inject('REDIS_CLIENT') private readonly redisService: RedisService,
-    private readonly utilService: UtilsService,
-    private readonly locksService: LocksService,
-    private readonly globalService: GlobalService,
-    private readonly relasiService: RelasiService,
+    private readonly utilsService: UtilsService,
     private readonly logTrailService: LogtrailService,
+    private readonly runningNumberService: RunningNumberService,
+    private readonly relasiService: RelasiService,
   ) {}
+  private readonly tableName = 'supplier';
+  private readonly viewName = 'vsupplier';
 
-  async create(createData: any, trx: any) {
-    try {
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        method,
-        statusaktif_nama,
-        coa_nama,
-        coapiu_nama,
-        coahut_nama,
-        coagiro_nama,
-        id,
-        ...insertData
-      } = createData;
-      insertData.updated_at = this.utilService.getTime();
-      insertData.created_at = this.utilService.getTime();
+  /**
+   * id parameter STATUS RELASI 'SUPPLIER' — penanda jenis mitra di tabel relasi.
+   * parameter.text tersimpan HURUF BESAR, jadi dibandingkan lewat upper(trim()).
+   */
+  private async getStatusRelasiId(trx: any): Promise<string> {
+    const statusRelasi = await trx('parameter')
+      .select('id')
+      .where('grp', 'STATUS RELASI')
+      .whereRaw('upper(trim(text)) = ?', ['SUPPLIER'])
+      .first();
 
-      Object.keys(insertData).forEach((key) => {
-        if (typeof insertData[key] === 'string') {
-          const value = insertData[key];
-          const dateRegex = /^\d{2}-\d{2}-\d{4}$/;
+    if (!statusRelasi) {
+      throw new BadRequestException([
+        {
+          path: ['relasi_id'],
+          message: "Parameter STATUS RELASI 'SUPPLIER' belum ada",
+        },
+      ]);
+    }
+    return statusRelasi.id;
+  }
 
-          if (dateRegex.test(value)) {
-            insertData[key] = formatDateToSQL(value);
-          } else if (this.uppercaseFields.includes(key)) {
-            insertData[key] = insertData[key].toUpperCase();
+  /**
+   * Baris tabel relasi untuk supplier ini. Teks di-uppercase oleh RelasiService;
+   * id/status (identifier) tidak boleh di-uppercase.
+   */
+  private buildRelasiData(dto: any, statusrelasi: string): Record<string, any> {
+    return {
+      statusrelasi,
+      nama: dto.nama || null,
+      coagiro: dto.coagiro || null,
+      coapiutang: dto.coapiu || null,
+      coahutang: dto.coahut || null,
+      alamat: dto.alamat || null,
+      npwp: dto.npwp || null,
+      namapajak: dto.namapajak || null,
+      alamatpajak: dto.alamatfakturpajak || null,
+      statusaktif: dto.statusaktif || null,
+      modifiedby: dto.modifiedby,
+    };
+  }
+
+  private applyFilters(
+    qb: any,
+    filters: Record<string, any>,
+    search?: string,
+  ): void {
+    const excludeSearchKeys: string[] = [];
+
+    const searchFields = Object.keys(filters || {}).filter(
+      (k) => !excludeSearchKeys.includes(k),
+    );
+    const dateFields = ['created_at', 'updated_at'];
+    const dateOnlyFields = ['tglskb', 'tglsk'];
+    const numberFields = [
+      'creditterm',
+      'credittermplus',
+      'nominalpph21',
+      'nominalpph23',
+    ];
+
+    if (search && filters && Object.keys(filters).length > 0) {
+      const sanitizedValue = String(search).trim();
+      qb.where((query) => {
+        searchFields.forEach((field) => {
+          if (dateFields.includes(field)) {
+            // pakai query, bukan qb — statement yang ditambahkan ke qb saat
+            // callback grup dievaluasi tidak ikut ter-compile (hilang diam-diam)
+            query.orWhereRaw("to_char(u.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (dateOnlyFields.includes(field)) {
+            query.orWhereRaw("to_char(u.??, 'DD-MM-YYYY') ilike ?", [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else if (numberFields.includes(field)) {
+            query.orWhereRaw('u.??::text ilike ?', [
+              field,
+              `%${sanitizedValue}%`,
+            ]);
+          } else {
+            query.orWhere(`u.${field}`, 'ilike', `%${sanitizedValue}%`);
           }
-        }
+        });
       });
+    }
 
-      const insertedData = await trx(this.tableName)
-        .insert(await withUuidV7(trx, insertData))
-        .returning('*');
+    Object.entries(filters || {}).forEach(([key, rawValue]) => {
+      if (excludeSearchKeys.includes(key)) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '')
+        return;
 
-      const statusRelasi = await trx('parameter')
-        .select('*')
-        .where('grp', 'STATUS RELASI')
-        // parameter.text tersimpan HURUF BESAR ('SUPPLIER') sedangkan
-        // this.tableName huruf kecil. `=` di Postgres case-sensitive, jadi
-        // perbandingan langsung tak pernah cocok → statusRelasi undefined →
-        // "Cannot read properties of undefined (reading 'id')".
-        .whereRaw('upper(trim(text)) = ?', [this.tableName.toUpperCase()])
+      const sanitizedValue = String(rawValue);
+      if (dateFields.includes(key)) {
+        qb.andWhereRaw("to_char(u.??, 'DD-MM-YYYY HH24:MI:SS') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (dateOnlyFields.includes(key)) {
+        qb.andWhereRaw("to_char(u.??, 'DD-MM-YYYY') ilike ?", [
+          key,
+          `%${sanitizedValue}%`,
+        ]);
+      } else if (numberFields.includes(key)) {
+        qb.andWhereRaw('u.??::text ilike ?', [key, `%${sanitizedValue}%`]);
+      } else {
+        // ✅ prefix u. agar konsisten dengan alias view
+        qb.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
+      }
+    });
+  }
+
+  private buildInsertData(dto: any, uuid?: string): Record<string, any> {
+    return {
+      id: uuid ? uuid : dto.uuid, // id (uuidV7)
+      nama: dto.nama ? dto.nama.toUpperCase() : null,
+      keterangan: dto.keterangan ? dto.keterangan.toUpperCase() : null,
+      contactperson: dto.contactperson ? dto.contactperson.toUpperCase() : null,
+      ktp: dto.ktp ? dto.ktp.toUpperCase() : null,
+      alamat: dto.alamat ? dto.alamat.toUpperCase() : null,
+      coa: dto.coa || null,
+      coagiro: dto.coagiro || null,
+      coapiu: dto.coapiu || null,
+      coahut: dto.coahut || null,
+      kota: dto.kota ? dto.kota.toUpperCase() : null,
+      kodepos: dto.kodepos ? dto.kodepos.toUpperCase() : null,
+      telp: dto.telp ? dto.telp.toUpperCase() : null,
+      email: dto.email ? dto.email.toUpperCase() : null,
+      fax: dto.fax ? dto.fax.toUpperCase() : null,
+      web: dto.web ? dto.web.toUpperCase() : null,
+      creditterm: toNumber(dto.creditterm),
+      credittermplus: toNumber(dto.credittermplus),
+      npwp: dto.npwp ? dto.npwp.toUpperCase() : null,
+      alamatfakturpajak: dto.alamatfakturpajak
+        ? dto.alamatfakturpajak.toUpperCase()
+        : null,
+      namapajak: dto.namapajak ? dto.namapajak.toUpperCase() : null,
+      nominalpph21: toNumber(dto.nominalpph21),
+      nominalpph23: toNumber(dto.nominalpph23),
+      noskb: dto.noskb ? dto.noskb.toUpperCase() : null,
+      tglskb: formatDateToSQL(dto.tglskb),
+      nosk: dto.nosk ? dto.nosk.toUpperCase() : null,
+      tglsk: formatDateToSQL(dto.tglsk),
+      statusaktif: dto.statusaktif || null,
+      info: dto.info ?? null,
+      modifiedby: dto.modifiedby,
+      created_at: dto.created_at || this.utilsService.getTime(),
+      updated_at: dto.updated_at || this.utilsService.getTime(),
+    };
+  }
+
+  private resolvePositionOrder(
+    sortBy: string,
+    sortDirection: string,
+  ): { col: string; dir: 'asc' | 'desc' } {
+    const dir = sortDirection?.toLowerCase() === 'desc' ? 'desc' : 'asc';
+    switch (sortBy) {
+      case 'statusaktif':
+        return { col: 'statusaktif_text', dir };
+      default:
+        return { col: sortBy, dir };
+    }
+  }
+
+  async create(CreateSupplierDto: any, trx: any) {
+    try {
+      const { sortBy, sortDirection, filters, search, page, limit, info } =
+        CreateSupplierDto;
+
+      const uuid = await uuidV7(trx);
+      // Baris relasi dibuat LEBIH DULU: kolom relasi_id (NOT NULL, FK ke relasi.id)
+      // diisi id-nya, bukan dari input form.
+      const relasi = await this.relasiService.create(
+        this.buildRelasiData(
+          CreateSupplierDto,
+          await this.getStatusRelasiId(trx),
+        ),
+        trx,
+      );
+      const insertData = this.buildInsertData(CreateSupplierDto, uuid);
+      insertData.relasi_id = relasi.id;
+      await trx(this.tableName).insert(insertData);
+      const newItem = await trx(this.viewName).where('id', uuid).first();
+
+      const existingData = await trx(`${this.viewName} as u`)
+        .where('id', newItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
         .first();
 
-      const relasi = {
-        statusrelasi: statusRelasi.id,
-        nama: insertData.nama,
-        coagiro: insertData.coagiro,
-        coapiutang: insertData.coapiu,
-        coahutang: insertData.coahut,
-        alamat: insertData.alamat,
-        npwp: insertData.npwp,
-        namapajak: insertData.namapajak,
-        alamatpajak: insertData.alamatfakturpajak,
-        statusaktif: insertData.statusaktif,
-        modifiedby: insertData.modifiedby,
-      };
-      const insertRelasi = await this.relasiService.create(relasi, trx);
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
 
-      const newItem = insertedData[0];
-      await trx(this.tableName)
-        .update({
-          // relasi_id varchar(200) berisi UUID — Number(uuid) = NaN, pg
-          // menyimpannya sebagai string "NaN" dan melanggar FK ke relasi(id)
-          relasi_id: insertRelasi.id,
-        })
-        .where('id', newItem.id)
-        .returning('*');
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as u`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
 
-      const { data, pagination } = await this.findAll(
+      if (existingData) {
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as u`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
-      let dataIndex = data.findIndex((item) => item.id === newItem.id);
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
 
-      const pageNumber = pagination?.currentPage;
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(data),
-      );
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
 
+      // 6. Side-effects
       await this.logTrailService.create(
         {
-          namatable: this.tableName,
+          namatabel: this.tableName,
           postingdari: 'ADD SUPPLIER',
           idtrans: newItem.id,
           nobuktitrans: newItem.id,
@@ -161,10 +305,17 @@ export class SupplierService {
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
+
       return {
         newItem,
+        itemIndex: itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
       throw new Error(`Error creating supplier: ${error.message}`);
@@ -172,352 +323,275 @@ export class SupplierService {
   }
 
   async findAll(
-    { search, filters, pagination, sort, isLookUp }: FindAllParams,
-    trx: any,
+    {
+      search,
+      filters,
+      pagination,
+      sort,
+      isLookUp,
+      useCustomOffset,
+    }: FindAllParams,
+    trx: Knex.Transaction,
   ) {
     try {
-      let { page, limit } = pagination ?? {};
-      page = page ?? 1;
-      limit = limit ?? 0;
+      const { page = 1, limit = 0, customOffset } = pagination ?? {};
 
-      if (isLookUp) {
-        const totalData = await trx(this.tableName)
-          .count('id as total')
-          .first();
-
-        const resultTotalData = totalData?.total || 0;
-
-        if (Number(resultTotalData) > 500) {
-          return {
-            data: {
-              type: 'json',
-            },
-          };
-        } else {
-          limit = 0;
-        }
+      const sortBy = sort?.sortBy || 'nama';
+      const sortDirection =
+        sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
+      const safeFilters = filters || {};
+      const countResult = await trx(`${this.viewName} as u`)
+        .count('u.id as total')
+        .modify((qb) => this.applyFilters(qb, safeFilters, search))
+        .first();
+      const total = Number(countResult?.total ?? 0);
+      if (isLookUp && total > 500) {
+        return {
+          data: [],
+          type: 'json',
+          total,
+          pagination: {
+            currentPage: 1,
+            totalPages: 0,
+            totalItems: total,
+            itemsPerPage: 0,
+          },
+        };
       }
 
-      const query = trx
-        .from(trx.raw(`${this.tableName} as u`))
-        .select([
-          'u.id as id',
-          'u.nama',
-          'u.keterangan',
-          'u.contactperson',
-          'u.ktp',
-          'u.alamat',
-          'u.coa',
-          'u.coapiu',
-          'u.coahut',
-          'u.coagiro',
-          'u.kota',
-          'u.kodepos',
-          'u.telp',
-          'u.email',
-          'u.fax',
-          'u.web',
-          'u.creditterm',
-          'u.credittermplus',
-          'u.npwp',
-          'u.alamatfakturpajak',
-          'u.namapajak',
-          'u.nominalpph21',
-          'u.nominalpph23',
-          'u.noskb',
-          trx.raw("TO_CHAR(u.tglskb, 'DD-MM-YYYY') as tglskb"),
-          'u.nosk',
-          trx.raw("TO_CHAR(u.tglsk, 'DD-MM-YYYY') as tglsk"),
-          'u.statusaktif',
-          'u.modifiedby',
-          trx.raw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
-          trx.raw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
-          'p.memo',
-          'p.text as statusaktif_nama',
-          'coa.keterangancoa as coa_nama',
-          'coapiu.keterangancoa as coapiu_nama',
-          'coahut.keterangancoa as coahut_nama',
-          'coagiro.keterangancoa as coagiro_nama',
-        ])
-        .leftJoin('parameter as p', 'u.statusaktif', 'p.id')
-        .leftJoin('akunpusat as coa', 'u.coa', 'coa.coa')
-        .leftJoin('akunpusat as coapiu', 'u.coapiu', 'coapiu.coa')
-        .leftJoin('akunpusat as coahut', 'u.coahut', 'coahut.coa')
-        .leftJoin('akunpusat as coagiro', 'u.coagiro', 'coagiro.coa');
+      // Data dari view (mengandung _text, _memo, dll)
+      const query = trx(`${this.viewName} as u`).select([
+        'u.id',
+        'u.nama',
+        'u.keterangan',
+        'u.contactperson',
+        'u.ktp',
+        'u.alamat',
+        'u.coa',
+        'u.coa_text',
+        'u.coagiro',
+        'u.coagiro_text',
+        'u.coapiu',
+        'u.coapiu_text',
+        'u.coahut',
+        'u.coahut_text',
+        'u.kota',
+        'u.kodepos',
+        'u.telp',
+        'u.email',
+        'u.fax',
+        'u.web',
+        'u.creditterm',
+        'u.credittermplus',
+        'u.npwp',
+        'u.alamatfakturpajak',
+        'u.namapajak',
+        'u.nominalpph21',
+        'u.nominalpph23',
+        'u.noskb',
+        trx.raw("to_char(u.tglskb, 'DD-MM-YYYY') as tglskb"),
+        'u.nosk',
+        trx.raw("to_char(u.tglsk, 'DD-MM-YYYY') as tglsk"),
+        'u.statusaktif',
+        'u.statusaktif_text',
+        'u.statusaktif_memo',
+        'u.info',
+        'u.modifiedby',
+        trx.raw("to_char(u.created_at, 'DD-MM-YYYY HH24:MI:SS') as created_at"),
+        trx.raw("to_char(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') as updated_at"),
+      ]);
 
-      if (search) {
-        const sanitizedValue = String(search);
-        query.where((builder) => {
-          builder
-            .orWhere('u.nama', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.keterangan', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.contactperson', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.ktp', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.alamat', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('coa.keterangancoa', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('coapiu.keterangancoa', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('coahut.keterangancoa', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('coagiro.keterangancoa', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.kota', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.kodepos', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.telp', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.email', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.fax', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.web', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.creditterm', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.credittermplus', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.npwp', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.alamatfakturpajak', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.namapajak', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.nominalpph21', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.nominalpph23', 'ilike', `%${sanitizedValue}%`)
-            .orWhere('u.noskb', 'ilike', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.tglskb, 'DD-MM-YYYY') ILIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhere('u.nosk', 'ilike', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.tglsk, 'DD-MM-YYYY') ILIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhere('u.modifiedby', 'ilike', `%${sanitizedValue}%`)
-            .orWhereRaw("TO_CHAR(u.created_at, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-              `%${sanitizedValue}%`,
-            ])
-            .orWhereRaw("TO_CHAR(u.updated_at, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-              `%${sanitizedValue}%`,
-            ]);
-        });
+      query.modify((qb) => this.applyFilters(qb, safeFilters, search));
+
+      if (sortBy === 'statusaktif') {
+        query.orderBy('u.statusaktif_text', sortDirection);
+      } else {
+        query.orderBy(`u.${sortBy}`, sortDirection);
       }
 
-      if (filters) {
-        for (const [key, value] of Object.entries(filters)) {
-          const sanitizedValue = String(value);
-          if (value) {
-            if (key === 'created_at' || key === 'updated_at') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY HH24:MI:SS') ILIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'tglskb' || key === 'tglsk') {
-              query.andWhereRaw("TO_CHAR(u.??, 'DD-MM-YYYY') ILIKE ?", [
-                key,
-                `%${sanitizedValue}%`,
-              ]);
-            } else if (key === 'statusaktif_text') {
-              query.andWhere(`p.id`, '=', sanitizedValue);
-            } else if (key === 'coa_text') {
-              query.andWhere(`coa.keterangancoa`, '=', sanitizedValue);
-            } else if (key === 'coapiu_text') {
-              query.andWhere(
-                'coapiu.keterangancoa',
-                'ilike',
-                `%${sanitizedValue}%`,
-              );
-            } else if (key === 'coahut_text') {
-              query.andWhere(`coahut.keterangancoa`, '=', sanitizedValue);
-            } else if (key === 'coagiro_text') {
-              query.andWhere(`coagiro.keterangancoa`, '=', sanitizedValue);
-            } else {
-              query.andWhere(`u.${key}`, 'ilike', `%${sanitizedValue}%`);
-            }
-          }
-        }
-      }
+      const offset =
+        useCustomOffset === true && customOffset !== undefined
+          ? customOffset
+          : (page - 1) * limit;
 
       if (limit > 0) {
-        const offset = (page - 1) * limit;
-        query.limit(limit).offset(offset);
+        query.offset(offset).limit(limit);
       }
-
-      if (sort?.sortBy && sort?.sortDirection) {
-        if (sort?.sortBy == 'coa') {
-          query.orderBy('coa.keterangancoa', sort.sortDirection);
-        } else if (sort?.sortBy == 'coapiu') {
-          query.orderBy('coapiu.keterangancoa', sort.sortDirection);
-        } else if (sort?.sortBy == 'coahut') {
-          query.orderBy('coahut.keterangancoa', sort.sortDirection);
-        } else if (sort?.sortBy == 'coagiro') {
-          query.orderBy('coagiro.keterangancoa', sort.sortDirection);
-        } else if (sort?.sortBy == 'statusaktif') {
-          const memoExpr = '(CASE WHEN p.memo IS JSON THEN p.memo::jsonb END)';
-          query.orderByRaw(
-            `JSON_VALUE(${memoExpr}, '$.MEMO') ${sort.sortDirection}`,
-          );
-        } else {
-          query.orderBy(sort.sortBy, sort.sortDirection);
-        }
-      }
-
-      const result = await trx(this.tableName).count('id as total').first();
-      const total = result?.total as number;
-      const totalPages = Math.ceil(total / limit);
       const data = await query;
-      const responseType = Number(total) > 500 ? 'json' : 'local';
+      const totalPages = Math.ceil(total / limit);
+      const responseType = total > 500 ? 'json' : 'local';
 
       return {
-        data: data,
+        data,
         type: responseType,
         total,
         pagination: {
           currentPage: Number(page),
-          totalPages: totalPages,
+          totalPages,
           totalItems: total,
-          itemsPerPage: limit > 0 ? limit : total,
+          itemsPerPage: limit,
         },
       };
     } catch (error) {
-      console.error('Error to findAll Supplier', error);
-      throw new Error(error);
+      this.logger.error('Error fetching supplier data', error?.stack);
+      throw new InternalServerErrorException('Failed to fetch supplier data');
     }
   }
 
-  async update(dataId: string, data: any, trx: any) {
+  async update(id: string, data: any, trx: any) {
     try {
-      const existingData = await trx(this.tableName)
-        .where('id', dataId)
-        .first();
+      const existedData = await trx(this.tableName).where('id', id).first();
 
-      if (!existingData) {
-        throw new HttpException(
-          {
-            statusCode: HttpStatus.BAD_REQUEST,
-            message: 'Data Not Found!',
-          },
-          HttpStatus.BAD_REQUEST,
-        );
+      if (!existedData) {
+        throw new Error('Supplier not found');
       }
 
-      const {
-        sortBy,
-        sortDirection,
-        filters,
-        search,
-        page,
-        limit,
-        method,
-        statusaktif_nama,
-        coa_nama,
-        coapiu_nama,
-        coahut_nama,
-        coagiro_nama,
-        id,
-        ...updateData
-      } = data;
-
-      Object.keys(updateData).forEach((key) => {
-        if (typeof updateData[key] === 'string') {
-          const value = updateData[key];
-          const dateRegex = /^\d{2}-\d{2}-\d{4}$/;
-
-          if (dateRegex.test(value)) {
-            updateData[key] = formatDateToSQL(value);
-          } else {
-            updateData[key] = updateData[key].toUpperCase();
-          }
-        }
-      });
-
-      const hasChanges = this.utilService.hasChanges(updateData, existingData);
-      if (hasChanges) {
-        updateData.updated_at = this.utilService.getTime();
-        await trx(this.tableName).where('id', dataId).update(updateData);
+      // Cek unik di DALAM transaksi (lihat NOTE di update-supplier.dto.ts).
+      const duplicateNama =
+        data.nama &&
+        (await trx(this.tableName)
+          .whereRaw('lower(trim(??)) = lower(trim(?))', ['nama', data.nama])
+          .whereNot('id', id)
+          .first());
+      if (duplicateNama) {
+        throw new BadRequestException([
+          { path: ['nama'], message: 'Supplier dengan nama ini sudah ada' },
+        ]);
       }
 
-      const statusRelasi = await trx('parameter')
-        .select('*')
-        .where('grp', 'STATUS RELASI')
-        // parameter.text tersimpan HURUF BESAR ('SUPPLIER') sedangkan
-        // this.tableName huruf kecil. `=` di Postgres case-sensitive, jadi
-        // perbandingan langsung tak pernah cocok → statusRelasi undefined →
-        // "Cannot read properties of undefined (reading 'id')".
-        .whereRaw('upper(trim(text)) = ?', [this.tableName.toUpperCase()])
-        .first();
+      const { sortBy, sortDirection, filters, search, limit } = data;
+      const insertData = this.buildInsertData(data);
+      delete insertData.id;
+      delete insertData.created_at;
 
-      const relasi = {
-        statusrelasi: statusRelasi.id,
-        nama: updateData.nama,
-        coagiro: updateData.coagiro,
-        coapiutang: updateData.coapiu,
-        coahutang: updateData.coahut,
-        alamat: updateData.alamat,
-        npwp: updateData.npwp,
-        namapajak: updateData.namapajak,
-        alamatpajak: updateData.alamatfakturpajak,
-        statusaktif: updateData.statusaktif,
-        modifiedby: updateData.modifiedby,
-      };
-
-      const updateRelasi = await this.relasiService.update(
-        existingData.relasi_id,
-        relasi,
-        trx,
+      // Ikut perbarui baris relasi. Data lama yang belum punya relasi dibuatkan sekarang.
+      const relasiData = this.buildRelasiData(
+        data,
+        await this.getStatusRelasiId(trx),
       );
-      const { data: filteredData, pagination } = await this.findAll(
+      if (existedData.relasi_id) {
+        await this.relasiService.update(existedData.relasi_id, relasiData, trx);
+      } else {
+        const relasi = await this.relasiService.create(relasiData, trx);
+        insertData.relasi_id = relasi.id;
+      }
+
+      const hasChanges = this.utilsService.hasChanges(insertData, existedData);
+
+      if (hasChanges) {
+        insertData.updated_at = this.utilsService.getTime();
+        await trx(this.tableName).where('id', id).update(insertData);
+      }
+
+      // Ambil baris yang SUDAH diperbarui dari view — sama persis seperti create
+      // mengambil `newItem` by uuid. View memuat kolom turunan (_text/_memo)
+      // yang tidak ada di tabel base; dipakai untuk acuan posisi dan
+      // sebagai data balikan agar polanya konsisten dengan ADD. Query tanpa
+      // filter supaya baris selalu ketemu walau hasil edit tak lagi cocok
+      // dengan filter aktif.
+      const updatedItem = await trx(this.viewName).where('id', id).first();
+
+      const existingData = await trx(`${this.viewName} as u`)
+        .where('id', updatedItem.id)
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+
+      // 3. Hitung posisi & total dengan filter yang sama
+      let posisi: number;
+      let totalItems: number;
+
+      // totalItems selalu dihitung dengan filter — fix bug utama
+      const totalRecords = await trx(`${this.viewName} as u`)
+        .count('id as total')
+        .modify((qb) => this.applyFilters(qb, filters, search))
+        .first();
+      totalItems = Number(totalRecords?.total ?? 0);
+      if (existingData) {
+        // Sama seperti create: hitung posisi memakai kolom & arah yang sama
+        // dengan urutan tampil grid (kolom teks untuk status), bukan id UUID.
+        const { col: posCol, dir: posDir } = this.resolvePositionOrder(
+          sortBy,
+          sortDirection,
+        );
+        const resultposition = await trx(`${this.viewName} as u`)
+          .count('* as posisi')
+          .where(posCol, posDir === 'desc' ? '>=' : '<=', existingData[posCol])
+          .modify((qb) => this.applyFilters(qb, filters, search))
+          .first();
+
+        posisi = Number(resultposition?.posisi ?? 0);
+      } else {
+        posisi = 1;
+      }
+
+      // 4. Pagination
+      const pageNumber = Math.ceil(posisi / limit);
+      const totalPages = Math.ceil(totalItems / limit);
+      const fetchedPages = getFetchedPages(pageNumber, totalPages);
+
+      const startPage = fetchedPages[0];
+      const endPage = fetchedPages[fetchedPages.length - 1];
+      const customOffset = (startPage - 1) * limit;
+      const totalDataNeeded = (endPage - startPage + 1) * limit;
+
+      // 5. Fetch sekali, split di memory
+      const result = await this.findAll(
         {
-          search,
-          filters,
-          pagination: { page, limit: 0 },
-          sort: { sortBy, sortDirection },
+          search: search || '',
+          filters: filters || {},
+          pagination: { page: startPage, limit: totalDataNeeded, customOffset },
+          sort: { sortBy, sortDirection: sortDirection.toLowerCase() },
           isLookUp: false,
+          useCustomOffset: true,
         },
         trx,
       );
 
-      let dataIndex = filteredData.findIndex(
-        (item) => String(item.id) === String(dataId),
-      );
-      if (dataIndex === -1) {
-        dataIndex = 0;
-      }
+      const allFetchedData = result?.data ?? [];
+      const pagedData: Record<number, any[]> = {};
+      let dataIndex = 0;
+      fetchedPages.forEach((pageNum) => {
+        pagedData[pageNum] = allFetchedData.slice(dataIndex, dataIndex + limit);
+        dataIndex += limit;
+      });
 
-      // if (dataIndex === -1) {
-      //   throw new Error('Updated item not found in all items');
-      // }
-
-      const itemsPerPage = limit || 30;
-      const pageNumber = Math.floor(dataIndex / itemsPerPage) + 1;
-      const endIndex = pageNumber * itemsPerPage;
-      const limitedItems = filteredData.slice(0, endIndex);
-
-      await this.redisService.set(
-        `${this.tableName}-allItems`,
-        JSON.stringify(limitedItems),
-      );
-
+      const itemIndex = calculateItemIndex(Number(posisi), fetchedPages, limit);
       await this.logTrailService.create(
         {
           namatabel: this.tableName,
           postingdari: 'EDIT SUPPLIER',
-          idtrans: dataId,
-          nobuktitrans: dataId,
+          idtrans: updatedItem.id,
+          nobuktitrans: updatedItem.id,
           aksi: 'EDIT',
-          datajson: JSON.stringify(data),
-          modifiedby: data.modifiedby,
+          datajson: JSON.stringify(updatedItem),
+          modifiedby: updatedItem.modifiedby,
         },
         trx,
       );
 
+      await this.redisService.set(
+        `${this.tableName}-page-${pageNumber}`,
+        JSON.stringify(allFetchedData),
+      );
       return {
-        newItems: {
-          dataId,
-          ...data,
-        },
+        updatedItem,
+        itemIndex: itemIndex.zeroBasedIndex < 0 ? 0 : itemIndex.zeroBasedIndex,
         pageNumber,
-        dataIndex,
+        fetchedPages,
+        pagedData,
       };
     } catch (error) {
+      console.error('Error updating Supplier:', error);
       if (error instanceof HttpException) {
-        throw error; // If it's already a HttpException, rethrow it
+        throw error;
       }
-
-      console.error('Error updating supplier:', error);
-      throw new Error('Failed to update supplier');
+      throw new Error('Failed to update Supplier');
     }
   }
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilService.lockAndDestroy(
+      const deletedData = await this.utilsService.lockAndDestroy(
         id,
         this.tableName,
         'id',
@@ -528,8 +602,8 @@ export class SupplierService {
         {
           namatabel: this.tableName,
           postingdari: 'DELETE SUPPLIER',
-          idtrans: id,
-          nobuktitrans: id,
+          idtrans: deletedData.id,
+          nobuktitrans: deletedData.id,
           aksi: 'DELETE',
           datajson: JSON.stringify(deletedData),
           modifiedby: modifiedby,
@@ -537,19 +611,14 @@ export class SupplierService {
         trx,
       );
 
-      const dataRelasi = await this.relasiService.delete(
-        deletedData.relasi_id,
-        trx,
-        modifiedby,
-      );
+      // Baris supplier sudah terhapus (FK-nya ke relasi), baru relasinya ikut dihapus.
+      if (deletedData.relasi_id) {
+        await this.relasiService.delete(deletedData.relasi_id, trx, modifiedby);
+      }
 
-      return {
-        status: 200,
-        message: 'Data deleted successfully',
-        deletedData,
-      };
+      return { status: 200, message: 'Data deleted successfully', deletedData };
     } catch (error) {
-      console.error('Error deleting data: ', error);
+      console.error('Error deleting data:', error);
       if (error instanceof HttpException) {
         throw error;
       }
@@ -557,63 +626,242 @@ export class SupplierService {
     }
   }
 
-  async checkValidasi(aksi: string, value: any, editedby: any, trx: any) {
-    try {
-      if (aksi === 'EDIT') {
-        const forceEdit = await this.locksService.forceEdit(
-          this.tableName,
-          value,
-          editedby,
-          trx,
-        );
+  /** Kolom yang benar-benar dipakai file export — bukan seluruh kolom view. */
+  private readonly EXPORT_COLUMNS = [
+    'u.nama',
+    'u.keterangan',
+    'u.contactperson',
+    'u.ktp',
+    'u.alamat',
+    'u.coa_text',
+    'u.coagiro_text',
+    'u.coapiu_text',
+    'u.coahut_text',
+    'u.kota',
+    'u.kodepos',
+    'u.telp',
+    'u.email',
+    'u.fax',
+    'u.web',
+    'u.creditterm',
+    'u.credittermplus',
+    'u.npwp',
+    'u.alamatfakturpajak',
+    'u.namapajak',
+    'u.nominalpph21',
+    'u.nominalpph23',
+    'u.noskb',
+    'u.nosk',
+    'u.statusaktif_text',
+  ];
 
-        return forceEdit;
-      } else if (aksi === 'DELETE') {
-        const supplierData = await trx(this.tableName)
-          .where('id', value)
-          .first();
-        if (!supplierData) {
-          return { status: 'success', message: 'Data aman untuk dihapus.' };
-        }
+  /**
+   * Query dasar export: filter & sort yang sama dengan findAll, TANPA paging
+   * dan hanya kolom yang dipakai file Excel.
+   *
+   * Dipisah supaya export bisa di-stream lewat cursor (`.stream()`) — menarik
+   * jutaan baris view lengkap ke sebuah array lebih dulu adalah yang membuat
+   * proses kehabisan heap.
+   */
+  buildExportQuery(
+    {
+      search,
+      filters,
+      sort,
+    }: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    db: any,
+  ) {
+    const safeFilters = filters || {};
+    const sortBy = sort?.sortBy || 'nama';
+    const sortDirection =
+      sort?.sortDirection?.toLowerCase() === 'asc' ? 'asc' : 'desc';
 
-        // Cek supplier.id dipakai transaksi ATAU relasinya dipakai transaksi.
-        // Untuk relasi, kecualikan tabel `supplier` (self-reference yang ikut
-        // terhapus saat delete).
-        let used = await this.utilService.findFirstReference(
-          this.tableName,
-          value,
-          trx,
-        );
-        if (!used && supplierData.relasi_id) {
-          used = await this.utilService.findFirstReference(
-            'relasi',
-            supplierData.relasi_id,
-            trx,
-            [this.tableName],
-          );
-        }
-        if (used) {
-          return {
-            status: 'failed',
-            message: `Data tidak dapat dihapus karena masih digunakan pada tabel ${used.ref_table}.`,
-          };
-        }
+    const query = db(`${this.viewName} as u`)
+      .select(this.EXPORT_COLUMNS)
+      .select(db.raw("to_char(u.tglskb, 'DD-MM-YYYY') as tglskb"))
+      .select(db.raw("to_char(u.tglsk, 'DD-MM-YYYY') as tglsk"))
+      .modify((qb: any) => this.applyFilters(qb, safeFilters, search));
 
-        return { status: 'success', message: 'Data aman untuk dihapus.' };
-      }
-    } catch (error) {
-      console.error('Error di checkValidasi:', error);
-      throw new InternalServerErrorException('Failed to check validation');
+    if (sortBy === 'statusaktif') {
+      query.orderBy('u.statusaktif_text', sortDirection);
+    } else {
+      query.orderBy(`u.${sortBy}`, sortDirection);
     }
+
+    return query;
   }
 
-  async exportToExcel(data: any[]) {
+  /**
+   * Jumlah baris yang akan diekspor. Dihitung dari VIEW karena filter grid
+   * memakai kolom teks lookup (`*_text`) yang tidak ada di tabel base.
+   * Dipakai untuk progres export yang sebenarnya.
+   */
+  async countExportRows(
+    { search, filters }: Pick<FindAllParams, 'search' | 'filters'>,
+    db: any,
+  ): Promise<number> {
+    const result = await db(`${this.viewName} as u`)
+      .count('u.id as total')
+      .modify((qb: any) => this.applyFilters(qb, filters || {}, search))
+      .first();
+
+    return Number(result?.total ?? 0);
+  }
+
+  /**
+   * Data LaporanSupplier.mrt: baris yang lolos filter & sort grid. Memakai
+   * query export karena kolom yang dibaca template sama dengan EXPORT_COLUMNS.
+   */
+  async loadReportData(
+    params: Pick<FindAllParams, 'search' | 'filters' | 'sort'>,
+    { username, judullaporan }: { username: string; judullaporan?: string },
+    db: any,
+  ) {
+    const rows = await this.buildExportQuery(params, db);
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const tglcetak =
+      `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return rows.map((row: any) => ({
+      ...row,
+      judullaporan: judullaporan ?? 'Laporan Supplier',
+      usercetak: username,
+      tglcetak,
+      judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+    }));
+  }
+
+  /** Definisi sheet export — dipakai jalur background (streaming). */
+  readonly exportSheet = {
+    sheetName: 'Data Export',
+    titleLines: [
+      'PT. TRANSPORINDO AGUNG SEJAHTERA',
+      'LAPORAN SUPPLIER',
+      'Data Export',
+    ],
+    headers: [
+      'NO.',
+      'NAMA',
+      'KETERANGAN',
+      'CONTACTPERSON',
+      'KTP',
+      'ALAMAT',
+      'COA',
+      'COAGIRO',
+      'COAPIU',
+      'COAHUT',
+      'KOTA',
+      'KODEPOS',
+      'TELP',
+      'EMAIL',
+      'FAX',
+      'WEB',
+      'CREDITTERM',
+      'CREDITTERMPLUS',
+      'NPWP',
+      'ALAMATFAKTURPAJAK',
+      'NAMAPAJAK',
+      'NOMINALPPH21',
+      'NOMINALPPH23',
+      'NOSKB',
+      'TGLSKB',
+      'NOSK',
+      'TGLSK',
+      'STATUSAKTIF',
+    ],
+    columnWidths: [
+      5, 25, 25, 30, 30, 25, 20, 20, 20, 20, 30, 30, 30, 30, 30, 30, 20, 20, 30,
+      30, 30, 20, 20, 30, 20, 30, 20, 20,
+    ],
+    columnFormats: [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      { numFmt: EXCEL_FORMAT.ANGKA },
+      { numFmt: EXCEL_FORMAT.ANGKA },
+      null,
+      null,
+      null,
+      { numFmt: EXCEL_FORMAT.ANGKA_DESIMAL },
+      { numFmt: EXCEL_FORMAT.ANGKA_DESIMAL },
+      null,
+      null,
+      null,
+      null,
+      null,
+    ],
+
+    // Mode streaming tidak bisa auto-fit, jadi lebarnya ditetapkan di sini.
+    mapRow: (row: any, rowNumber: number) => [
+      rowNumber,
+      row.nama,
+      row.keterangan,
+      row.contactperson,
+      row.ktp,
+      row.alamat,
+      row.coa_text,
+      row.coagiro_text,
+      row.coapiu_text,
+      row.coahut_text,
+      row.kota,
+      row.kodepos,
+      row.telp,
+      row.email,
+      row.fax,
+      row.web,
+      row.creditterm === null || row.creditterm === undefined
+        ? null
+        : Number(row.creditterm),
+      row.credittermplus === null || row.credittermplus === undefined
+        ? null
+        : Number(row.credittermplus),
+      row.npwp,
+      row.alamatfakturpajak,
+      row.namapajak,
+      row.nominalpph21 === null || row.nominalpph21 === undefined
+        ? null
+        : Number(row.nominalpph21),
+      row.nominalpph23 === null || row.nominalpph23 === undefined
+        ? null
+        : Number(row.nominalpph23),
+      row.noskb,
+      row.tglskb,
+      row.nosk,
+      row.tglsk,
+      row.statusaktif_text,
+    ],
+  };
+
+  /**
+   * Merakit workbook Excel dan mengembalikannya sebagai buffer.
+   *
+   * Hanya untuk export kecil (endpoint GET /supplier/export yang lama):
+   * seluruh data ditampung di memori. Export lewat background job memakai
+   * ExportJobService yang streaming.
+   */
+  async buildExcelBuffer(data: any[]): Promise<Buffer> {
     const workbook = new Workbook();
     const worksheet = workbook.addWorksheet('Data Export');
 
-    worksheet.mergeCells('A1:J1');
-    worksheet.mergeCells('A2:J2');
-    worksheet.mergeCells('A3:J3');
+    worksheet.mergeCells('A1:AB1');
+    worksheet.mergeCells('A2:AB2');
+    worksheet.mergeCells('A3:AB3');
     worksheet.getCell('A1').value = 'PT. TRANSPORINDO AGUNG SEJAHTERA';
     worksheet.getCell('A2').value = 'LAPORAN SUPPLIER';
     worksheet.getCell('A3').value = 'Data Export';
@@ -629,36 +877,35 @@ export class SupplierService {
       };
     });
 
-    // Mendefinisikan header kolom
     const headers = [
       'NO.',
       'NAMA',
       'KETERANGAN',
-      'CONTACT PERSON',
+      'CONTACTPERSON',
       'KTP',
       'ALAMAT',
       'COA',
-      'COA PIUTANG',
-      'COA HUTANG',
-      'COA GIRO',
+      'COAGIRO',
+      'COAPIU',
+      'COAHUT',
       'KOTA',
-      'KODE POS',
+      'KODEPOS',
       'TELP',
       'EMAIL',
       'FAX',
       'WEB',
-      'CREDIT TERM',
-      'CREDIT TERM PLUS',
+      'CREDITTERM',
+      'CREDITTERMPLUS',
       'NPWP',
-      'ALAMAT FAKTUR PAJAK',
-      'NAMA PAJAK',
-      'NOMINAL PPH 21',
-      'NOMINAL PPH 23',
-      'NO SKB',
-      'TGL SKB',
-      'NO SK',
-      'TGL SK',
-      'STATUS AKTIF',
+      'ALAMATFAKTURPAJAK',
+      'NAMAPAJAK',
+      'NOMINALPPH21',
+      'NOMINALPPH23',
+      'NOSKB',
+      'TGLSKB',
+      'NOSK',
+      'TGLSK',
+      'STATUSAKTIF',
     ];
 
     headers.forEach((header, index) => {
@@ -671,20 +918,9 @@ export class SupplierService {
       };
       cell.font = { bold: true, name: 'Tahoma', size: 10 };
       cell.alignment = {
-        horizontal: 'center',
+        horizontal: index === 0 ? 'right' : 'center',
         vertical: 'middle',
       };
-
-      // if (index === 2) {
-      //   cell.alignment = { horizontal: 'right', vertical: 'middle' };
-      //   cell.numFmt = '0'; // angka polos tanpa ribuan / desimal
-      // } else {
-      //   cell.alignment = {
-      //     horizontal: index === 0 ? 'right' : 'left',
-      //     vertical: 'middle',
-      //   };
-      // }
-
       cell.border = {
         top: { style: 'thin' },
         left: { style: 'thin' },
@@ -702,10 +938,10 @@ export class SupplierService {
         row.contactperson,
         row.ktp,
         row.alamat,
-        row.coa_nama,
-        row.coapiu_nama,
-        row.coahut_nama,
-        row.coagiro_nama,
+        row.coa_text,
+        row.coagiro_text,
+        row.coapiu_text,
+        row.coahut_text,
         row.kota,
         row.kodepos,
         row.telp,
@@ -723,46 +959,16 @@ export class SupplierService {
         row.tglskb,
         row.nosk,
         row.tglsk,
-        row.statusaktif_nama,
+        row.statusaktif_text,
       ];
-
       rowValues.forEach((value, colIndex) => {
         const cell = worksheet.getCell(currentRow, colIndex + 1);
-
-        if (
-          colIndex === 4 ||
-          colIndex === 11 ||
-          colIndex === 12 ||
-          colIndex === 16 ||
-          colIndex === 17
-        ) {
-          cell.value = Number(value);
-          cell.numFmt = '0'; // format angka dengan ribuan
-          cell.alignment = {
-            horizontal: 'right',
-            vertical: 'middle',
-          };
-        } else if (colIndex === 21 || colIndex === 22) {
-          cell.value = Number(value);
-          cell.numFmt = '"Rp"#,##0'; // format angka dengan ribuan
-          cell.alignment = {
-            horizontal: 'right',
-            vertical: 'middle',
-          };
-        } else {
-          cell.value = value ?? '';
-          cell.alignment = {
-            horizontal: colIndex === 0 ? 'right' : 'left',
-            vertical: 'middle',
-          };
-        }
-
-        // cell.value = value ?? '';
+        cell.value = value ?? '';
         cell.font = { name: 'Tahoma', size: 10 };
-        // cell.alignment = {
-        //   horizontal: colIndex === 0 ? 'right' : 'left',
-        //   vertical: 'middle',
-        // };
+        cell.alignment = {
+          horizontal: colIndex === 0 ? 'right' : 'left',
+          vertical: 'middle',
+        };
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
@@ -783,7 +989,20 @@ export class SupplierService {
         col.width = maxLength + 2;
       });
 
+    const adjustCols: number[] = [28];
+    adjustCols.forEach((colIndex) => {
+      const col = worksheet.getColumn(colIndex);
+      const currentWidth = col.width ?? 20;
+      col.width = Math.max(10, currentWidth / 2);
+    });
+
     worksheet.getColumn(1).width = 6;
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  async exportToExcel(data: any[]) {
+    const buffer = await this.buildExcelBuffer(data);
 
     const tempDir = path.resolve(process.cwd(), 'tmp');
     if (!fs.existsSync(tempDir)) {
@@ -794,12 +1013,8 @@ export class SupplierService {
       tempDir,
       `laporan_supplier_${Date.now()}.xlsx`,
     );
-    await workbook.xlsx.writeFile(tempFilePath);
+    await fs.promises.writeFile(tempFilePath, buffer);
 
     return tempFilePath;
-  }
-
-  findOne(id: string) {
-    return `This action returns a #${id} supplier`;
   }
 }

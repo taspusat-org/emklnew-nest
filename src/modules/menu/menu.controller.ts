@@ -34,6 +34,8 @@ import { KeyboardOnlyValidationPipe } from 'src/common/pipes/keyboardonly-valida
 import { UtilsService } from 'src/utils/utils.service';
 import { ExportJobService } from 'src/common/report/export-job.service';
 import { ExportMenuDto, ExportMenuSchema } from './dto/export-menu.dto';
+import { ReportUserDto, ReportUserSchema } from '../user/dto/report-user.dto';
+import { ReportJobService } from 'src/common/report/report-job.service';
 
 @Controller('menu')
 export class MenuController {
@@ -41,6 +43,7 @@ export class MenuController {
     private readonly menuService: MenuService,
     private readonly utilsService: UtilsService,
     private readonly exportJobService: ExportJobService,
+    private readonly reportJobService: ReportJobService,
   ) {}
   @Get('sidebar')
   menuSidebar(@Query('userId') userId: number) {
@@ -60,7 +63,7 @@ export class MenuController {
   ) {
     try {
       const menus = await this.menuService.getSearchMenu(userId, search);
-      return {data:menus};
+      return { data: menus };
     } catch (error) {
       console.error('Error searching menu:', error);
       throw new InternalServerErrorException('Failed to fetch search menus');
@@ -100,9 +103,59 @@ export class MenuController {
     }
   }
 
-  @Post('report-byselect')
-  async findAllByIds(@Body() ids: { id: string }[]) {
-    return this.menuService.findAllByIds(ids);
+  @UseGuards(AuthGuard)
+  @Post('report')
+  async report(
+    @Body(new ZodValidationPipe(ReportUserSchema))
+    body: ReportUserDto,
+    @Req() req,
+  ) {
+    const { mrtName, search, filters, sortBy, sortDirection, judullaporan } =
+      body;
+
+    const username = req.user?.user?.username ?? 'unknown';
+
+    return this.reportJobService.start({
+      mrtName,
+      loadData: async () => {
+        // Sengaja TANPA transaksi: ini murni pembacaan untuk laporan, dan
+        // job-nya berumur panjang (render bisa menit-an). Membuka transaksi
+        // di sini hanya menahan koneksi ke database remote lebih lama tanpa
+        // manfaat konsistensi apa pun. `findAll` cukup menerima instance knex
+        // karena hanya memakai API baca (from/raw/count).
+        const result = await this.menuService.findAll(
+          {
+            search,
+            filters: (filters ?? {}) as Record<string, string | number>,
+            // limit 0 = tanpa paging, ambil semua baris yang lolos filter.
+            pagination: { page: 1, limit: 0 },
+            sort: {
+              sortBy: sortBy || 'username',
+              sortDirection: sortDirection || 'asc',
+            },
+            isLookUp: false,
+          },
+          dbMssql,
+        );
+
+        const rows = Array.isArray(result?.data) ? result.data : [];
+
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const tglcetak =
+          `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+        // Kolom tambahan di bawah dipakai header template .mrt.
+        return rows.map((row: any) => ({
+          ...row,
+          judullaporan: judullaporan ?? 'Laporan Menu',
+          usercetak: username,
+          tglcetak,
+          judul: 'PT.TRANSPORINDO AGUNG SEJAHTERA',
+        }));
+      },
+    });
   }
 
   @Get()

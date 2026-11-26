@@ -45,11 +45,10 @@ export class MenuService {
       'u.title',
       'u.aco_id',
       'u.icon',
-      // Kolom fisiknya `parentid` & `isactive` (Postgres melipat identifier
-      // tanpa kutip jadi huruf kecil). Di-alias ke camelCase supaya kontrak
-      // JSON ke frontend tidak berubah.
+      // Kolom fisiknya `parentid` (Postgres melipat identifier tanpa kutip
+      // jadi huruf kecil). Di-alias ke camelCase supaya kontrak JSON ke
+      // frontend tidak berubah.
       'u.parentid as parentId',
-      'u.isactive as isActive',
       'u.order',
       'u.statusaktif',
       'u.modifiedby',
@@ -149,12 +148,7 @@ export class MenuService {
       title: dto.title ? dto.title.toUpperCase() : null,
       aco_id: dto.aco_id ?? null,
       icon: dto.icon ? dto.icon.toUpperCase() : null,
-      // Nama kolom fisik huruf kecil. `isactive` bertipe BOOLEAN — frontend
-      // mengirim angka 1/0, dan Postgres menolak integer untuk kolom boolean.
-      isactive:
-        dto.isActive === undefined || dto.isActive === null
-          ? true
-          : Boolean(dto.isActive),
+      // Nama kolom fisik huruf kecil.
       parentid: dto.parentId ?? null,
       order: dto.order ?? null,
       statusaktif: dto.statusaktif,

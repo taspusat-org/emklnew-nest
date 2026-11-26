@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -615,6 +616,13 @@ export class UtilsService {
       return record;
     } catch (error) {
       console.error('Error di lockAndDestroy:', error);
+      // 23503 = foreign_key_violation. Tanpa ini service membungkusnya jadi
+      // 500 "Failed to delete data" dan user hanya melihat pesan generik.
+      if ((error as { code?: string })?.code === '23503') {
+        throw new BadRequestException(
+          'DATA TIDAK DAPAT DIHAPUS KARENA MASIH DIGUNAKAN PADA DATA LAIN.',
+        );
+      }
       throw error;
     }
   }
@@ -829,7 +837,7 @@ export class UtilsService {
             `CASE WHEN acos.method = 'GET' THEN LOWER(acos.class) ELSE NULL END AS url`,
           ),
           'menus.icon',
-          'menus.isactive as isActive',
+          'menus.statusaktif',
           'menus.parentid as parentId',
           'menus.order',
         )
@@ -856,7 +864,7 @@ export class UtilsService {
         title: menu.title,
         url: menu.url || '',
         icon: menu.icon || '',
-        isActive: menu.isActive === true,
+        statusaktif: menu.statusaktif,
         order: menu.order || 0,
         parentId: menu.parentId || 0,
         items: [],

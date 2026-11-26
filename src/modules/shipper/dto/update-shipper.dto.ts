@@ -9,10 +9,6 @@ import { zodDateField, zodNumberField } from 'src/utils/field-helpers';
 export const UpdateShipperSchema = z.object({
   // id & relasi (lookup/status) = varchar UUID, bukan angka.
   id: z.string().optional(),
-  statusrelasi: z.string().nullable().optional(),
-  statusrelasi_text: z.string().nullable().optional(),
-  relasi_id: z.string().nullable().optional(),
-  relasi_id_text: z.string().nullable().optional(),
   nama: z
     .string()
     .trim()
@@ -37,24 +33,12 @@ export const UpdateShipperSchema = z.object({
     .max(250, { message: 'ALAMAT MAKSIMAL 250 KARAKTER' })
     .nullable()
     .optional(),
-  coa: z
-    .string()
-    .trim()
-    .max(100, { message: 'COA MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coapiutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAPIUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
-  coahutang: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAHUTANG MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+  coa: z.string().nullable().optional(),
+  coa_text: z.string().nullable().optional(),
+  coapiutang: z.string().nullable().optional(),
+  coapiutang_text: z.string().nullable().optional(),
+  coahutang: z.string().nullable().optional(),
+  coahutang_text: z.string().nullable().optional(),
   kota: z
     .string()
     .trim()
@@ -103,12 +87,8 @@ export const UpdateShipperSchema = z.object({
     .max(30, { message: 'NPWP MAKSIMAL 30 KARAKTER' })
     .nullable()
     .optional(),
-  coagiro: z
-    .string()
-    .trim()
-    .max(100, { message: 'COAGIRO MAKSIMAL 100 KARAKTER' })
-    .nullable()
-    .optional(),
+  coagiro: z.string().nullable().optional(),
+  coagiro_text: z.string().nullable().optional(),
   ppn: zodNumberField('PPN', { required: false }),
   titipke: z
     .string()

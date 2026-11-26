@@ -147,6 +147,7 @@ export class PenerimaanemklheaderController {
       return result;
     } catch (error) {
       trx.rollback();
+      if (error instanceof HttpException) throw error;
       console.error('Error deleting penerimaanemklheader:', error);
       throw new Error(`Error deleting penerimaanemklheader: ${error.message}`);
     }

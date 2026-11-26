@@ -1071,16 +1071,18 @@ export class PengeluaranheaderService implements OnModuleInit {
 
   async delete(id: string, trx: any, modifiedby: string) {
     try {
-      const deletedData = await this.utilsService.lockAndDestroy(
-        id,
-        this.tableName,
-        'id',
-        trx,
-      );
+      // Detail dulu: FK pengeluarandetail -> header menolak header yang masih
+      // punya detail.
       const deletedDataDetail = await this.utilsService.lockAndDestroy(
         id,
         'pengeluarandetail',
         'pengeluaran_id',
+        trx,
+      );
+      const deletedData = await this.utilsService.lockAndDestroy(
+        id,
+        this.tableName,
+        'id',
         trx,
       );
       await this.statuspendukungService.remove(id, modifiedby, trx);

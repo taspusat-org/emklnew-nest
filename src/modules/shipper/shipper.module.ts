@@ -7,6 +7,7 @@ import { AuthModule } from '../auth/auth.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
 import { RunningNumberModule } from '../running-number/running-number.module';
 import { ReportModule } from 'src/common/report/report.module';
+import { RelasiModule } from '../relasi/relasi.module';
 @Module({
   imports: [
     UtilsModule,
@@ -14,6 +15,7 @@ import { ReportModule } from 'src/common/report/report.module';
     AuthModule,
     LogtrailModule,
     RunningNumberModule,
+    RelasiModule, // Menyediakan lookup relasi/status shipper (untuk validasi relasi_id/statusrelasi).
     // Menyediakan ExportJobService (export Excel background + socket progres).
     ReportModule,
   ],

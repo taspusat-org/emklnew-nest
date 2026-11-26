@@ -1,25 +1,27 @@
 import { Module } from '@nestjs/common';
 import { SupplierService } from './supplier.service';
 import { SupplierController } from './supplier.controller';
-import { RedisModule } from 'src/common/redis/redis.module';
 import { UtilsModule } from 'src/utils/utils.module';
+import { RedisModule } from 'src/common/redis/redis.module';
 import { AuthModule } from '../auth/auth.module';
 import { LogtrailModule } from 'src/common/logtrail/logtrail.module';
-import { GlobalModule } from '../global/global.module';
-import { LocksModule } from '../locks/locks.module';
+import { RunningNumberModule } from '../running-number/running-number.module';
+import { ReportModule } from 'src/common/report/report.module';
 import { RelasiModule } from '../relasi/relasi.module';
-
 @Module({
-  controllers: [SupplierController],
-  providers: [SupplierService],
   imports: [
-    RedisModule,
     UtilsModule,
+    RedisModule,
     AuthModule,
     LogtrailModule,
-    GlobalModule,
-    LocksModule,
+    RunningNumberModule,
+    // Menyediakan ExportJobService (export Excel background + socket progres).
+    ReportModule,
+    // RelasiService: service ini membuat/mengubah/menghapus baris relasi-nya.
     RelasiModule,
   ],
+  controllers: [SupplierController],
+  providers: [SupplierService],
+  exports: [SupplierService],
 })
 export class SupplierModule {}
